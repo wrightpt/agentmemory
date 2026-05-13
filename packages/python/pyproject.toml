@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentmemory"
+version = "0.1.0"
+description = "Thin Python REST client for the agentmemory daemon."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Rohit Ghumare", email = "ghumare64@gmail.com" },
+]
+keywords = [
+    "ai",
+    "agent",
+    "memory",
+    "persistent",
+    "iii-engine",
+    "rest-client",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/rohitg00/agentmemory"
+Source = "https://github.com/rohitg00/agentmemory"
+Issues = "https://github.com/rohitg00/agentmemory/issues"
+Changelog = "https://github.com/rohitg00/agentmemory/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["agentmemory"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "agentmemory",
+    "tests",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

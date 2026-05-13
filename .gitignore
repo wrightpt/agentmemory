@@ -20,3 +20,11 @@ package-lock.json
 pnpm-lock.yaml
 yarn.lock
 integrations/hermes/__pycache__/
+
+# Python build + cache artifacts (packages/python)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+packages/python/dist/
+packages/python/build/

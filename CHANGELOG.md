@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **`agentmemory-py` — thin Python REST client for the daemon at `:3111`** ([#342](https://github.com/rohitg00/agentmemory/issues/342)). New package at `packages/python/` exposing sync `Client` and async `AsyncClient` with identical surfaces: `remember`, `smart_search`, `memories`, `memory(id)`, `forget`, `semantic`, `procedural`, `relations`, `health`, plus a `request()` escape hatch for endpoints not yet wrapped. Responses are `TypedDict`-shaped (no `pydantic` dep); the only runtime dependency is `httpx`. The plaintext-bearer guard from #315 is ported byte-for-byte: warn-once on stderr when a bearer would cross plaintext HTTP to a non-loopback host, raise `AuthError` instead if `AGENTMEMORY_REQUIRE_HTTPS=1`. Loopback hosts (`localhost` / `127.0.0.1` / `::1`) and `https://` targets stay silent. Build backend is `hatchling`. Tests: 31 passing via `respx`-mocked `httpx`, plus one opt-in live test gated by `AGENTMEMORY_LIVE=1`. PyPI release via trusted publisher on tag `python-v*` (new `.github/workflows/publish-python.yml`).
+
 ## [0.9.12] — 2026-05-13
 
 Four landed PRs since v0.9.11 — one type-correctness fix, one search-quality fix (BM25 unicode + vector-index live-write), one viewer hardening (CSP-clean fonts + load-error surface), and one integrations security hardening (bearer token over plaintext HTTP).

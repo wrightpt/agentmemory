@@ -1,0 +1,51 @@
+name: Publish agentmemory (Python) to PyPI
+
+# Mirrors .github/workflows/publish.yml (Node) but for the Python REST
+# client at packages/python. Triggered by pushing a tag of the form
+# python-v0.1.0 — the leading prefix keeps it separate from the Node
+# package's release tags. Uses PyPI trusted publishers (OIDC); no API
+# token needed.
+
+on:
+  push:
+    tags:
+      - "python-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/python
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build hatchling pytest pytest-asyncio respx httpx
+
+      - name: Run tests
+        run: python -m pytest tests -q
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Inspect dist
+        run: ls -lah dist
+
+      - name: Publish to PyPI via trusted publisher
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/python/dist
+          skip-existing: true
