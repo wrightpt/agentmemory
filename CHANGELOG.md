@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.26] — 2026-06-03
+
+Hotfix on top of v0.9.25. The first-run boot crashed for users without a persisted index because the load path didn't handle `undefined` returns from iii-state adapters.
+
+### Fixed
+
+- **First boot crash: `TypeError: Cannot read properties of undefined (reading 'v')`** ([#797](https://github.com/rohitg00/agentmemory/issues/797)). The sharded index load path (`loadShardedData`) checked `manifest.value !== null` before forwarding to `loadManifestData`. Some iii-state adapters return `undefined` (not `null`) for a missing key, so `undefined !== null` was true and `loadManifestData(undefined, ...)` immediately threw on `manifest.v`. Now treats both `null` and `undefined` (plus non-object values) as "no manifest" and falls through to the legacy load path. Self-healing: the next debounced save rebuilds a fresh manifest, so the crash was already cosmetic for ongoing operation — but it scared every fresh upgrader. Tests cover both undefined and wrong-shape manifest rows.
+
+[0.9.26]: https://github.com/rohitg00/agentmemory/compare/v0.9.25...v0.9.26
+
 ## [0.9.25] — 2026-06-03
 
 Bug-fix wave closing every breaking regression reported against 0.9.24, plus a feature lane (graph pagination + smart-search followup diagnostic + obsidian-export hardening + sharded index persistence). Eleven issues closed. No breaking changes; drop-in upgrade.
