@@ -99,6 +99,7 @@ interface Validated {
   type?: string;
   concepts?: string[];
   files?: string[];
+  project?: string;
   query?: string;
   limit?: number;
   format?: string;
@@ -122,6 +123,10 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
       v.type = (args["type"] as string) || "fact";
       v.concepts = normalizeList(args["concepts"]);
       v.files = normalizeList(args["files"]);
+      const project = args["project"];
+      if (typeof project === "string" && project.trim()) {
+        v.project = project.trim();
+      }
       return v;
     }
     case "memory_recall":
@@ -180,6 +185,7 @@ async function handleProxy(
           type: v.type,
           concepts: v.concepts,
           files: v.files,
+          ...(v.project !== undefined && { project: v.project }),
         }),
       });
       return textResponse(result);
@@ -252,6 +258,7 @@ async function handleLocal(
         content: v.content,
         concepts: v.concepts,
         files: v.files,
+        ...(v.project !== undefined && { project: v.project }),
         createdAt: isoNow,
         updatedAt: isoNow,
         strength: 7,
