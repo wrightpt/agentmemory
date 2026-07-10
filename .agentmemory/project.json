@@ -1,0 +1,12 @@
+{
+  "project_id": "agentmemory",
+  "scope_type": "repo",
+  "repo_root": "/home/cp/repos/agent-infra/agentmemory",
+  "memory_policy": "default-isolated",
+  "related_projects": [
+    "workstation",
+    "agent-workspace-config",
+    "agent-skills",
+    "repo-brain"
+  ]
+}
