@@ -281,6 +281,7 @@ export function registerApiTriggers(
           service: "agentmemory",
           version: VERSION,
           buildId: process.env["AGENTMEMORY_BUILD_ID"] || null,
+          sourceRevision: process.env["AGENTMEMORY_SOURCE_REVISION"] || null,
           toolProfile: process.env["AGENTMEMORY_TOOLS"] || "all",
           llmToolsDisabled: process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true",
           health: health || null,
