@@ -208,6 +208,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       parentId?: string;
       tags?: string[];
       limit?: number;
+      offset?: number;
     }) => {
       let actions = await kv.list<Action>(KV.actions);
 
@@ -227,12 +228,30 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       actions.sort(
-        (a, b) =>
-          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+        (a, b) => {
+          const updatedAtDifference =
+            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+          return updatedAtDifference || a.id.localeCompare(b.id);
+        },
       );
 
-      const limit = data.limit || 50;
-      return { success: true, actions: actions.slice(0, limit) };
+      const total = actions.length;
+      const limit =
+        Number.isInteger(data.limit) && data.limit! > 0
+          ? Math.min(data.limit!, 500)
+          : 50;
+      const offset =
+        Number.isInteger(data.offset) && data.offset! >= 0 ? data.offset! : 0;
+      const page = actions.slice(offset, offset + limit);
+
+      return {
+        success: true,
+        actions: page,
+        total,
+        limit,
+        offset,
+        hasMore: offset + page.length < total,
+      };
     },
   );
 

@@ -151,6 +151,13 @@ function parseOptionalPositiveInt(value: unknown): number | undefined | null {
   return parsed;
 }
 
+function parseOptionalNonNegativeInt(value: unknown): number | undefined | null {
+  const parsed = parseOptionalFiniteNumber(value);
+  if (parsed === undefined || parsed === null) return parsed;
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+}
+
 export function registerApiTriggers(
   sdk: ISdk,
   kv: StateKV,
@@ -2371,10 +2378,26 @@ export function registerApiTriggers(
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
+      const limit = parseOptionalPositiveInt(req.query_params?.["limit"]);
+      if (limit === null) {
+        return {
+          status_code: 400,
+          body: { error: "limit must be a positive integer" },
+        };
+      }
+      const offset = parseOptionalNonNegativeInt(req.query_params?.["offset"]);
+      if (offset === null) {
+        return {
+          status_code: 400,
+          body: { error: "offset must be a non-negative integer" },
+        };
+      }
       const result = await sdk.trigger({ function_id: "mem::action-list", payload: {
         status: req.query_params?.["status"],
         project: req.query_params?.["project"],
         parentId: req.query_params?.["parentId"],
+        limit,
+        offset,
       } });
       return { status_code: 200, body: result };
     },

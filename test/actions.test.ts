@@ -386,10 +386,62 @@ describe("Actions Functions", () => {
     it("respects limit", async () => {
       const result = (await sdk.trigger("mem::action-list", {
         limit: 2,
-      })) as { success: boolean; actions: Action[] };
+      })) as {
+        success: boolean;
+        actions: Action[];
+        total: number;
+        limit: number;
+        offset: number;
+        hasMore: boolean;
+      };
 
       expect(result.success).toBe(true);
       expect(result.actions.length).toBe(2);
+      expect(result.total).toBe(3);
+      expect(result.limit).toBe(2);
+      expect(result.offset).toBe(0);
+      expect(result.hasMore).toBe(true);
+    });
+
+    it("returns complete, non-overlapping pages beyond the legacy 50-action cap", async () => {
+      for (let index = 0; index < 72; index += 1) {
+        await sdk.trigger("mem::action-create", {
+          title: `Bulk task ${index}`,
+        });
+      }
+
+      const first = (await sdk.trigger("mem::action-list", {
+        limit: 50,
+      })) as {
+        actions: Action[];
+        total: number;
+        hasMore: boolean;
+      };
+      const second = (await sdk.trigger("mem::action-list", {
+        limit: 50,
+        offset: 50,
+      })) as {
+        actions: Action[];
+        total: number;
+        hasMore: boolean;
+      };
+
+      expect(first.total).toBe(75);
+      expect(second.total).toBe(75);
+      expect(first.actions).toHaveLength(50);
+      expect(second.actions).toHaveLength(25);
+      expect(first.hasMore).toBe(true);
+      expect(second.hasMore).toBe(false);
+      expect(new Set([...first.actions, ...second.actions].map((a) => a.id)).size).toBe(75);
+    });
+
+    it("clamps oversized pages to 500 actions", async () => {
+      const result = (await sdk.trigger("mem::action-list", {
+        limit: 100_000,
+      })) as { limit: number; offset: number };
+
+      expect(result.limit).toBe(500);
+      expect(result.offset).toBe(0);
     });
   });
 
