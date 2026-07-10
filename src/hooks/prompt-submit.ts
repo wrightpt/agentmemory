@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProjectContext } from "./_project.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -32,6 +32,9 @@ async function main() {
   if (isSdkChildContext(data)) return;
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
+  const context = resolveProjectContext(data.cwd as string | undefined);
+  const prompt = data.prompt ?? data.userPrompt;
+  const promptData = promptCapture(prompt);
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
@@ -39,14 +42,24 @@ async function main() {
     body: JSON.stringify({
       hookType: "prompt_submit",
       sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...context,
       timestamp: new Date().toISOString(),
-      data: { prompt: data.prompt ?? data.userPrompt },
+      data: promptData,
     }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});
   setTimeout(() => process.exit(0), 500).unref();
+}
+
+function promptCapture(value: unknown): Record<string, unknown> {
+  const text = typeof value === "string" ? value : "";
+  const mode = (process.env["AGENTMEMORY_CAPTURE_PROMPTS"] || "full").toLowerCase();
+  if (mode === "off" || mode === "metadata") {
+    return { prompt_length: text.length, prompt_capture: mode };
+  }
+  const max = Number(process.env["AGENTMEMORY_MAX_PROMPT_CAPTURE_CHARS"] || "4000");
+  const limit = Number.isFinite(max) && max >= 0 ? Math.min(Math.floor(max), 16_000) : 4000;
+  return { prompt: text.slice(0, limit) };
 }
 
 main();

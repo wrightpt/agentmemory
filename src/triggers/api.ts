@@ -13,6 +13,7 @@ import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
+import { selectSessionPage } from "../functions/session-list.js";
 import {
   isGraphExtractionEnabled,
   isConsolidationEnabled,
@@ -114,6 +115,21 @@ function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function sessionContextFields(body: Record<string, unknown>): Partial<HookPayload> {
+  const result: Partial<HookPayload> = {};
+  for (const field of [
+    "repoRoot",
+    "scopeType",
+    "worktree",
+    "branch",
+    "taskSlug",
+  ] as const) {
+    const value = asNonEmptyString(body[field]);
+    if (value) result[field] = value.slice(0, 4096);
+  }
+  return result;
 }
 
 function parseOptionalFiniteNumber(value: unknown): number | undefined | null {
@@ -264,6 +280,9 @@ export function registerApiTriggers(
           status,
           service: "agentmemory",
           version: VERSION,
+          buildId: process.env["AGENTMEMORY_BUILD_ID"] || null,
+          toolProfile: process.env["AGENTMEMORY_TOOLS"] || "all",
+          llmToolsDisabled: process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true",
           health: health || null,
           functionMetrics,
           circuitBreaker,
@@ -307,6 +326,7 @@ export function registerApiTriggers(
         cwd,
         timestamp,
         data: body.data,
+        ...sessionContextFields(body),
       };
       const result = await sdk.trigger({ function_id: "mem::observe", payload });
       return { status_code: 201, body: result };
@@ -559,7 +579,16 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::session::start",
     async (
-      req: ApiRequest<{ sessionId: string; project: string; cwd: string }>,
+      req: ApiRequest<{
+        sessionId: string;
+        project: string;
+        cwd: string;
+        repoRoot?: string;
+        scopeType?: string;
+        worktree?: string;
+        branch?: string;
+        taskSlug?: string;
+      }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
       const sessionId = asNonEmptyString(body.sessionId);
@@ -582,11 +611,14 @@ export function registerApiTriggers(
           ? body.agentId.trim().slice(0, 128)
           : undefined;
       const agentId = requestAgentId ?? getAgentId();
+      const startedAt = new Date().toISOString();
       const session: Session = {
         id: sessionId,
         project,
         cwd,
-        startedAt: new Date().toISOString(),
+        ...sessionContextFields(body),
+        startedAt,
+        updatedAt: startedAt,
         status: "active",
         observationCount: 0,
         ...(title ? { summary: title.slice(0, 200) } : {}),
@@ -609,6 +641,45 @@ export function registerApiTriggers(
     function_id: "api::session::start",
     config: {
       api_path: "/agentmemory/session/start",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction("api::session::context",
+    async (req: ApiRequest): Promise<Response> => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const sessionId = asNonEmptyString(body.sessionId);
+      if (!sessionId) {
+        return { status_code: 400, body: { error: "sessionId is required" } };
+      }
+      const context = sessionContextFields(body);
+      const project = asNonEmptyString(body.project);
+      const cwd = asNonEmptyString(body.cwd);
+      const payload = {
+        sessionId,
+        ...(project ? { project: project.slice(0, 512) } : {}),
+        ...(cwd ? { cwd: cwd.slice(0, 4096) } : {}),
+        ...context,
+      };
+      if (Object.keys(payload).length === 1) {
+        return { status_code: 400, body: { error: "at least one context field is required" } };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::session-context-update",
+        payload,
+      }) as { success?: boolean; error?: string };
+      if (!result.success && result.error === "session not found") {
+        return { status_code: 404, body: result };
+      }
+      return { status_code: result.success ? 200 : 400, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::session::context",
+    config: {
+      api_path: "/agentmemory/session/context",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },
@@ -655,6 +726,15 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::summarize", 
     async (req: ApiRequest<{ sessionId: string }>): Promise<Response> => {
+      if (detectLlmProviderKind() === "noop") {
+        return {
+          status_code: 503,
+          body: {
+            error: "summarization requires a configured LLM provider",
+            disabled: true,
+          },
+        };
+      }
       const sessionId = asNonEmptyString((req.body as Record<string, unknown>)?.sessionId);
       if (!sessionId) {
         return { status_code: 400, body: { error: "sessionId is required" } };
@@ -820,18 +900,41 @@ export function registerApiTriggers(
         ? undefined
         : explicitAgentId ??
           (isAgentScopeIsolated() ? getAgentId() : undefined);
-      const filtered = filterAgentId
+      const agentSessions = filterAgentId
         ? sessions.filter((s) => s.agentId === filterAgentId)
         : sessions;
-      const summaries = await Promise.all(
-        filtered.map((s) =>
-          kv.get<SessionSummary>(KV.summaries, s.id).catch(() => null),
-        ),
-      );
-      const withSummary = filtered.map((s, i) =>
-        summaries[i] ? { ...s, summary: summaries[i] } : s,
-      );
-      return { status_code: 200, body: { sessions: withSummary } };
+      const rawLimit = parseOptionalInt(req.query_params?.["limit"]);
+      if (rawLimit !== undefined && rawLimit < 1) {
+        return { status_code: 400, body: { error: "limit must be a positive integer" } };
+      }
+      try {
+        const page = selectSessionPage(agentSessions, {
+          limit: rawLimit,
+          cursor: asNonEmptyString(req.query_params?.["cursor"]) ?? undefined,
+          project: asNonEmptyString(req.query_params?.["project"]) ?? undefined,
+          status: asNonEmptyString(req.query_params?.["status"]) as Session["status"] | undefined,
+          since: asNonEmptyString(req.query_params?.["since"]) ?? undefined,
+          format: (asNonEmptyString(req.query_params?.["format"]) ?? "compact") as "compact" | "full",
+          includePrompt: req.query_params?.["includePrompt"] === "true",
+          includeMalformed: req.query_params?.["includeMalformed"] === "true",
+        });
+        if (req.query_params?.["includeSummary"] === "true") {
+          const summaries = await Promise.all(
+            page.sessions.map((session) =>
+              kv.get<SessionSummary>(KV.summaries, session.id).catch(() => null),
+            ),
+          );
+          page.sessions = page.sessions.map((session, index) =>
+            summaries[index] ? { ...session, summary: summaries[index] } : session,
+          );
+        }
+        return { status_code: 200, body: page };
+      } catch (error) {
+        return {
+          status_code: 400,
+          body: { error: error instanceof Error ? error.message : String(error) },
+        };
+      }
     },
   );
   sdk.registerTrigger({

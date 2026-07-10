@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProjectContext } from "./_project.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -34,6 +34,9 @@ async function main() {
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
   const toolName = data.tool_name ?? data.toolName;
   const toolInput = data.tool_input ?? data.toolArgs;
+  if (shouldSkipTool(toolName)) return;
+  const context = resolveProjectContext(data.cwd as string | undefined);
+  const maxChars = maxCaptureChars();
 
   const { imageData, cleanOutput } = extractImageData(toolOutput(data));
 
@@ -43,19 +46,39 @@ async function main() {
     body: JSON.stringify({
       hookType: "post_tool_use",
       sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...context,
       timestamp: new Date().toISOString(),
       data: {
         tool_name: toolName,
-        tool_input: toolInput,
-        tool_output: truncate(cleanOutput, 8000),
+        tool_input: truncate(toolInput, maxChars),
+        tool_output: truncate(cleanOutput, maxChars),
         ...(imageData ? { image_data: imageData } : {}),
       },
     }),
     signal: AbortSignal.timeout(3000),
   }).catch(() => {});
   setTimeout(() => process.exit(0), 500).unref();
+}
+
+function shouldSkipTool(value: unknown): boolean {
+  const name = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (!name) return false;
+  if (name.startsWith("mcp__agentmemory__") || name.startsWith("memory_")) {
+    return true;
+  }
+  const configured = (process.env["AGENTMEMORY_SKIP_TOOLS"] || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return configured.some((pattern) =>
+    pattern.endsWith("*") ? name.startsWith(pattern.slice(0, -1)) : name === pattern,
+  );
+}
+
+function maxCaptureChars(): number {
+  const value = Number(process.env["AGENTMEMORY_MAX_TOOL_CAPTURE_CHARS"] || "8000");
+  if (!Number.isFinite(value) || value < 0) return 8000;
+  return Math.min(Math.floor(value), 32_000);
 }
 
 function toolOutput(data: Record<string, unknown>): unknown {

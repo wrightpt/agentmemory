@@ -115,8 +115,20 @@ export const CORE_TOOLS: McpToolDef[] = [
   {
     name: "memory_sessions",
     description:
-      "List recent sessions with their status and observation counts.",
-    inputSchema: { type: "object", properties: {} },
+      "List recent sessions with bounded pagination. Compact output omits prompts by default.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number", description: "Page size (default 20, maximum 500)" },
+        cursor: { type: "string", description: "Opaque nextCursor from the previous page" },
+        project: { type: "string", description: "Canonical project id or a recorded alias" },
+        status: { type: "string", description: "active, completed, or abandoned" },
+        since: { type: "string", description: "Only sessions updated at or after this ISO timestamp" },
+        format: { type: "string", description: "compact (default) or full" },
+        includePrompt: { type: "boolean", description: "Include firstPrompt in full output (default false)" },
+        includeMalformed: { type: "boolean", description: "Include malformed legacy session rows with issue labels (default false)" },
+      },
+    },
   },
   {
     name: "memory_smart_search",
@@ -928,11 +940,29 @@ export const V010_SLOTS_TOOLS: McpToolDef[] = [
 export const ESSENTIAL_TOOLS = new Set([
   "memory_save",
   "memory_recall",
-  "memory_consolidate",
   "memory_smart_search",
   "memory_sessions",
   "memory_diagnose",
   "memory_lesson_save",
+  "memory_lesson_recall",
+]);
+
+export const WORKSTATION_TOOLS = new Set([
+  ...ESSENTIAL_TOOLS,
+  "memory_file_history",
+  "memory_action_create",
+  "memory_action_update",
+  "memory_frontier",
+  "memory_next",
+  "memory_lease",
+  "memory_signal_send",
+  "memory_signal_read",
+]);
+
+export const LLM_BACKED_TOOLS = new Set([
+  "memory_compress_file",
+  "memory_consolidate",
+  "memory_crystallize",
   "memory_reflect",
 ]);
 
@@ -949,13 +979,36 @@ export function getAllTools(): McpToolDef[] {
   ];
 }
 
-// default switched from "core" (8 essential tools) to "all"
-// (full 53-tool surface). README and plugin manifests have always
-// advertised 53 tools "in proxy mode"; the old default left OpenCode /
-// Claude Code users seeing 8 with no indication the other tools existed.
-// Users who want the lean essentials can still set AGENTMEMORY_TOOLS=core.
 export function getVisibleTools(): McpToolDef[] {
   const mode = process.env["AGENTMEMORY_TOOLS"] || "all";
-  if (mode === "core") return getAllTools().filter((t) => ESSENTIAL_TOOLS.has(t.name));
-  return getAllTools();
+  const all = getAllTools();
+  let selected: McpToolDef[];
+  if (mode === "all") {
+    selected = all;
+  } else if (mode === "core") {
+    selected = all.filter((tool) => ESSENTIAL_TOOLS.has(tool.name));
+  } else if (mode === "workstation") {
+    selected = all.filter((tool) => WORKSTATION_TOOLS.has(tool.name));
+  } else {
+    const allow = new Set(
+      mode
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    selected = all.filter((tool) => allow.has(tool.name));
+    if (selected.length === 0) {
+      selected = all.filter((tool) => ESSENTIAL_TOOLS.has(tool.name));
+    }
+  }
+  const disabled = new Set(
+    (process.env["AGENTMEMORY_DISABLED_TOOLS"] || "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean),
+  );
+  const noLlm = process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true";
+  return selected.filter(
+    (tool) => !disabled.has(tool.name) && !(noLlm && LLM_BACKED_TOOLS.has(tool.name)),
+  );
 }

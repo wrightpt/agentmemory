@@ -3,18 +3,34 @@ import type { CompressedObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
-import { isGraphExtractionEnabled } from "../config.js";
+import { detectLlmProviderKind, isGraphExtractionEnabled } from "../config.js";
 import { logger } from "../logger.js";
 
 export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
     "event::session::started",
-    async (data: { sessionId: string; project: string; cwd: string }) => {
+    async (data: {
+      sessionId: string;
+      project: string;
+      cwd: string;
+      repoRoot?: string;
+      scopeType?: string;
+      worktree?: string;
+      branch?: string;
+      taskSlug?: string;
+    }) => {
+      const startedAt = new Date().toISOString();
       const session: Session = {
         id: data.sessionId,
         project: data.project,
         cwd: data.cwd,
-        startedAt: new Date().toISOString(),
+        ...(data.repoRoot ? { repoRoot: data.repoRoot } : {}),
+        ...(data.scopeType ? { scopeType: data.scopeType } : {}),
+        ...(data.worktree ? { worktree: data.worktree } : {}),
+        ...(data.branch ? { branch: data.branch } : {}),
+        ...(data.taskSlug ? { taskSlug: data.taskSlug } : {}),
+        startedAt,
+        updatedAt: startedAt,
         status: "active",
         observationCount: 0,
       };
@@ -45,7 +61,9 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   });
 
   sdk.registerFunction("event::session::stopped", async (data: { sessionId: string }) => {
-    const summary = await sdk.trigger({ function_id: "mem::summarize", payload: data });
+    const summary = detectLlmProviderKind() === "noop"
+      ? { success: true, skipped: "no_llm_provider" }
+      : await sdk.trigger({ function_id: "mem::summarize", payload: data });
     if (isReflectEnabled()) {
       try {
         sdk.trigger({

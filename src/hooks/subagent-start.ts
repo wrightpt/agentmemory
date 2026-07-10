@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProjectContext } from "./_project.js";
 
 // Inlined from ./sdk-guard so each hook bundles to a single self-contained
 // .mjs (matches the pattern used by every other hook entry in tsdown.config).
@@ -42,6 +42,7 @@ async function main() {
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
   const agentId = data.agent_id || data.agentName;
   const agentType = data.agent_type || data.agentDisplayName || data.agentName;
+  const context = resolveProjectContext(data.cwd as string | undefined);
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
@@ -49,8 +50,7 @@ async function main() {
     body: JSON.stringify({
       hookType: "subagent_start",
       sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...context,
       timestamp: new Date().toISOString(),
       data: {
         agent_id: agentId,

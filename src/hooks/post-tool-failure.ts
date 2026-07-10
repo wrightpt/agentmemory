@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProjectContext } from "./_project.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -34,8 +34,13 @@ async function main() {
 
   const sessionId = ((data.session_id || data.sessionId) as string) || "unknown";
   const toolName = data.tool_name ?? data.toolName;
+  if (typeof toolName === "string" && (
+    toolName.toLowerCase().startsWith("mcp__agentmemory__") ||
+    toolName.toLowerCase().startsWith("memory_")
+  )) return;
   const toolInput = data.tool_input ?? data.toolArgs;
   const error = data.error ?? data.errorMessage;
+  const context = resolveProjectContext(data.cwd as string | undefined);
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
@@ -43,8 +48,7 @@ async function main() {
     body: JSON.stringify({
       hookType: "post_tool_failure",
       sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...context,
       timestamp: new Date().toISOString(),
       data: {
         tool_name: toolName,

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { resolveProject } from "./_project.js";
+import { resolveProjectContext } from "./_project.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
@@ -38,6 +38,7 @@ async function main() {
     typeof data.last_assistant_message === "string"
       ? data.last_assistant_message.slice(0, 4000)
       : "";
+  const context = resolveProjectContext(data.cwd as string | undefined);
 
   fetch(`${REST_URL}/agentmemory/observe`, {
     method: "POST",
@@ -45,8 +46,7 @@ async function main() {
     body: JSON.stringify({
       hookType: "subagent_stop",
       sessionId,
-      project: resolveProject(data.cwd as string | undefined),
-      cwd: (data.cwd as string | undefined) || process.cwd(),
+      ...context,
       timestamp: new Date().toISOString(),
       data: {
         agent_id: agentId,

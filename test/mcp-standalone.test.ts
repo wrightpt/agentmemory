@@ -343,6 +343,10 @@ describe("handleToolCall", () => {
       await kv.set("mem:sessions", `ses_${i}`, {
         id: `ses_${i}`,
         project: "demo",
+        cwd: "/demo",
+        startedAt: `2026-07-0${i + 1}T00:00:00Z`,
+        status: "completed",
+        observationCount: i,
       });
     }
     const result = await handleToolCall(
@@ -352,6 +356,7 @@ describe("handleToolCall", () => {
     );
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.sessions).toHaveLength(2);
+    expect(parsed.pagination).toMatchObject({ total: 5, hasMore: true });
   });
 
   it("parseLimit clamps bad/malicious limit values to a safe range", async () => {

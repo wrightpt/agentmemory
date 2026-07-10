@@ -108,7 +108,7 @@ describe("observe implicit session create (#638)", () => {
     expect(sessionScope?.get("ses_no_project")).toBeUndefined();
   });
 
-  it("does not overwrite an existing session when one already exists", async () => {
+  it("refreshes canonical context without replacing existing session history", async () => {
     const { registerObserveFunction } = await import("../src/functions/observe.js");
     const sdk = mockSdk();
     const kv = mockKV();
@@ -128,14 +128,24 @@ describe("observe implicit session create (#638)", () => {
       sessionId: "ses_existing",
       project: "/different/project",
       cwd: "/different/cwd",
+      repoRoot: "/different/project",
+      scopeType: "repo",
+      worktree: "/different/worktree",
+      branch: "feature/context",
+      taskSlug: "context-refresh",
       hookType: "post_tool_use",
       timestamp: new Date().toISOString(),
       data: { tool_name: "Read" },
     });
 
     const session = kv.store.get("mem:sessions")!.get("ses_existing") as Record<string, unknown>;
-    // Original project + firstPrompt preserved
-    expect(session.project).toBe("/orig/project");
+    expect(session.project).toBe("/different/project");
+    expect(session.cwd).toBe("/different/cwd");
+    expect(session.repoRoot).toBe("/different/project");
+    expect(session.worktree).toBe("/different/worktree");
+    expect(session.branch).toBe("feature/context");
+    expect(session.taskSlug).toBe("context-refresh");
+    expect(session.projectAliases).toEqual(["/orig/project"]);
     expect(session.firstPrompt).toBe("original first prompt");
     // Counter bumped, updatedAt refreshed
     expect(session.observationCount).toBe(8);

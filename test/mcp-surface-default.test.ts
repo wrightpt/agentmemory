@@ -3,11 +3,12 @@ import { readFileSync } from "node:fs";
 import {
   getAllTools,
   getVisibleTools,
+  WORKSTATION_TOOLS,
 } from "../src/mcp/tools-registry.js";
 
 // plugin manifests and README advertise 51 MCP tools. The old
 // default was AGENTMEMORY_TOOLS=core which silently capped the surface
-// at 8 essentials with no indication the other 43 existed. Default
+// at a lean subset with no indication the other tools existed. Default
 // flipped to "all"; the lean set is still accessible via
 // AGENTMEMORY_TOOLS=core.
 describe("MCP tool surface default (#553)", () => {
@@ -32,22 +33,41 @@ describe("MCP tool surface default (#553)", () => {
     expect(getVisibleTools().length).toBe(getAllTools().length);
   });
 
-  it("AGENTMEMORY_TOOLS=core returns the 8 essential tools", () => {
+  it("AGENTMEMORY_TOOLS=core returns the non-LLM essentials", () => {
     process.env["AGENTMEMORY_TOOLS"] = "core";
     const names = new Set(getVisibleTools().map((t) => t.name));
-    expect(names.size).toBe(8);
+    expect(names.size).toBe(7);
     for (const t of [
       "memory_save",
       "memory_recall",
-      "memory_consolidate",
       "memory_smart_search",
       "memory_sessions",
       "memory_diagnose",
       "memory_lesson_save",
-      "memory_reflect",
+      "memory_lesson_recall",
     ]) {
       expect(names.has(t)).toBe(true);
     }
+  });
+
+  it("AGENTMEMORY_TOOLS=workstation exposes coordination without dead LLM tools", () => {
+    process.env["AGENTMEMORY_TOOLS"] = "workstation";
+    const names = new Set(getVisibleTools().map((tool) => tool.name));
+    expect(names).toEqual(WORKSTATION_TOOLS);
+    expect(names.has("memory_action_create")).toBe(true);
+    expect(names.has("memory_lease")).toBe(true);
+    expect(names.has("memory_signal_send")).toBe(true);
+    expect(names.has("memory_consolidate")).toBe(false);
+    expect(names.has("memory_reflect")).toBe(false);
+  });
+
+  it("supports custom allowlists and explicit disabled tools", () => {
+    process.env["AGENTMEMORY_TOOLS"] = "memory_recall,memory_sessions,memory_reflect";
+    process.env["AGENTMEMORY_DISABLED_TOOLS"] = "memory_sessions";
+    process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] = "true";
+    expect(getVisibleTools().map((tool) => tool.name)).toEqual(["memory_recall"]);
+    delete process.env["AGENTMEMORY_DISABLED_TOOLS"];
+    delete process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"];
   });
 
   it("plugin .mcp.json provides default env interpolation so CC parse never fails (#510)", () => {

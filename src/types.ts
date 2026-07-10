@@ -2,7 +2,14 @@ export interface Session {
   id: string;
   project: string;
   cwd: string;
+  repoRoot?: string;
+  scopeType?: string;
+  worktree?: string;
+  branch?: string;
+  taskSlug?: string;
+  projectAliases?: string[];
   startedAt: string;
+  updatedAt?: string;
   endedAt?: string;
   status: "active" | "completed" | "abandoned";
   observationCount: number;
@@ -135,6 +142,11 @@ export interface HookPayload {
   sessionId: string;
   project: string;
   cwd: string;
+  repoRoot?: string;
+  scopeType?: string;
+  worktree?: string;
+  branch?: string;
+  taskSlug?: string;
   timestamp: string;
   data: unknown;
 }
@@ -563,6 +575,7 @@ export interface AuditEntry {
   timestamp: string;
   operation:
     | "observe"
+    | "session_context_update"
     | "compress"
     | "remember"
     | "forget"
