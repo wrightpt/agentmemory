@@ -38,6 +38,7 @@ function contextView(session: Session) {
     taskSlug: session.taskSlug,
     projectAliases: session.projectAliases,
     updatedAt: session.updatedAt,
+    contextUpdatedAt: session.contextUpdatedAt,
   };
 }
 
@@ -73,8 +74,11 @@ export function registerSessionContextFunction(sdk: ISdk, kv: StateKV): void {
         return { success: true, changed: [], context: contextView(session) };
       }
 
-      const updatedAt = new Date().toISOString();
-      updates.push({ type: "set", path: "updatedAt", value: updatedAt });
+      updates.push({
+        type: "set",
+        path: "contextUpdatedAt",
+        value: new Date().toISOString(),
+      });
       await kv.update(KV.sessions, data.sessionId, updates);
       await recordAudit(
         kv,

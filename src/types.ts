@@ -10,6 +10,7 @@ export interface Session {
   projectAliases?: string[];
   startedAt: string;
   updatedAt?: string;
+  contextUpdatedAt?: string;
   endedAt?: string;
   status: "active" | "completed" | "abandoned";
   observationCount: number;

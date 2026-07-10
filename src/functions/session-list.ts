@@ -73,6 +73,7 @@ function compactSession(session: Session): SessionPage["sessions"][number] {
     observationCount: session.observationCount,
     startedAt: session.startedAt,
     updatedAt: session.updatedAt,
+    contextUpdatedAt: session.contextUpdatedAt,
     endedAt: session.endedAt,
     agentId: session.agentId,
     repoRoot: session.repoRoot,

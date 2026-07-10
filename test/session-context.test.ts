@@ -46,6 +46,7 @@ describe("session context updates", () => {
       project: "/legacy/path",
       cwd: "/legacy/path",
       startedAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-02T00:00:00Z",
       status: "active",
       observationCount: 2,
     });
@@ -73,7 +74,9 @@ describe("session context updates", () => {
       branch: "feat/context",
       taskSlug: "context-v1",
       projectAliases: ["/legacy/path"],
+      updatedAt: "2026-01-02T00:00:00Z",
     });
+    expect(result.context.contextUpdatedAt).toEqual(expect.any(String));
     expect((await kv.list("mem:audit"))).toHaveLength(1);
   });
 
