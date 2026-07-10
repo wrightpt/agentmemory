@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveProject } from "../src/hooks/_project.js";
+import { execFileSync } from "node:child_process";
+import { resolveProject, resolveProjectContext } from "../src/hooks/_project.js";
 
 describe("resolveProject — hook project basename resolver", () => {
   const originalEnv = process.env.AGENTMEMORY_PROJECT_NAME;
@@ -62,5 +63,41 @@ describe("resolveProject — hook project basename resolver", () => {
   it("defaults to process.cwd() when cwd argument is empty", () => {
     expect(resolveProject("")).toBe("agentmemory");
     expect(resolveProject("   ")).toBe("agentmemory");
+  });
+
+  it("prefers canonical snake_case project scope over worktree and remote names", () => {
+    const dir = mkdtempSync(join(tmpdir(), "amem-scope-"));
+    try {
+      mkdirSync(join(dir, ".agentmemory"));
+      writeFileSync(
+        join(dir, ".agentmemory", "project.json"),
+        JSON.stringify({
+          project_id: "canonical-project",
+          repo_root: "/canonical/root",
+          scope_type: "repo",
+        }),
+      );
+      const nested = join(dir, "nested");
+      mkdirSync(nested);
+      expect(resolveProjectContext(nested)).toMatchObject({
+        project: "canonical-project",
+        repoRoot: "/canonical/root",
+        scopeType: "repo",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the remote repository name instead of a worktree directory name", () => {
+    const dir = mkdtempSync(join(tmpdir(), "amem-worktree-name-"));
+    try {
+      execFileSync("git", ["init", "-q", dir]);
+      execFileSync("git", ["-C", dir, "remote", "add", "origin", "git@github.com:owner/stable-project.git"]);
+      expect(resolveProject(dir)).toBe("stable-project");
+      expect(resolveProjectContext(dir).worktree).toBe(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

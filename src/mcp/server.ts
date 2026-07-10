@@ -11,6 +11,7 @@ import type {
 import { getVisibleTools } from "./tools-registry.js";
 import { timingSafeCompare } from "../auth.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { selectSessionPage } from "../functions/session-list.js";
 
 type McpResponse = {
   status_code: number;
@@ -253,12 +254,22 @@ export function registerMcpEndpoints(
           }
 
           case "memory_sessions": {
-            const sessions = await kv.list(KV.sessions);
+            const sessions = await kv.list<Session>(KV.sessions);
+            const page = selectSessionPage(sessions, {
+              limit: asNumber(args.limit, 20),
+              cursor: asNonEmptyString(args.cursor),
+              project: asNonEmptyString(args.project),
+              status: asNonEmptyString(args.status) as Session["status"] | undefined,
+              since: asNonEmptyString(args.since),
+              format: (asNonEmptyString(args.format) ?? "compact") as "compact" | "full",
+              includePrompt: args.includePrompt === true,
+              includeMalformed: args.includeMalformed === true,
+            });
             return {
               status_code: 200,
               body: {
                 content: [
-                  { type: "text", text: JSON.stringify({ sessions }, null, 2) },
+                  { type: "text", text: JSON.stringify(page, null, 2) },
                 ],
               },
             };

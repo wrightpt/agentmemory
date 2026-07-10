@@ -1345,7 +1345,7 @@
       try {
         var results = await Promise.all([
           apiGet('health'),
-          apiGet('sessions'),
+          apiGet('sessions?limit=500&format=compact'),
           apiGet('memories?latest=true&limit=500'),
           apiGet('graph/stats'),
           apiGet('audit?limit=5'),
@@ -2534,7 +2534,7 @@
     async function loadTimeline() {
       var el = document.getElementById('view-timeline');
       el.innerHTML = '<div class="loading">Loading timeline...</div>';
-      var sessResult = await apiGet('sessions');
+      var sessResult = await apiGet('sessions?limit=500&format=compact');
       var sessions = (sessResult && sessResult.sessions) || [];
       state.timeline.loaded = true;
 
@@ -2761,7 +2761,7 @@
       var el = document.getElementById('view-activity');
       el.innerHTML = '<div class="loading">Loading activity...</div>';
       var results = await Promise.all([
-        apiGet('sessions'),
+        apiGet('sessions?limit=500&format=compact'),
         apiGet('audit?limit=200')
       ]);
       var sessions = (results[0] && results[0].sessions) || [];
@@ -2897,7 +2897,7 @@
     async function loadSessions() {
       var el = document.getElementById('view-sessions');
       el.innerHTML = '<div class="loading">Loading sessions...</div>';
-      var result = await apiGet('sessions');
+      var result = await apiGet('sessions?limit=500&format=full&includeSummary=true');
       state.sessions.items = (result && result.sessions) || [];
       state.sessions.loaded = true;
       renderSessions();
@@ -3376,7 +3376,7 @@
     async function loadProfile() {
       var el = document.getElementById('view-profile');
       el.innerHTML = '<div class="loading">Loading profile...</div>';
-      var sessResult = await apiGet('sessions');
+      var sessResult = await apiGet('sessions?limit=500&format=compact');
       var sessions = (sessResult && sessResult.sessions) || [];
 
       var projects = {};

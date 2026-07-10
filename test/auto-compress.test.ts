@@ -131,6 +131,39 @@ describe("mem::observe auto-compress gate (#138)", () => {
     expect(obs.confidence).toBe(0.3);
   });
 
+  it("default: keeps viewer updates transient while retaining the session stream", async () => {
+    const { registerObserveFunction } = await import(
+      "../src/functions/observe.js"
+    );
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+
+    await sdk.trigger("mem::observe", validPayload());
+
+    const callsForGroup = (groupId: string) =>
+      sdk.triggered.filter(
+        (call) =>
+          (call.data as { group_id?: string } | undefined)?.group_id === groupId,
+      );
+    const viewerCalls = callsForGroup("viewer");
+    expect(viewerCalls.map((call) => call.id)).toEqual([
+      "stream::send",
+      "stream::send",
+    ]);
+    expect(
+      viewerCalls.map(
+        (call) => (call.data as { type?: string } | undefined)?.type,
+      ),
+    ).toEqual(["raw_observation", "compressed_observation"]);
+
+    const sessionCalls = callsForGroup("ses_test");
+    expect(sessionCalls.map((call) => call.id)).toEqual([
+      "stream::set",
+      "stream::set",
+    ]);
+  });
+
   it("AGENTMEMORY_AUTO_COMPRESS=true: fires mem::compress exactly once", async () => {
     process.env["AGENTMEMORY_AUTO_COMPRESS"] = "true";
     const { registerObserveFunction } = await import(

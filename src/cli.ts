@@ -190,7 +190,8 @@ Options:
   --help, -h         Show this help
   --verbose, -v      Show engine stderr, boot log, and diagnostic info
   --reset            Wipe ~/.agentmemory/preferences.json and re-run onboarding
-  --tools all|core   Tool visibility (default: all = ${ALL_TOOLS_COUNT} tools; core = ${CORE_TOOLS_COUNT} essentials)
+  --tools all|core|workstation
+                     Tool visibility (default: all = ${ALL_TOOLS_COUNT}; core = ${CORE_TOOLS_COUNT}; workstation = curated coordination set)
   --no-engine        Skip auto-starting iii-engine
   --port <N>         Override REST port (default: 3111). Streams (N+1), viewer
                      (N+2), and iii engine (N+46023) auto-derive from N so a
@@ -224,12 +225,14 @@ Quick start:
 const toolsIdx = args.indexOf("--tools");
 if (toolsIdx !== -1 && args[toolsIdx + 1]) {
   const toolsMode = args[toolsIdx + 1]!;
-  if (toolsMode !== "all" && toolsMode !== "core") {
+  if (!["all", "core", "workstation"].includes(toolsMode) && !toolsMode.includes(",")) {
     p.log.warn(
-      `Unknown --tools value "${toolsMode}" (valid: all, core); falling back to all.`,
+      `Unknown --tools value "${toolsMode}" (valid: all, core, workstation, or a comma-separated allowlist); falling back to the safe core set.`,
     );
+    process.env["AGENTMEMORY_TOOLS"] = "core";
+  } else {
+    process.env["AGENTMEMORY_TOOLS"] = toolsMode;
   }
-  process.env["AGENTMEMORY_TOOLS"] = toolsMode;
 }
 
 const portIdx = args.indexOf("--port");
@@ -1397,7 +1400,7 @@ async function runStatus() {
   try {
     const [healthRes, sessionsRes, graphRes, memoriesRes, flagsRes, followupRes] = await Promise.all([
       apiFetch<any>(base, "health"),
-      apiFetch<any>(base, "sessions"),
+      apiFetch<any>(base, "sessions?limit=500&format=compact"),
       apiFetch<any>(base, "graph/stats"),
       apiFetch<any>(base, "memories?count=true"),
       apiFetch<any>(base, "config/flags"),
@@ -1411,7 +1414,7 @@ async function runStatus() {
     const status = healthRes?.status || "unknown";
     const version = healthRes?.version || "?";
     const sessionList = Array.isArray(sessionsRes?.sessions) ? sessionsRes.sessions : [];
-    const sessions = sessionList.length;
+    const sessions = sessionsRes?.pagination?.total ?? sessionList.length;
     const nodes = Number(graphRes?.totalNodes ?? graphRes?.nodes ?? graphRes?.nodeCount ?? 0);
     const edges = Number(graphRes?.totalEdges ?? graphRes?.edges ?? graphRes?.edgeCount ?? 0);
     const cb = healthRes?.circuitBreaker?.state || "closed";

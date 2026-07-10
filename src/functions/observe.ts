@@ -1,5 +1,5 @@
 import { TriggerAction, type ISdk } from "iii-sdk";
-import type { RawObservation, HookPayload } from "../types.js";
+import type { RawObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { stripPrivateData } from "./privacy.js";
@@ -11,6 +11,17 @@ import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
+import { safeAudit } from "./audit.js";
+
+const SESSION_CONTEXT_FIELDS = [
+  "project",
+  "cwd",
+  "repoRoot",
+  "scopeType",
+  "worktree",
+  "branch",
+  "taskSlug",
+] as const;
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -139,11 +150,7 @@ export function registerObserveFunction(
         // undefined). Env AGENT_ID only fires when no session row
         // exists yet — otherwise an unscoped session would get
         // retroactively scoped by a later AGENT_ID export.
-        const existingSession = await kv.get<{
-          agentId?: string;
-          observationCount?: number;
-          firstPrompt?: string;
-        }>(KV.sessions, payload.sessionId);
+        const existingSession = await kv.get<Session>(KV.sessions, payload.sessionId);
         const inheritedAgentId = existingSession
           ? existingSession.agentId
           : getAgentId();
@@ -227,14 +234,34 @@ export function registerObserveFunction(
 
         const session = existingSession;
         if (session) {
+          const updatedAt = new Date().toISOString();
+          const changedContext: string[] = [];
           const updates: Array<{ type: "set"; path: string; value: unknown }> = [
-            { type: "set", path: "updatedAt", value: new Date().toISOString() },
+            { type: "set", path: "updatedAt", value: updatedAt },
             {
               type: "set",
               path: "observationCount",
               value: (session.observationCount || 0) + 1,
             },
           ];
+          for (const field of SESSION_CONTEXT_FIELDS) {
+            const value = payload[field];
+            if (typeof value !== "string" || !value.trim()) continue;
+            const normalized = value.trim();
+            if (session[field] === normalized) continue;
+            updates.push({ type: "set", path: field, value: normalized });
+            changedContext.push(field);
+          }
+          if (changedContext.includes("project") && session.project) {
+            const aliases = new Set(session.projectAliases ?? []);
+            aliases.add(session.project);
+            aliases.delete(payload.project.trim());
+            updates.push({
+              type: "set",
+              path: "projectAliases",
+              value: [...aliases].sort(),
+            });
+          }
           if (!session.firstPrompt && typeof raw.userPrompt === "string") {
             const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
             if (trimmed.length > 0) {
@@ -246,6 +273,15 @@ export function registerObserveFunction(
             }
           }
           await kv.update(KV.sessions, payload.sessionId, updates);
+          if (changedContext.length > 0) {
+            await safeAudit(
+              kv,
+              "session_context_update",
+              "mem::observe",
+              [payload.sessionId],
+              { changed: changedContext },
+            );
+          }
         } else if (
           typeof payload.project === "string" &&
           payload.project.trim().length > 0 &&
@@ -269,6 +305,11 @@ export function registerObserveFunction(
             id: payload.sessionId,
             project: payload.project,
             cwd: payload.cwd,
+            ...(payload.repoRoot ? { repoRoot: payload.repoRoot } : {}),
+            ...(payload.scopeType ? { scopeType: payload.scopeType } : {}),
+            ...(payload.worktree ? { worktree: payload.worktree } : {}),
+            ...(payload.branch ? { branch: payload.branch } : {}),
+            ...(payload.taskSlug ? { taskSlug: payload.taskSlug } : {}),
             startedAt: payload.timestamp ?? ts,
             updatedAt: ts,
             status: "active",
@@ -318,17 +359,19 @@ export function registerObserveFunction(
             },
           });
           await sdk.trigger({
-            function_id: "stream::set",
+            function_id: "stream::send",
             payload: {
               stream_name: STREAM.name,
               group_id: STREAM.viewerGroup,
-              item_id: obsId,
+              id: `compressed-${obsId}`,
+              type: "compressed_observation",
               data: {
                 type: "compressed",
                 observation: synthetic,
                 sessionId: payload.sessionId,
               },
             },
+            action: TriggerAction.Void(),
           });
         }
 

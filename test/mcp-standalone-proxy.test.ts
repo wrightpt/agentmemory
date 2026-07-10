@@ -50,7 +50,9 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     const body = JSON.parse(res.content[0].text);
     expect(body.sessions).toHaveLength(1);
     expect(body.sessions[0].id).toBe("sess-1");
-    expect(calls.find((c) => c.url.includes("/sessions"))).toBeDefined();
+    const sessionsCall = calls.find((c) => c.url.includes("/sessions"));
+    expect(sessionsCall?.url).toContain("limit=5");
+    expect(sessionsCall?.url).toContain("format=compact");
   });
 
   it("proxies memory_smart_search to POST /agentmemory/smart-search", async () => {

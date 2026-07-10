@@ -1,15 +1,12 @@
 #!/usr/bin/env node
-import { execSync } from "node:child_process";
-import { basename } from "node:path";
-
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, parse, resolve } from "node:path";
 //#region src/hooks/_project.ts
-function resolveProject(cwd) {
-	const explicit = process.env["AGENTMEMORY_PROJECT_NAME"];
-	if (explicit && explicit.trim()) return explicit.trim();
-	const dir = cwd && cwd.trim() ? cwd : process.cwd();
+function git(cwd, args) {
 	try {
-		const top = execSync("git rev-parse --show-toplevel", {
-			cwd: dir,
+		return execFileSync("git", args, {
+			cwd,
 			stdio: [
 				"ignore",
 				"pipe",
@@ -17,11 +14,80 @@ function resolveProject(cwd) {
 			],
 			timeout: 500
 		}).toString().trim();
-		if (top) return basename(top);
-	} catch {}
-	return basename(dir);
+	} catch {
+		return "";
+	}
 }
-
+function nearestProjectFile(cwd, boundary) {
+	let current = resolve(cwd);
+	const root = boundary ? resolve(boundary) : parse(current).root;
+	while (true) {
+		const candidate = resolve(current, ".agentmemory", "project.json");
+		if (existsSync(candidate)) return candidate;
+		if (current === root) return void 0;
+		current = dirname(current);
+	}
+}
+function readProjectFile(cwd, boundary) {
+	const file = nearestProjectFile(cwd, boundary);
+	if (!file) return void 0;
+	try {
+		return {
+			file,
+			data: JSON.parse(readFileSync(file, "utf8"))
+		};
+	} catch {
+		return;
+	}
+}
+function remoteProjectName(remote) {
+	const normalized = remote.trim().replace(/\/$/, "").replace(/\.git$/, "");
+	if (!normalized) return "";
+	return normalized.split(/[/:]/).filter(Boolean).at(-1) || "";
+}
+function nonEmpty(value) {
+	return typeof value === "string" && value.trim() ? value.trim() : void 0;
+}
+function resolveProjectContext(cwd) {
+	const rawDir = cwd && cwd.trim() ? cwd.trim() : process.cwd();
+	if (process.platform !== "win32" && (/^[A-Za-z]:[\\/]/.test(rawDir) || rawDir.startsWith("\\\\"))) {
+		const explicitProject = nonEmpty(process.env["AGENTMEMORY_PROJECT_NAME"]);
+		const taskSlug = nonEmpty(process.env["AGENTMEMORY_TASK_SLUG"]);
+		return {
+			project: explicitProject || basename(rawDir),
+			cwd: rawDir,
+			repoRoot: nonEmpty(process.env["AGENTMEMORY_REPO_ROOT"]) || rawDir,
+			scopeType: nonEmpty(process.env["AGENTMEMORY_SCOPE_TYPE"]) || "directory",
+			...taskSlug ? { taskSlug } : {}
+		};
+	}
+	const dir = resolve(rawDir);
+	const gitTop = git(dir, ["rev-parse", "--show-toplevel"]);
+	const projectFile = readProjectFile(dir, gitTop || void 0);
+	const remoteName = remoteProjectName(git(dir, [
+		"config",
+		"--get",
+		"remote.origin.url"
+	]));
+	const fileProject = projectFile ? nonEmpty(projectFile.data.project_id) ?? nonEmpty(projectFile.data.projectId) : void 0;
+	const explicitProject = nonEmpty(process.env["AGENTMEMORY_PROJECT_NAME"]);
+	const rawRepoRoot = projectFile ? nonEmpty(projectFile.data.repo_root) ?? nonEmpty(projectFile.data.repoRoot) : void 0;
+	const configuredRepoRoot = nonEmpty(process.env["AGENTMEMORY_REPO_ROOT"]);
+	const projectFileRoot = projectFile ? dirname(dirname(projectFile.file)) : void 0;
+	const repoRoot = configuredRepoRoot ? resolve(configuredRepoRoot) : rawRepoRoot ? resolve(projectFileRoot || dir, rawRepoRoot) : gitTop || dir;
+	const scopeType = nonEmpty(process.env["AGENTMEMORY_SCOPE_TYPE"]) ?? (projectFile ? nonEmpty(projectFile.data.scope_type) ?? nonEmpty(projectFile.data.scopeType) : void 0) ?? (gitTop ? "repo" : "directory");
+	const taskSlug = nonEmpty(process.env["AGENTMEMORY_TASK_SLUG"]);
+	const branch = gitTop ? git(dir, ["branch", "--show-current"]) : "";
+	return {
+		project: (explicitProject ?? fileProject ?? remoteName) || basename(gitTop || dir),
+		cwd: dir,
+		repoRoot,
+		scopeType,
+		...gitTop ? { worktree: gitTop } : {},
+		...branch ? { branch } : {},
+		...taskSlug ? { taskSlug } : {}
+	};
+}
 //#endregion
 //#region src/hooks/prompt-submit.ts
 function isSdkChildContext(payload) {
@@ -47,23 +113,35 @@ async function main() {
 	}
 	if (isSdkChildContext(data)) return;
 	const sessionId = data.session_id || data.sessionId || "unknown";
+	const context = resolveProjectContext(data.cwd);
+	const promptData = promptCapture(data.prompt ?? data.userPrompt);
 	fetch(`${REST_URL}/agentmemory/observe`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({
 			hookType: "prompt_submit",
 			sessionId,
-			project: resolveProject(data.cwd),
-			cwd: data.cwd || process.cwd(),
+			...context,
 			timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-			data: { prompt: data.prompt ?? data.userPrompt }
+			data: promptData
 		}),
 		signal: AbortSignal.timeout(3e3)
 	}).catch(() => {});
 	setTimeout(() => process.exit(0), 500).unref();
 }
+function promptCapture(value) {
+	const text = typeof value === "string" ? value : "";
+	const mode = (process.env["AGENTMEMORY_CAPTURE_PROMPTS"] || "full").toLowerCase();
+	if (mode === "off" || mode === "metadata") return {
+		prompt_length: text.length,
+		prompt_capture: mode
+	};
+	const max = Number(process.env["AGENTMEMORY_MAX_PROMPT_CAPTURE_CHARS"] || "4000");
+	const limit = Number.isFinite(max) && max >= 0 ? Math.min(Math.floor(max), 16e3) : 4e3;
+	return { prompt: text.slice(0, limit) };
+}
 main();
-
 //#endregion
-export {  };
+export {};
+
 //# sourceMappingURL=prompt-submit.mjs.map
