@@ -40,7 +40,7 @@ async function main() {
 
   const { imageData, cleanOutput } = extractImageData(toolOutput(data));
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
+  fetch(`${REST_URL}/agentmemory/observe/async`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({

@@ -115,7 +115,7 @@ async function main() {
 	const sessionId = data.session_id || data.sessionId || "unknown";
 	const context = resolveProjectContext(data.cwd);
 	const promptData = promptCapture(data.prompt ?? data.userPrompt);
-	fetch(`${REST_URL}/agentmemory/observe`, {
+	fetch(`${REST_URL}/agentmemory/observe/async`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({

@@ -114,7 +114,7 @@ async function main() {
 	if (isSdkChildContext(data)) return;
 	const sessionId = data.session_id || "unknown";
 	const context = resolveProjectContext(data.cwd);
-	fetch(`${REST_URL}/agentmemory/observe`, {
+	fetch(`${REST_URL}/agentmemory/observe/async`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({

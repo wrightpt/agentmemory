@@ -132,6 +132,39 @@ function sessionContextFields(body: Record<string, unknown>): Partial<HookPayloa
   return result;
 }
 
+function parseObserveRequest(
+  req: ApiRequest<HookPayload>,
+): { payload: HookPayload } | { error: Response } {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const hookType = asNonEmptyString(body.hookType);
+  const sessionId = asNonEmptyString(body.sessionId);
+  const project = asNonEmptyString(body.project);
+  const cwd = asNonEmptyString(body.cwd);
+  const timestamp = asNonEmptyString(body.timestamp);
+  if (!hookType || !sessionId || !project || !cwd || !timestamp) {
+    return {
+      error: {
+        status_code: 400,
+        body: {
+          error:
+            "hookType, sessionId, project, cwd, and timestamp are required strings",
+        },
+      },
+    };
+  }
+  return {
+    payload: {
+      hookType: hookType as HookPayload["hookType"],
+      sessionId,
+      project,
+      cwd,
+      timestamp,
+      data: body.data,
+      ...sessionContextFields(body),
+    },
+  };
+}
+
 function parseOptionalFiniteNumber(value: unknown): number | undefined | null {
   if (value === undefined || value === null) return undefined;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
@@ -312,31 +345,12 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::observe",
     async (req: ApiRequest<HookPayload>): Promise<Response> => {
-      const body = (req.body ?? {}) as Record<string, unknown>;
-      const hookType = asNonEmptyString(body.hookType);
-      const sessionId = asNonEmptyString(body.sessionId);
-      const project = asNonEmptyString(body.project);
-      const cwd = asNonEmptyString(body.cwd);
-      const timestamp = asNonEmptyString(body.timestamp);
-      if (!hookType || !sessionId || !project || !cwd || !timestamp) {
-        return {
-          status_code: 400,
-          body: {
-            error:
-              "hookType, sessionId, project, cwd, and timestamp are required strings",
-          },
-        };
-      }
-      const payload: HookPayload = {
-        hookType: hookType as HookPayload["hookType"],
-        sessionId,
-        project,
-        cwd,
-        timestamp,
-        data: body.data,
-        ...sessionContextFields(body),
-      };
-      const result = await sdk.trigger({ function_id: "mem::observe", payload });
+      const parsed = parseObserveRequest(req);
+      if ("error" in parsed) return parsed.error;
+      const result = await sdk.trigger({
+        function_id: "mem::observe",
+        payload: parsed.payload,
+      });
       return { status_code: 201, body: result };
     },
   );
@@ -345,6 +359,38 @@ export function registerApiTriggers(
     function_id: "api::observe",
     config: {
       api_path: "/agentmemory/observe",
+      http_method: "POST",
+      middleware_function_ids: ["middleware::api-auth"],
+    },
+  });
+
+  sdk.registerFunction("api::observe::async",
+    async (req: ApiRequest<HookPayload>): Promise<Response> => {
+      const parsed = parseObserveRequest(req);
+      if ("error" in parsed) return parsed.error;
+
+      // Desktop hooks intentionally have a very small process lifetime. Do not
+      // couple their HTTP caller to the full persistence/index/stream pipeline:
+      // if a hook exits while a synchronous invocation is still running, iii
+      // loses the caller but continues tracking the downstream invocation.
+      // Void acknowledges dispatch, then lets mem::observe finish under the
+      // engine's ownership instead of the hook process's lifetime.
+      await sdk.trigger({
+        function_id: "mem::observe",
+        payload: parsed.payload,
+        action: TriggerAction.Void(),
+      });
+      return {
+        status_code: 202,
+        body: { accepted: true, sessionId: parsed.payload.sessionId },
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::observe::async",
+    config: {
+      api_path: "/agentmemory/observe/async",
       http_method: "POST",
       middleware_function_ids: ["middleware::api-auth"],
     },

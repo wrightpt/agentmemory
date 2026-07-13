@@ -119,7 +119,7 @@ async function main() {
 	const toolInput = data.tool_input ?? data.toolArgs;
 	const error = data.error ?? data.errorMessage;
 	const context = resolveProjectContext(data.cwd);
-	fetch(`${REST_URL}/agentmemory/observe`, {
+	fetch(`${REST_URL}/agentmemory/observe/async`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({

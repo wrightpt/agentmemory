@@ -328,7 +328,7 @@ describe("Copilot hook scripts", () => {
       userPrompt: "remember this prompt",
     });
 
-    expect(result.requests[0]?.path).toBe("/agentmemory/observe");
+    expect(result.requests[0]?.path).toBe("/agentmemory/observe/async");
     expect(result.requests[0]?.body).toMatchObject({
       hookType: "prompt_submit",
       sessionId: "copilot-session",
@@ -345,7 +345,7 @@ describe("Copilot hook scripts", () => {
       errorMessage: "failed",
     });
 
-    expect(result.requests[0]?.path).toBe("/agentmemory/observe");
+    expect(result.requests[0]?.path).toBe("/agentmemory/observe/async");
     expect(result.requests[0]?.body).toMatchObject({
       hookType: "post_tool_failure",
       sessionId: "copilot-session",
@@ -366,7 +366,7 @@ describe("Copilot hook scripts", () => {
       message: "Approve edit",
     });
 
-    expect(result.requests[0]?.path).toBe("/agentmemory/observe");
+    expect(result.requests[0]?.path).toBe("/agentmemory/observe/async");
     expect(result.requests[0]?.body).toMatchObject({
       hookType: "notification",
       sessionId: "copilot-session",

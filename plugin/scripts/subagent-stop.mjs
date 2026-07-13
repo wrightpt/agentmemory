@@ -117,7 +117,7 @@ async function main() {
 	const agentType = data.agent_type || data.agentDisplayName || data.agentName;
 	const lastMsg = typeof data.last_assistant_message === "string" ? data.last_assistant_message.slice(0, 4e3) : "";
 	const context = resolveProjectContext(data.cwd);
-	fetch(`${REST_URL}/agentmemory/observe`, {
+	fetch(`${REST_URL}/agentmemory/observe/async`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({

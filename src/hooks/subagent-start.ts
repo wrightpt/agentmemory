@@ -44,7 +44,7 @@ async function main() {
   const agentType = data.agent_type || data.agentDisplayName || data.agentName;
   const context = resolveProjectContext(data.cwd as string | undefined);
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
+  fetch(`${REST_URL}/agentmemory/observe/async`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({

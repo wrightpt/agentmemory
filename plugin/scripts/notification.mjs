@@ -117,7 +117,7 @@ async function main() {
 	const rawSessionId = data.session_id ?? data.sessionId;
 	const sessionId = typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : "unknown";
 	const context = resolveProjectContext(data.cwd);
-	fetch(`${REST_URL}/agentmemory/observe`, {
+	fetch(`${REST_URL}/agentmemory/observe/async`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({

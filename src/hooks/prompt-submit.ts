@@ -36,7 +36,7 @@ async function main() {
   const prompt = data.prompt ?? data.userPrompt;
   const promptData = promptCapture(prompt);
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
+  fetch(`${REST_URL}/agentmemory/observe/async`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({
