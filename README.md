@@ -1067,6 +1067,28 @@ Most agents (Cursor, Claude Desktop, Cline, Roo Code, Windsurf, Gemini CLI):
 
 Merge the `agentmemory` entry into your host's existing `mcpServers` object rather than replacing the file. For sandboxed clients that can't reach the host's `localhost`, add `"AGENTMEMORY_FORCE_PROXY": "1"` to the env block and set `AGENTMEMORY_URL` to a route the sandbox can reach.
 
+#### Streamable HTTP MCP
+
+For clients that keep long-lived sessions, run the stateless Streamable HTTP bridge next to the full AgentMemory server:
+
+```bash
+agentmemory mcp-http
+# http://127.0.0.1:3114/mcp
+```
+
+The bridge creates a fresh MCP transport for every request and proxies every tool call to the existing AgentMemory REST server, so reconnects do not create a second memory store. It binds to loopback by default and validates browser origins. `AGENTMEMORY_SECRET` authenticates the bridge to the engine; the loopback MCP listener is unauthenticated unless you separately set `AGENTMEMORY_MCP_HTTP_TOKEN`.
+
+Codex example (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.agentmemory]
+url = "http://127.0.0.1:3114/mcp"
+```
+
+If you set `AGENTMEMORY_MCP_HTTP_TOKEN`, expose that same value to the client through a dedicated environment variable and add `bearer_token_env_var` to the client configuration.
+
+Use `AGENTMEMORY_MCP_HTTP_HOST`, `AGENTMEMORY_MCP_HTTP_PORT`, and `AGENTMEMORY_MCP_HTTP_ALLOWED_ORIGINS` to override the listener. A non-loopback bind is rejected unless `AGENTMEMORY_MCP_HTTP_ALLOW_REMOTE=1` and a bearer token are both configured.
+
 OpenCode (`opencode.json`):
 ```json
 {
