@@ -100,32 +100,34 @@ import { registerHealthMonitor } from "./health/monitor.js";
 import { initMetrics, OTEL_CONFIG } from "./telemetry/setup.js";
 import { VERSION } from "./version.js";
 import { bootLog } from "./logger.js";
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import {
+  acquireWorkerPidfile,
+  releaseWorkerPidfile,
+  type WorkerPidfileLease,
+} from "./worker-pidfile.js";
+import { join } from "node:path";
 import { homedir } from "node:os";
 
 // #640 + #474: the worker process (this file) is spawned by iii-exec
 // inside the engine. When `agentmemory stop` kills only the engine pid,
 // this worker can survive (detached spawn, signal not propagated, or a
 // wrapper script keeps it running) and reconnects to the next engine as
-// a duplicate worker. Write the worker pid alongside iii.pid so
-// `agentmemory stop` can reap us too.
+// a duplicate worker. The exclusive pidfile is acquired before the SDK
+// registers anything, so a second worker cannot later unregister the live
+// worker's shared function and REST trigger IDs when it exits.
 function workerPidfilePath(): string {
   return join(homedir(), ".agentmemory", "worker.pid");
 }
-function writeWorkerPidfile(): void {
-  try {
-    const p = workerPidfilePath();
-    mkdirSync(dirname(p), { recursive: true });
-    writeFileSync(p, `${process.pid}\n`, { encoding: "utf-8" });
-  } catch {
-    // best-effort; stop still has the engine pidfile + port scan fallback
-  }
+let workerPidfileLease: WorkerPidfileLease | null = null;
+function acquireWorkerPidfileLease(): void {
+  workerPidfileLease = acquireWorkerPidfile(workerPidfilePath());
 }
 function clearWorkerPidfile(): void {
+  if (!workerPidfileLease) return;
   try {
-    unlinkSync(workerPidfilePath());
+    releaseWorkerPidfile(workerPidfileLease);
   } catch {}
+  workerPidfileLease = null;
 }
 
 function hasGetMeter(
@@ -159,6 +161,7 @@ process.on("unhandledRejection", (reason) => {
 });
 
 async function main() {
+  acquireWorkerPidfileLease();
   const config = loadConfig();
   const embeddingConfig = loadEmbeddingConfig();
   const fallbackConfig = loadFallbackConfig();
@@ -214,8 +217,6 @@ async function main() {
       framework: "iii-sdk",
     },
   });
-
-  writeWorkerPidfile();
 
   const kv = new StateKV(sdk);
   const secret = getEnvVar("AGENTMEMORY_SECRET");
@@ -609,6 +610,7 @@ async function main() {
 }
 
 main().catch((err) => {
+  clearWorkerPidfile();
   console.error(`[agentmemory] Fatal:`, err);
   process.exit(1);
 });
