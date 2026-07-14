@@ -119,7 +119,7 @@ async function main() {
 	const context = resolveProjectContext(data.cwd);
 	const maxChars = maxCaptureChars();
 	const { imageData, cleanOutput } = extractImageData(toolOutput(data));
-	fetch(`${REST_URL}/agentmemory/observe`, {
+	fetch(`${REST_URL}/agentmemory/observe/async`, {
 		method: "POST",
 		headers: authHeaders(),
 		body: JSON.stringify({

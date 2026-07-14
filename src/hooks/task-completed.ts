@@ -34,7 +34,7 @@ async function main() {
   const sessionId = (data.session_id as string) || "unknown";
   const context = resolveProjectContext(data.cwd as string | undefined);
 
-  fetch(`${REST_URL}/agentmemory/observe`, {
+  fetch(`${REST_URL}/agentmemory/observe/async`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({
