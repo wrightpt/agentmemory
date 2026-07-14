@@ -29,6 +29,11 @@ describe("Consistency checks", () => {
     expect(VERSION).toBe(pkg.version);
   });
 
+  it("rebuilds published runtime files before packing", () => {
+    const pkg = JSON.parse(readText("package.json"));
+    expect(pkg.scripts?.prepack).toBe("npm run build");
+  });
+
   it("plugin.json version matches package.json", () => {
     const pkg = JSON.parse(readText("package.json"));
     const plugin = JSON.parse(readText("plugin/.claude-plugin/plugin.json"));
