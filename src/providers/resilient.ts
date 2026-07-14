@@ -4,9 +4,11 @@ import { CircuitBreaker } from "./circuit-breaker.js";
 export class ResilientProvider implements MemoryProvider {
   private breaker = new CircuitBreaker();
   name: string;
+  kind: "llm" | "noop";
 
   constructor(private inner: MemoryProvider) {
     this.name = `resilient(${inner.name})`;
+    this.kind = inner.kind ?? (inner.name === "noop" ? "noop" : "llm");
   }
 
   private async call(fn: () => Promise<string>): Promise<string> {

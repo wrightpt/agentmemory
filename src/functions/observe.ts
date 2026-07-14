@@ -70,7 +70,12 @@ export function registerObserveFunction(
         };
       }
 
-      const obsId = generateId("obs");
+      const requestedObservationId =
+        typeof payload.observationId === "string" &&
+        /^obs_[a-z0-9_]{1,96}$/i.test(payload.observationId.trim())
+          ? payload.observationId.trim()
+          : undefined;
+      const obsId = requestedObservationId ?? generateId("obs");
 
       let dedupHash: string | undefined;
       if (dedupMap) {
@@ -84,9 +89,6 @@ export function registerObserveFunction(
           toolName,
           d["tool_input"],
         );
-        if (dedupMap.isDuplicate(dedupHash)) {
-          return { deduplicated: true, sessionId: payload.sessionId };
-        }
       }
 
       let sanitizedRaw: unknown = payload.data;
@@ -136,9 +138,38 @@ export function registerObserveFunction(
       const pendingImageData = extractedImage;
 
       return withKeyedLock(`obs:${payload.sessionId}`, async () => {
+        const observationScope = KV.observations(payload.sessionId);
+        const existingObservation = requestedObservationId
+          ? await kv.get<RawObservation | CompressedObservation>(
+              observationScope,
+              obsId,
+            )
+          : null;
+        if (existingObservation && "title" in existingObservation) {
+          return {
+            observationId: obsId,
+            deduplicated: true,
+            durableRetry: true,
+          };
+        }
+        if (existingObservation) {
+          Object.assign(raw, existingObservation);
+        }
+        if (
+          !existingObservation &&
+          dedupMap &&
+          dedupHash &&
+          dedupMap.isDuplicate(dedupHash)
+        ) {
+          return { deduplicated: true, sessionId: payload.sessionId };
+        }
+
         if (maxObservationsPerSession && maxObservationsPerSession > 0) {
-          const existing = await kv.list(KV.observations(payload.sessionId));
-          if (existing.length >= maxObservationsPerSession) {
+          const existing = await kv.list(observationScope);
+          if (
+            !existingObservation &&
+            existing.length >= maxObservationsPerSession
+          ) {
             return {
               success: false,
               error: `Session observation limit reached (${maxObservationsPerSession})`,
@@ -150,7 +181,10 @@ export function registerObserveFunction(
         // undefined). Env AGENT_ID only fires when no session row
         // exists yet — otherwise an unscoped session would get
         // retroactively scoped by a later AGENT_ID export.
-        const existingSession = await kv.get<Session>(KV.sessions, payload.sessionId);
+        const existingSession = await kv.get<Session>(
+          KV.sessions,
+          payload.sessionId,
+        );
         const inheritedAgentId = existingSession
           ? existingSession.agentId
           : getAgentId();
@@ -158,7 +192,13 @@ export function registerObserveFunction(
           raw.agentId = inheritedAgentId;
         }
 
-        if (pendingImageData && (pendingImageData.startsWith("data:image/") || pendingImageData.startsWith("iVBORw0KGgo") || pendingImageData.startsWith("/9j/"))) {
+        if (
+          !existingObservation &&
+          pendingImageData &&
+          (pendingImageData.startsWith("data:image/") ||
+            pendingImageData.startsWith("iVBORw0KGgo") ||
+            pendingImageData.startsWith("/9j/"))
+        ) {
           const { filePath, bytesWritten } = await saveImageToDisk(pendingImageData);
           raw.imageData = filePath;
           const { incrementImageRef } = await import("./image-refs.js");
@@ -182,9 +222,9 @@ export function registerObserveFunction(
         }
 
         try {
-
-          await kv.set(KV.observations(payload.sessionId), obsId, raw);
-
+          if (!existingObservation) {
+            await kv.set(observationScope, obsId, raw);
+          }
         } catch (error) {
           if (raw.imageData) {
             // Roll back the ref taken above. decrementImageRef deletes the file
@@ -206,31 +246,33 @@ export function registerObserveFunction(
           throw error;
         }
 
-        if (dedupMap && dedupHash) {
+        if (!existingObservation && dedupMap && dedupHash) {
           dedupMap.record(dedupHash);
         }
 
-        await sdk.trigger({
-          function_id: "stream::set",
-          payload: {
-          stream_name: STREAM.name,
-          group_id: STREAM.group(payload.sessionId),
-          item_id: obsId,
-          data: { type: "raw", observation: raw },
-          },
-        });
+        if (!existingObservation) {
+          await sdk.trigger({
+            function_id: "stream::set",
+            payload: {
+              stream_name: STREAM.name,
+              group_id: STREAM.group(payload.sessionId),
+              item_id: obsId,
+              data: { type: "raw", observation: raw },
+            },
+          });
 
-        await sdk.trigger({
-          function_id: "stream::send",
-          payload: {
-            stream_name: STREAM.name,
-            group_id: STREAM.viewerGroup,
-            id: `raw-${obsId}`,
-            type: "raw_observation",
-            data: { type: "raw", observation: raw, sessionId: payload.sessionId },
-          },
-          action: TriggerAction.Void(),
-        });
+          await sdk.trigger({
+            function_id: "stream::send",
+            payload: {
+              stream_name: STREAM.name,
+              group_id: STREAM.viewerGroup,
+              id: `raw-${obsId}`,
+              type: "raw_observation",
+              data: { type: "raw", observation: raw, sessionId: payload.sessionId },
+            },
+            action: TriggerAction.Void(),
+          });
+        }
 
         const session = existingSession;
         if (session) {
@@ -241,7 +283,9 @@ export function registerObserveFunction(
             {
               type: "set",
               path: "observationCount",
-              value: (session.observationCount || 0) + 1,
+              value: requestedObservationId
+                ? (await kv.list(observationScope)).length
+                : (session.observationCount || 0) + 1,
             },
           ];
           for (const field of SESSION_CONTEXT_FIELDS) {

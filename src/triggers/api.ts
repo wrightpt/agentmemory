@@ -1,7 +1,7 @@
-import { TriggerAction, type ISdk, type ApiRequest } from "iii-sdk";
+import { TriggerAction, type ISdk, type ApiRequest, type EnqueueResult } from "iii-sdk";
 import type { Session, CompressedObservation, HookPayload, CommitLink, SessionSummary } from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import { KV } from "../state/schema.js";
+import { KV, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { getLatestHealth } from "../health/monitor.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
@@ -21,6 +21,8 @@ import {
   isContextInjectionEnabled,
   detectEmbeddingProvider,
   detectLlmProviderKind,
+  getLlmExecutionState,
+  LLM_METRIC_FUNCTION_IDS,
   getAgentId,
   isAgentScopeIsolated,
 } from "../config.js";
@@ -30,6 +32,8 @@ type Response = {
   headers?: Record<string, string>;
   body: unknown;
 };
+
+export const OBSERVATION_QUEUE = "agentmemory-observations";
 
 function parseOptionalInt(raw: unknown): number | undefined {
   if (raw === undefined || raw === null || raw === "") return undefined;
@@ -196,7 +200,7 @@ export function registerApiTriggers(
   kv: StateKV,
   secret?: string,
   metricsStore?: MetricsStore,
-  provider?: ResilientProvider | { circuitState?: unknown },
+  provider?: ResilientProvider,
 ): void {
   sdk.registerFunction(
     "middleware::api-auth",
@@ -236,6 +240,7 @@ export function registerApiTriggers(
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const providerKind = detectLlmProviderKind();
+      const llmExecutionState = getLlmExecutionState(provider);
       const embeddingProvider = detectEmbeddingProvider() ? "embeddings" : "none";
       const flags = [
         {
@@ -288,6 +293,7 @@ export function registerApiTriggers(
         body: {
           version: VERSION,
           provider: providerKind,
+          llmExecutionState,
           embeddingProvider,
           flags,
         },
@@ -307,7 +313,14 @@ export function registerApiTriggers(
   sdk.registerFunction("api::health", 
     async (req: ApiRequest): Promise<Response> => {
       const health = await getLatestHealth(kv);
-      const functionMetrics = metricsStore ? await metricsStore.getAll() : [];
+      const llmExecutionState = getLlmExecutionState(provider);
+      const functionMetrics = metricsStore
+        ? (await metricsStore.getAll()).map((metric) =>
+            LLM_METRIC_FUNCTION_IDS.has(metric.functionId)
+              ? { ...metric, runtimeState: llmExecutionState }
+              : metric,
+          )
+        : [];
       const circuitBreaker =
         provider && "circuitState" in provider ? provider.circuitState : null;
 
@@ -324,6 +337,8 @@ export function registerApiTriggers(
           sourceRevision: process.env["AGENTMEMORY_SOURCE_REVISION"] || null,
           toolProfile: process.env["AGENTMEMORY_TOOLS"] || "all",
           llmToolsDisabled: process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true",
+          llmExecutionState,
+          llmProvider: provider?.name ?? null,
           health: health || null,
           functionMetrics,
           circuitBreaker,
@@ -369,21 +384,37 @@ export function registerApiTriggers(
       const parsed = parseObserveRequest(req);
       if ("error" in parsed) return parsed.error;
 
-      // Desktop hooks intentionally have a very small process lifetime. Do not
-      // couple their HTTP caller to the full persistence/index/stream pipeline:
-      // if a hook exits while a synchronous invocation is still running, iii
-      // loses the caller but continues tracking the downstream invocation.
-      // Void acknowledges dispatch, then lets mem::observe finish under the
-      // engine's ownership instead of the hook process's lifetime.
-      await sdk.trigger({
-        function_id: "mem::observe",
-        payload: parsed.payload,
-        action: TriggerAction.Void(),
-      });
-      return {
-        status_code: 202,
-        body: { accepted: true, sessionId: parsed.payload.sessionId },
-      };
+      const observationId = generateId("obs");
+      try {
+        const receipt = await sdk.trigger<HookPayload, EnqueueResult>({
+          function_id: "mem::observe",
+          payload: { ...parsed.payload, observationId },
+          action: TriggerAction.Enqueue({ queue: OBSERVATION_QUEUE }),
+        });
+        return {
+          status_code: 202,
+          body: {
+            accepted: true,
+            sessionId: parsed.payload.sessionId,
+            observationId,
+            messageReceiptId: receipt.messageReceiptId,
+          },
+        };
+      } catch (error) {
+        logger.error("Observation queue acceptance failed", {
+          sessionId: parsed.payload.sessionId,
+          observationId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return {
+          status_code: 503,
+          body: {
+            accepted: false,
+            retryable: true,
+            error: "observation_queue_unavailable",
+          },
+        };
+      }
     },
   );
   sdk.registerTrigger({
@@ -780,15 +811,6 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::summarize", 
     async (req: ApiRequest<{ sessionId: string }>): Promise<Response> => {
-      if (detectLlmProviderKind() === "noop") {
-        return {
-          status_code: 503,
-          body: {
-            error: "summarization requires a configured LLM provider",
-            disabled: true,
-          },
-        };
-      }
       const sessionId = asNonEmptyString((req.body as Record<string, unknown>)?.sessionId);
       if (!sessionId) {
         return { status_code: 400, body: { error: "sessionId is required" } };

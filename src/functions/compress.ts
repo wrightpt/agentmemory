@@ -22,6 +22,7 @@ import { scoreCompression } from "../eval/quality.js";
 import { compressWithRetry } from "../eval/self-correct.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { logger } from "../logger.js";
+import { getLlmExecutionState } from "../config.js";
 
 const VALID_TYPES = new Set<string>([
   "file_read",
@@ -77,6 +78,32 @@ export function registerCompressFunction(
       raw: RawObservation;
     }) => {
       const startMs = Date.now();
+      const llmExecutionState = getLlmExecutionState(provider);
+      if (llmExecutionState !== "enabled") {
+        const skipped =
+          llmExecutionState === "disabled"
+            ? "llm_tools_disabled"
+            : "no_llm_provider";
+        if (metricsStore) {
+          await metricsStore.recordSkipped(
+            "mem::compress",
+            Date.now() - startMs,
+            skipped,
+          );
+        }
+        logger.info("Compression skipped", {
+          observationId: data.observationId,
+          skipped,
+        });
+        return {
+          success: true,
+          outcome:
+            llmExecutionState === "disabled"
+              ? "skipped_disabled"
+              : "skipped_unavailable",
+          skipped,
+        };
+      }
 
       let imageDescription: string | undefined;
       const hasImage = data.raw.modality === "image" || data.raw.modality === "mixed";
