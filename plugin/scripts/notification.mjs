@@ -89,18 +89,37 @@ function resolveProjectContext(cwd) {
 	};
 }
 //#endregion
+//#region src/hooks/_observe.ts
+const DEFAULT_ACK_TIMEOUT_MS = 500;
+const MAX_ACK_TIMEOUT_MS = 5e3;
+function ackTimeoutMs() {
+	const configured = Number(process.env["AGENTMEMORY_HOOK_ACK_TIMEOUT_MS"] ?? DEFAULT_ACK_TIMEOUT_MS);
+	if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_ACK_TIMEOUT_MS;
+	return Math.max(1, Math.min(Math.floor(configured), MAX_ACK_TIMEOUT_MS));
+}
+function authHeaders() {
+	const headers = { "Content-Type": "application/json" };
+	const secret = process.env["AGENTMEMORY_SECRET"] || "";
+	if (secret) headers["Authorization"] = `Bearer ${secret}`;
+	return headers;
+}
+async function submitObservation(payload) {
+	const restUrl = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
+	try {
+		await (await fetch(`${restUrl}/agentmemory/observe/async`, {
+			method: "POST",
+			headers: authHeaders(),
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(ackTimeoutMs())
+		})).arrayBuffer();
+	} catch {}
+}
+//#endregion
 //#region src/hooks/notification.ts
 function isSdkChildContext(payload) {
 	if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
 	if (!payload || typeof payload !== "object") return false;
 	return payload.entrypoint === "sdk-ts";
-}
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-function authHeaders() {
-	const h = { "Content-Type": "application/json" };
-	if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-	return h;
 }
 async function main() {
 	let input = "";
@@ -115,25 +134,17 @@ async function main() {
 	const notificationType = data.notification_type ?? data.notificationType;
 	if (notificationType !== "permission_prompt") return;
 	const rawSessionId = data.session_id ?? data.sessionId;
-	const sessionId = typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : "unknown";
-	const context = resolveProjectContext(data.cwd);
-	fetch(`${REST_URL}/agentmemory/observe/async`, {
-		method: "POST",
-		headers: authHeaders(),
-		body: JSON.stringify({
-			hookType: "notification",
-			sessionId,
-			...context,
-			timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-			data: {
-				notification_type: notificationType,
-				title: data.title,
-				message: data.message
-			}
-		}),
-		signal: AbortSignal.timeout(2e3)
-	}).catch(() => {});
-	setTimeout(() => process.exit(0), 500).unref();
+	await submitObservation({
+		hookType: "notification",
+		sessionId: typeof rawSessionId === "string" && rawSessionId.length > 0 ? rawSessionId : "unknown",
+		...resolveProjectContext(data.cwd),
+		timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+		data: {
+			notification_type: notificationType,
+			title: data.title,
+			message: data.message
+		}
+	});
 }
 main();
 //#endregion

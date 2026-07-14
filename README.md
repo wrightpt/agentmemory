@@ -1513,7 +1513,7 @@ Create `~/.agentmemory/.env`:
 | `POST` | `/agentmemory/session/start` | Start session + get context |
 | `POST` | `/agentmemory/session/end` | End session |
 | `POST` | `/agentmemory/observe` | Capture observation synchronously |
-| `POST` | `/agentmemory/observe/async` | Accept hook observation for asynchronous capture (`202`) |
+| `POST` | `/agentmemory/observe/async` | Acknowledge hook transport (`202`); capture continues asynchronously |
 | `POST` | `/agentmemory/smart-search` | Hybrid search |
 | `POST` | `/agentmemory/context` | Generate context |
 | `POST` | `/agentmemory/remember` | Save to long-term memory |
