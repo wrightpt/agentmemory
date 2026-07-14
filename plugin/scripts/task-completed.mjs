@@ -89,18 +89,37 @@ function resolveProjectContext(cwd) {
 	};
 }
 //#endregion
+//#region src/hooks/_observe.ts
+const DEFAULT_ACK_TIMEOUT_MS = 500;
+const MAX_ACK_TIMEOUT_MS = 5e3;
+function ackTimeoutMs() {
+	const configured = Number(process.env["AGENTMEMORY_HOOK_ACK_TIMEOUT_MS"] ?? DEFAULT_ACK_TIMEOUT_MS);
+	if (!Number.isFinite(configured) || configured <= 0) return DEFAULT_ACK_TIMEOUT_MS;
+	return Math.max(1, Math.min(Math.floor(configured), MAX_ACK_TIMEOUT_MS));
+}
+function authHeaders() {
+	const headers = { "Content-Type": "application/json" };
+	const secret = process.env["AGENTMEMORY_SECRET"] || "";
+	if (secret) headers["Authorization"] = `Bearer ${secret}`;
+	return headers;
+}
+async function submitObservation(payload) {
+	const restUrl = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
+	try {
+		await (await fetch(`${restUrl}/agentmemory/observe/async`, {
+			method: "POST",
+			headers: authHeaders(),
+			body: JSON.stringify(payload),
+			signal: AbortSignal.timeout(ackTimeoutMs())
+		})).arrayBuffer();
+	} catch {}
+}
+//#endregion
 //#region src/hooks/task-completed.ts
 function isSdkChildContext(payload) {
 	if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
 	if (!payload || typeof payload !== "object") return false;
 	return payload.entrypoint === "sdk-ts";
-}
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-function authHeaders() {
-	const h = { "Content-Type": "application/json" };
-	if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-	return h;
 }
 async function main() {
 	let input = "";
@@ -112,27 +131,19 @@ async function main() {
 		return;
 	}
 	if (isSdkChildContext(data)) return;
-	const sessionId = data.session_id || "unknown";
-	const context = resolveProjectContext(data.cwd);
-	fetch(`${REST_URL}/agentmemory/observe/async`, {
-		method: "POST",
-		headers: authHeaders(),
-		body: JSON.stringify({
-			hookType: "task_completed",
-			sessionId,
-			...context,
-			timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-			data: {
-				task_id: data.task_id,
-				task_subject: data.task_subject,
-				task_description: typeof data.task_description === "string" ? data.task_description.slice(0, 2e3) : "",
-				teammate_name: data.teammate_name,
-				team_name: data.team_name
-			}
-		}),
-		signal: AbortSignal.timeout(2e3)
-	}).catch(() => {});
-	setTimeout(() => process.exit(0), 500).unref();
+	await submitObservation({
+		hookType: "task_completed",
+		sessionId: data.session_id || "unknown",
+		...resolveProjectContext(data.cwd),
+		timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+		data: {
+			task_id: data.task_id,
+			task_subject: data.task_subject,
+			task_description: typeof data.task_description === "string" ? data.task_description.slice(0, 2e3) : "",
+			teammate_name: data.teammate_name,
+			team_name: data.team_name
+		}
+	});
 }
 main();
 //#endregion

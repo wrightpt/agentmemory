@@ -1,19 +1,11 @@
 #!/usr/bin/env node
 import { resolveProjectContext } from "./_project.js";
+import { submitObservation } from "./_observe.js";
 
 function isSdkChildContext(payload: unknown): boolean {
   if (process.env["AGENTMEMORY_SDK_CHILD"] === "1") return true;
   if (!payload || typeof payload !== "object") return false;
   return (payload as { entrypoint?: unknown }).entrypoint === "sdk-ts";
-}
-
-const REST_URL = process.env["AGENTMEMORY_URL"] || "http://localhost:3111";
-const SECRET = process.env["AGENTMEMORY_SECRET"] || "";
-
-function authHeaders(): Record<string, string> {
-  const h: Record<string, string> = { "Content-Type": "application/json" };
-  if (SECRET) h["Authorization"] = `Bearer ${SECRET}`;
-  return h;
 }
 
 async function main() {
@@ -40,24 +32,18 @@ async function main() {
 
   const { imageData, cleanOutput } = extractImageData(toolOutput(data));
 
-  fetch(`${REST_URL}/agentmemory/observe/async`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      hookType: "post_tool_use",
-      sessionId,
-      ...context,
-      timestamp: new Date().toISOString(),
-      data: {
-        tool_name: toolName,
-        tool_input: truncate(toolInput, maxChars),
-        tool_output: truncate(cleanOutput, maxChars),
-        ...(imageData ? { image_data: imageData } : {}),
-      },
-    }),
-    signal: AbortSignal.timeout(3000),
-  }).catch(() => {});
-  setTimeout(() => process.exit(0), 500).unref();
+  await submitObservation({
+    hookType: "post_tool_use",
+    sessionId,
+    ...context,
+    timestamp: new Date().toISOString(),
+    data: {
+      tool_name: toolName,
+      tool_input: truncate(toolInput, maxChars),
+      tool_output: truncate(cleanOutput, maxChars),
+      ...(imageData ? { image_data: imageData } : {}),
+    },
+  });
 }
 
 function shouldSkipTool(value: unknown): boolean {
