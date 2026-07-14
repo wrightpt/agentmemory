@@ -1200,6 +1200,27 @@ async function main() {
     resetPrefs();
   }
 
+  if (await isAgentmemoryReady()) {
+    p.log.info(c.ok(`agentmemory is already running at ${getBaseUrl()}`));
+    return;
+  }
+
+  const existingWorkerPid = readWorkerPidfile();
+  if (
+    existingWorkerPid !== null &&
+    existingWorkerPid !== process.pid &&
+    pidAlive(existingWorkerPid)
+  ) {
+    p.log.error(
+      `agentmemory worker pid ${existingWorkerPid} is already running, but its livez endpoint is unavailable. Refusing to register a duplicate worker.`,
+    );
+    p.log.info(
+      "Restart the existing service or run `agentmemory stop` before starting another worker.",
+    );
+    process.exitCode = 1;
+    return;
+  }
+
   const firstRun = isFirstRun();
   const prefs = readPrefs();
   // Show the splash on the first run, on --reset, or whenever the user
