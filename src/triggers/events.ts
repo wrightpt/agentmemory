@@ -3,7 +3,7 @@ import type { CompressedObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
-import { detectLlmProviderKind, isGraphExtractionEnabled } from "../config.js";
+import { isGraphExtractionEnabled } from "../config.js";
 import { logger } from "../logger.js";
 
 export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
@@ -61,9 +61,10 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   });
 
   sdk.registerFunction("event::session::stopped", async (data: { sessionId: string }) => {
-    const summary = detectLlmProviderKind() === "noop"
-      ? { success: true, skipped: "no_llm_provider" }
-      : await sdk.trigger({ function_id: "mem::summarize", payload: data });
+    const summary = await sdk.trigger({
+      function_id: "mem::summarize",
+      payload: data,
+    });
     if (isReflectEnabled()) {
       try {
         sdk.trigger({

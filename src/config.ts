@@ -9,6 +9,7 @@ import type {
   FallbackConfig,
   ClaudeBridgeConfig,
   TeamConfig,
+  MemoryProvider,
 } from "./types.js";
 
 function safeParseInt(value: string | undefined, fallback: number): number {
@@ -208,11 +209,37 @@ export function detectLlmProviderKind(): "llm" | "noop" {
     hasRealValue(env["OPENROUTER_API_KEY"]) ||
     hasRealValue(env["MINIMAX_API_KEY"]) ||
     (hasRealValue(env["OPENAI_API_KEY"]) &&
-      env["OPENAI_API_KEY_FOR_LLM"] !== "false")
+      env["OPENAI_API_KEY_FOR_LLM"] !== "false") ||
+    env["AGENTMEMORY_ALLOW_AGENT_SDK"] === "true"
   ) {
     return "llm";
   }
   return "noop";
+}
+
+export type LlmExecutionState = "enabled" | "disabled" | "unavailable";
+
+export const LLM_METRIC_FUNCTION_IDS = new Set([
+  "mem::compress",
+  "mem::summarize",
+]);
+
+export function isLlmToolsDisabled(): boolean {
+  return getMergedEnv()["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true";
+}
+
+export function getLlmExecutionState(
+  provider?: Pick<MemoryProvider, "name" | "kind">,
+): LlmExecutionState {
+  if (isLlmToolsDisabled()) return "disabled";
+  if (provider) {
+    const providerIsNoop =
+      provider.kind === "noop" ||
+      provider.name === "noop" ||
+      provider.name.endsWith("(noop)");
+    return providerIsNoop ? "unavailable" : "enabled";
+  }
+  return detectLlmProviderKind() === "llm" ? "enabled" : "unavailable";
 }
 
 export function loadEmbeddingConfig(): EmbeddingConfig {
@@ -349,6 +376,7 @@ export function getFollowupWindowSeconds(): number {
 
 export function isConsolidationEnabled(): boolean {
   const env = getMergedEnv();
+  if (env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true") return false;
   const explicit = env["CONSOLIDATION_ENABLED"];
   if (explicit === "false" || explicit === "0") return false;
   if (explicit === "true" || explicit === "1") return true;
@@ -380,7 +408,10 @@ function hasLLMProviderConfigured(env: Record<string, string | undefined>): bool
 // ~/.agentmemory/.env — but should expect their Claude API token usage to
 // climb proportionally with session tool-use frequency.
 export function isAutoCompressEnabled(): boolean {
-  return getMergedEnv()["AGENTMEMORY_AUTO_COMPRESS"] === "true";
+  return (
+    getMergedEnv()["AGENTMEMORY_AUTO_COMPRESS"] === "true" &&
+    getLlmExecutionState() === "enabled"
+  );
 }
 
 // Hook-level context injection into Claude Code's conversation is OFF by

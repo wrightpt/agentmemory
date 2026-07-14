@@ -1536,16 +1536,20 @@
       if (fMetrics.length > 0) {
         var sorted = fMetrics.slice().sort(function(a, b) { return (b.totalCalls || 0) - (a.totalCalls || 0); });
         html += '<div class="card" style="margin-top:16px"><div class="card-title">Function Metrics (OTel)</div>';
-        html += '<table class="metric-table"><tr><th>Function</th><th style="text-align:right">Calls</th><th style="text-align:right">Success</th><th style="text-align:right">Fail</th><th style="text-align:right">Avg Latency</th><th style="text-align:right">Quality</th></tr>';
+        html += '<table class="metric-table"><tr><th>Function</th><th style="text-align:right">Calls</th><th style="text-align:right">Success</th><th style="text-align:right">Fail</th><th style="text-align:right">Skipped</th><th style="text-align:right">Avg Latency</th><th style="text-align:right">Quality</th></tr>';
         sorted.forEach(function(m) {
-          var successRate = m.totalCalls > 0 ? Math.round((m.successCount / m.totalCalls) * 100) : 0;
-          var rateColor = successRate >= 95 ? 'var(--green)' : successRate >= 80 ? 'var(--yellow)' : 'var(--red)';
+          var executedCalls = (m.successCount || 0) + (m.failureCount || 0);
+          var successRate = executedCalls > 0 ? Math.round((m.successCount / executedCalls) * 100) : null;
+          var runtimeState = m.runtimeState || 'enabled';
+          var stateMuted = runtimeState !== 'enabled';
+          var rateColor = stateMuted || successRate === null ? 'var(--ink-faint)' : successRate >= 95 ? 'var(--green)' : successRate >= 80 ? 'var(--yellow)' : 'var(--red)';
           var latencyColor = m.avgLatencyMs > 1000 ? 'var(--red)' : m.avgLatencyMs > 200 ? 'var(--yellow)' : 'var(--green)';
           html += '<tr>';
-          html += '<td class="metric-fn">' + esc(m.functionId) + '</td>';
+          html += '<td class="metric-fn">' + esc(m.functionId) + (stateMuted ? ' <span class="badge badge-muted">' + esc(runtimeState) + '</span>' : '') + '</td>';
           html += '<td class="metric-num">' + m.totalCalls + '</td>';
-          html += '<td class="metric-num" style="color:' + rateColor + '">' + m.successCount + ' (' + successRate + '%)</td>';
-          html += '<td class="metric-num" style="color:' + (m.failureCount > 0 ? 'var(--red)' : 'var(--ink-faint)') + '">' + m.failureCount + '</td>';
+          html += '<td class="metric-num" style="color:' + rateColor + '">' + m.successCount + (successRate === null ? '' : ' (' + successRate + '%)') + '</td>';
+          html += '<td class="metric-num" style="color:' + (!stateMuted && m.failureCount > 0 ? 'var(--red)' : 'var(--ink-faint)') + '">' + m.failureCount + '</td>';
+          html += '<td class="metric-num" style="color:' + ((m.skippedCount || 0) > 0 ? 'var(--yellow)' : 'var(--ink-faint)') + '">' + (m.skippedCount || 0) + '</td>';
           html += '<td class="metric-num" style="color:' + latencyColor + '">' + Math.round(m.avgLatencyMs) + ' ms</td>';
           html += '<td class="metric-num">' + (m.avgQualityScore > 0 ? m.avgQualityScore.toFixed(2) : '-') + '</td>';
           html += '</tr>';

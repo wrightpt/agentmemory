@@ -44,6 +44,7 @@ describe("loadEnvFile", () => {
     writeEnv(
       [
         "AGENTMEMORY_AUTO_COMPRESS=true   # opt in to LLM compression",
+        "ANTHROPIC_API_KEY=test-only-key  # provider availability",
         "CONSOLIDATION_ENABLED=true       # daily summarization",
         "GRAPH_EXTRACTION_ENABLED=true    # entity graph",
       ].join("\n"),

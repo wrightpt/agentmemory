@@ -141,6 +141,7 @@ export type HookType =
 export interface HookPayload {
   hookType: HookType;
   sessionId: string;
+  observationId?: string;
   project: string;
   cwd: string;
   repoRoot?: string;
@@ -164,6 +165,7 @@ export type ProviderType = "agent-sdk" | "anthropic" | "gemini" | "openrouter" |
 
 export interface MemoryProvider {
   name: string;
+  kind?: "llm" | "noop";
   compress(systemPrompt: string, userPrompt: string): Promise<string>;
   summarize(systemPrompt: string, userPrompt: string): Promise<string>;
   describeImage?(imageData: string, mimeType: string, prompt: string): Promise<string>;
@@ -207,8 +209,12 @@ export interface FunctionMetrics {
   totalCalls: number;
   successCount: number;
   failureCount: number;
+  skippedCount: number;
   avgLatencyMs: number;
   avgQualityScore: number;
+  lastOutcome?: "success" | "failure" | "skipped_disabled" | "skipped_unavailable";
+  lastSkipReason?: "llm_tools_disabled" | "no_llm_provider";
+  runtimeState?: "enabled" | "disabled" | "unavailable";
 }
 
 export interface HealthSnapshot {

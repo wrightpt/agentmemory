@@ -14,10 +14,12 @@ describe("Observe REST ingestion", () => {
     payload: unknown;
     action?: unknown;
   }>;
+  let rejectQueue: boolean;
 
   beforeEach(() => {
     sdk = mockSdk();
     dispatched = [];
+    rejectQueue = false;
     const invokeRegistered = sdk.trigger.bind(sdk);
     sdk.trigger = vi.fn(async (request, data?: unknown) => {
       if (
@@ -25,8 +27,10 @@ describe("Observe REST ingestion", () => {
         request.function_id === "mem::observe"
       ) {
         dispatched.push(request);
-        // Model iii's acknowledgement of a void invocation. The observation
-        // pipeline itself is deliberately not part of the HTTP response path.
+        if (request.action && (request.action as { type?: string }).type === "enqueue") {
+          if (rejectQueue) throw new Error("queue store unavailable");
+          return { messageReceiptId: "receipt-123" };
+        }
         return undefined;
       }
       return invokeRegistered(request, data);
@@ -35,7 +39,7 @@ describe("Observe REST ingestion", () => {
     registerApiTriggers(sdk as never, mockKV() as never);
   });
 
-  it("acknowledges after dispatching observation work as a void invocation", async () => {
+  it("acknowledges only after the durable observation queue returns a receipt", async () => {
     const response = (await sdk.trigger("api::observe::async", {
       headers: {},
       body: {
@@ -48,17 +52,53 @@ describe("Observe REST ingestion", () => {
       },
     })) as {
       status_code: number;
-      body: { accepted: boolean; sessionId: string };
+      body: {
+        accepted: boolean;
+        sessionId: string;
+        observationId: string;
+        messageReceiptId: string;
+      };
     };
 
-    expect(response).toEqual({
+    expect(response).toMatchObject({
       status_code: 202,
-      body: { accepted: true, sessionId: "session-123" },
+      body: {
+        accepted: true,
+        sessionId: "session-123",
+        messageReceiptId: "receipt-123",
+      },
     });
+    expect(response.body.observationId).toMatch(/^obs_/);
     expect(dispatched).toHaveLength(1);
     expect(dispatched[0]).toMatchObject({
       function_id: "mem::observe",
-      action: { type: "void" },
+      action: { type: "enqueue", queue: "agentmemory-observations" },
+      payload: { observationId: response.body.observationId },
+    });
+  });
+
+  it("returns a retryable 503 when durable queue acceptance fails", async () => {
+    rejectQueue = true;
+
+    const response = (await sdk.trigger("api::observe::async", {
+      headers: {},
+      body: {
+        hookType: "post_tool_use",
+        sessionId: "session-queue-down",
+        project: "agentmemory",
+        cwd: "/repo/agentmemory",
+        timestamp: "2026-07-13T23:00:00Z",
+        data: { tool_name: "Read" },
+      },
+    })) as { status_code: number; body: unknown };
+
+    expect(response).toEqual({
+      status_code: 503,
+      body: {
+        accepted: false,
+        retryable: true,
+        error: "observation_queue_unavailable",
+      },
     });
   });
 

@@ -16,8 +16,18 @@ workers:
           file_path: ./data/state_store.db
   - name: iii-queue
     config:
+      queue_configs:
+        agentmemory-observations:
+          max_retries: 5
+          concurrency: 4
+          type: standard
+          backoff_ms: 250
+          poll_interval_ms: 50
       adapter:
         name: builtin
+        config:
+          store_method: file_based
+          file_path: ./data/queue_store
   - name: iii-pubsub
     config:
       adapter:

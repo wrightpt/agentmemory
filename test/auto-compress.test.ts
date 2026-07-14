@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { RawObservation } from "../src/types.js";
 
+const ORIGINAL_ANTHROPIC_API_KEY = process.env["ANTHROPIC_API_KEY"];
+
 vi.mock("../src/logger.js", () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
@@ -80,9 +82,16 @@ describe("mem::observe auto-compress gate (#138)", () => {
     // state from an earlier test (and vice versa).
     vi.resetModules();
     delete process.env["AGENTMEMORY_AUTO_COMPRESS"];
+    delete process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"];
   });
   afterEach(() => {
     delete process.env["AGENTMEMORY_AUTO_COMPRESS"];
+    delete process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"];
+    if (ORIGINAL_ANTHROPIC_API_KEY === undefined) {
+      delete process.env["ANTHROPIC_API_KEY"];
+    } else {
+      process.env["ANTHROPIC_API_KEY"] = ORIGINAL_ANTHROPIC_API_KEY;
+    }
   });
 
   it("default (AGENTMEMORY_AUTO_COMPRESS unset): does NOT fire mem::compress", async () => {
@@ -164,8 +173,86 @@ describe("mem::observe auto-compress gate (#138)", () => {
     ]);
   });
 
+  it("makes a durable queue retry idempotent after the observation is complete", async () => {
+    const { registerObserveFunction } = await import(
+      "../src/functions/observe.js"
+    );
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerObserveFunction(sdk as never, kv as never);
+    const payload = validPayload({ observationId: "obs_durable_retry_1" });
+
+    const first = (await sdk.trigger("mem::observe", payload)) as {
+      observationId: string;
+    };
+    const second = (await sdk.trigger("mem::observe", payload)) as {
+      observationId: string;
+      deduplicated: boolean;
+      durableRetry: boolean;
+    };
+
+    expect(first.observationId).toBe("obs_durable_retry_1");
+    expect(second).toEqual({
+      observationId: "obs_durable_retry_1",
+      deduplicated: true,
+      durableRetry: true,
+    });
+    expect(kv.store.get("mem:obs:ses_test")?.size).toBe(1);
+  });
+
+  it("resumes a durable retry after the raw write despite the duplicate filter", async () => {
+    const { registerObserveFunction } = await import(
+      "../src/functions/observe.js"
+    );
+    const { DedupMap } = await import("../src/functions/dedup.js");
+    const sdk = mockSdk();
+    const kv = mockKV();
+    const dedupMap = new DedupMap();
+    const payload = validPayload({ observationId: "obs_partial_retry_1" });
+    const toolData = payload.data as {
+      tool_name: string;
+      tool_input: unknown;
+    };
+    const dedupHash = dedupMap.computeHash(
+      payload.sessionId as string,
+      toolData.tool_name,
+      toolData.tool_input,
+    );
+    dedupMap.record(dedupHash);
+    await kv.set(
+      `mem:obs:${payload.sessionId}`,
+      "obs_partial_retry_1",
+      {
+        id: "obs_partial_retry_1",
+        sessionId: payload.sessionId,
+        timestamp: payload.timestamp,
+        hookType: payload.hookType,
+        raw: payload.data,
+        toolName: toolData.tool_name,
+        toolInput: toolData.tool_input,
+        toolOutput: "file contents here",
+      },
+    );
+    registerObserveFunction(sdk as never, kv as never, dedupMap);
+
+    try {
+      const result = (await sdk.trigger("mem::observe", payload)) as {
+        observationId: string;
+      };
+      const stored = kv.store
+        .get("mem:obs:ses_test")
+        ?.get("obs_partial_retry_1") as { title?: string };
+
+      expect(result.observationId).toBe("obs_partial_retry_1");
+      expect(stored.title).toBe("Read");
+    } finally {
+      dedupMap.stop();
+    }
+  });
+
   it("AGENTMEMORY_AUTO_COMPRESS=true: fires mem::compress exactly once", async () => {
     process.env["AGENTMEMORY_AUTO_COMPRESS"] = "true";
+    process.env["ANTHROPIC_API_KEY"] = "test-only-key";
     const { registerObserveFunction } = await import(
       "../src/functions/observe.js"
     );

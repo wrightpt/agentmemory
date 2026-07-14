@@ -1172,6 +1172,13 @@ If you want to export to Jaeger/Honeycomb/Grafana Tempo instead, change `exporte
 
 agentmemory is **already a running [iii](https://iii.dev) instance**. Three primitives — worker, function, trigger — compose the runtime; KV state, streams, and OTEL traces come from iii-state, iii-stream, and iii-observability workers that ship with iii. You didn't install Postgres, Redis, Express, pm2, or Prometheus, because iii replaces them.
 
+Hook observations use the named `agentmemory-observations` queue. The default
+single-instance configuration stores that queue under `data/queue_store`,
+retries failed delivery up to five times, and retains exhausted jobs in the
+queue DLQ. `/agentmemory/observe/async` returns `202` only after the queue
+returns a receipt; the response includes both `messageReceiptId` and the stable
+`observationId` used to make a completed redelivery idempotent.
+
 That means one more command extends agentmemory with an entire new capability.
 
 ### Extend agentmemory with one command
@@ -1192,7 +1199,7 @@ Each `iii worker add` registers new functions and triggers into the same engine 
 |---|---|
 | [`iii-pubsub`](https://workers.iii.dev/workers/iii-pubsub) | Multi-instance memory: every `remember` fans out, every `search` reads the union |
 | [`iii-cron`](https://workers.iii.dev/workers/iii-cron) | Scheduled lifecycle — nightly consolidation, weekly snapshots, decay on a fixed clock |
-| [`iii-queue`](https://workers.iii.dev/workers/iii-queue) | Durable retries: failed embedding + compression jobs survive restart, no lost observations |
+| [`iii-queue`](https://workers.iii.dev/workers/iii-queue) | File-backed hook ingestion with receipts, retries, and dead-letter recovery |
 | [`iii-observability`](https://workers.iii.dev/workers/iii-observability) | OTEL traces, metrics, logs on every function — wired in `iii-config.yaml` from day one |
 | [`iii-sandbox`](https://workers.iii.dev/workers/iii-sandbox) | Code that came out of `memory_recall` runs inside a throwaway VM, not your shell |
 | [`iii-database`](https://workers.iii.dev/workers/iii-database) | SQL-backed state adapter when you outgrow the in-memory KV defaults |
@@ -1495,7 +1502,7 @@ Create `~/.agentmemory/.env`:
 
 # Tool visibility: "core" (7), "workstation" (curated coordination), "all" (53), or a comma-separated allowlist
 # AGENTMEMORY_TOOLS=core
-# AGENTMEMORY_DISABLE_LLM_TOOLS=true
+# AGENTMEMORY_DISABLE_LLM_TOOLS=true  # reports skipped_disabled, not failure
 ```
 
 ---
@@ -1509,11 +1516,11 @@ Create `~/.agentmemory/.env`:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/agentmemory/health` | Health check (always public) |
+| `GET` | `/agentmemory/health` | Health check with LLM execution state and success/failure/skipped metrics (always public) |
 | `POST` | `/agentmemory/session/start` | Start session + get context |
 | `POST` | `/agentmemory/session/end` | End session |
 | `POST` | `/agentmemory/observe` | Capture observation synchronously |
-| `POST` | `/agentmemory/observe/async` | Acknowledge hook transport (`202`); capture continues asynchronously |
+| `POST` | `/agentmemory/observe/async` | Return `202` after file-backed queue acceptance; includes queue receipt + stable observation ID |
 | `POST` | `/agentmemory/smart-search` | Hybrid search |
 | `POST` | `/agentmemory/context` | Generate context |
 | `POST` | `/agentmemory/remember` | Save to long-term memory |

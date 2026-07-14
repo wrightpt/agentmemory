@@ -20,6 +20,7 @@ import { scoreSummary } from "../eval/quality.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { safeAudit } from "./audit.js";
 import { logger } from "../logger.js";
+import { getLlmExecutionState } from "../config.js";
 
 // Per-chunk observation budget when a session is too large to fit in one
 // LLM call. Default ≈ 50k input tokens per chunk at ~110 tok/obs — fits
@@ -240,6 +241,30 @@ export function registerSummarizeFunction(
       }
       const sessionId = data.sessionId.trim();
 
+      const llmExecutionState = getLlmExecutionState(provider);
+      if (llmExecutionState !== "enabled") {
+        const skipped =
+          llmExecutionState === "disabled"
+            ? "llm_tools_disabled"
+            : "no_llm_provider";
+        if (metricsStore) {
+          await metricsStore.recordSkipped(
+            "mem::summarize",
+            Date.now() - startMs,
+            skipped,
+          );
+        }
+        logger.info("Summarize skipped", { sessionId, skipped });
+        return {
+          success: true,
+          outcome:
+            llmExecutionState === "disabled"
+              ? "skipped_disabled"
+              : "skipped_unavailable",
+          skipped,
+        };
+      }
+
       const session = await kv.get<Session>(KV.sessions, sessionId);
       if (!session) {
         logger.warn("Session not found for summarize", {
@@ -258,18 +283,6 @@ export function registerSummarizeFunction(
           sessionId,
         });
         return { success: false, error: "no_observations" };
-      }
-
-      if (provider.name === "noop") {
-        logger.info("Summarize skipped — no LLM provider configured", {
-          sessionId,
-        });
-        return {
-          success: false,
-          error: "no_provider",
-          reason:
-            "No LLM provider key set; Summarize is a no-op. Set ANTHROPIC_API_KEY (or GEMINI/OPENROUTER/MINIMAX) in ~/.agentmemory/.env to enable.",
-        };
       }
 
       try {
