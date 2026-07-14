@@ -182,6 +182,7 @@ Commands:
                      the engine was started natively but state file is missing).
   mcp                Start standalone MCP shim — opt-in surface for MCP-only clients
                      (Cursor, Gemini CLI, etc). REST always available at :3111.
+  mcp-http           Start stateless Streamable HTTP MCP bridge on 127.0.0.1:3114/mcp.
   import-jsonl [p]   Import Claude Code JSONL transcripts (default: ~/.claude/projects)
                      --max-files <N> | --max-files=<N>: override scan cap (default 200, max 1000;
                      out-of-range is rejected; for trees >1000 files, batch by subdirectory)
@@ -203,6 +204,9 @@ Options:
 Environment:
   AGENTMEMORY_URL              Full REST base URL (e.g. http://localhost:3111).
                                Honored by status, doctor, and MCP shim commands.
+  AGENTMEMORY_MCP_HTTP_HOST    Streamable HTTP bind host (default 127.0.0.1).
+  AGENTMEMORY_MCP_HTTP_PORT    Streamable HTTP port (default 3114).
+  AGENTMEMORY_MCP_HTTP_TOKEN   Optional bearer token for the MCP listener.
   AGENTMEMORY_USE_DOCKER=1     Prefer the bundled docker-compose path over the
                                native iii-engine binary on first run.
   AGENTMEMORY_III_VERSION      Override pinned iii-engine version (default ${IIPINNED_VERSION}).
@@ -217,6 +221,7 @@ Quick start:
   npx @agentmemory/agentmemory status   # health + memory count + flags
   npx @agentmemory/agentmemory upgrade  # upgrade agentmemory + iii runtime
   npx @agentmemory/agentmemory mcp      # standalone MCP server (no engine)
+  npx @agentmemory/agentmemory mcp-http # loopback Streamable HTTP MCP bridge
   npx @agentmemory/mcp                  # same as above (shim package)
 `);
   process.exit(0);
@@ -2673,6 +2678,11 @@ async function runMcp(): Promise<void> {
   await import("./mcp/standalone.js");
 }
 
+async function runMcpHttp(): Promise<void> {
+  const { runMcpHttpServer } = await import("./mcp/http.js");
+  await runMcpHttpServer();
+}
+
 async function runConnectCmd(): Promise<void> {
   const { runConnect } = await import("./cli/connect/index.js");
   await runConnect(args.slice(1));
@@ -3006,6 +3016,7 @@ const commands: Record<string, () => Promise<void>> = {
   stop: runStop,
   remove: runRemove,
   mcp: runMcp,
+  "mcp-http": runMcpHttp,
   "import-jsonl": runImportJsonl,
 };
 

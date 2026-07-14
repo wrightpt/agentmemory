@@ -13,6 +13,13 @@ without installing the full package first.
 npx -y @agentmemory/mcp
 ```
 
+To expose the running AgentMemory engine through a stateless Streamable HTTP endpoint instead of stdio:
+
+```bash
+npx -y @agentmemory/mcp --http
+# http://127.0.0.1:3114/mcp
+```
+
 Or wire it into your MCP client (Claude Desktop, OpenClaw, Cursor, Codex, etc.):
 
 ```json
@@ -34,7 +41,7 @@ installed, you can call the same entrypoint directly:
 npx @agentmemory/agentmemory mcp
 ```
 
-Both commands do the same thing.
+The two stdio commands do the same thing. The `--http` form requires the full AgentMemory engine at `AGENTMEMORY_URL` and never creates a separate local fallback store. Set `AGENTMEMORY_SECRET` for bridge-to-engine authentication and, independently, `AGENTMEMORY_MCP_HTTP_TOKEN` if the MCP listener itself should require a bearer token.
 
 ## Why does this package exist?
 
