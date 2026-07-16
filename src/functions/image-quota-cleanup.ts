@@ -1,4 +1,4 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import type { ISdk } from "iii-sdk";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { readdir, stat } from "node:fs/promises";
@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { IMAGES_DIR, getMaxBytes, deleteImage } from "../utils/image-store.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
+import { triggerDetached } from "../utils/trigger-detached.js";
 
 const GRACE_PERIOD_MS = 30_000;
 
@@ -75,10 +76,9 @@ export function registerImageQuotaCleanup(sdk: ISdk, kv: StateKV): void {
 
             const { deletedBytes } = await deleteImage(f.filePath);
             if (deletedBytes > 0) {
-              sdk.trigger({
+              triggerDetached(sdk, {
                 function_id: "mem::disk-size-delta",
                 payload: { deltaBytes: -deletedBytes },
-                action: TriggerAction.Void(),
               });
               totalToFree -= deletedBytes;
               freedBytes += deletedBytes;

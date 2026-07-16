@@ -1,4 +1,4 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import type { ISdk } from "iii-sdk";
 import type { RawObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -12,6 +12,7 @@ import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
 import { safeAudit } from "./audit.js";
+import { triggerDetached } from "../utils/trigger-detached.js";
 
 const SESSION_CONTEXT_FIELDS = [
   "project",
@@ -203,20 +204,18 @@ export function registerObserveFunction(
           raw.imageData = filePath;
           const { incrementImageRef } = await import("./image-refs.js");
           await incrementImageRef(kv, filePath);
-          sdk.trigger({
+          triggerDetached(sdk, {
             function_id: "mem::disk-size-delta",
             payload: { deltaBytes: bytesWritten },
-            action: TriggerAction.Void(),
           });
           if (process.env["AGENTMEMORY_IMAGE_EMBEDDINGS"] === "true") {
-            sdk.trigger({
+            triggerDetached(sdk, {
               function_id: "mem::vision-embed",
               payload: {
                 imageRef: filePath,
                 sessionId: payload.sessionId,
                 observationId: obsId,
               },
-              action: TriggerAction.Void(),
             });
           }
         }
@@ -261,7 +260,7 @@ export function registerObserveFunction(
             },
           });
 
-          await sdk.trigger({
+          triggerDetached(sdk, {
             function_id: "stream::send",
             payload: {
               stream_name: STREAM.name,
@@ -270,7 +269,6 @@ export function registerObserveFunction(
               type: "raw_observation",
               data: { type: "raw", observation: raw, sessionId: payload.sessionId },
             },
-            action: TriggerAction.Void(),
           });
         }
 
@@ -370,15 +368,18 @@ export function registerObserveFunction(
         // and BM25 search still work without burning the user's Claude
         // token allocation on every tool invocation.
         if (isAutoCompressEnabled()) {
-          await sdk.trigger({
-            function_id: "mem::compress",
-            payload: {
-              observationId: obsId,
-              sessionId: payload.sessionId,
-              raw,
+          triggerDetached(
+            sdk,
+            {
+              function_id: "mem::compress",
+              payload: {
+                observationId: obsId,
+                sessionId: payload.sessionId,
+                raw,
+              },
             },
-            action: TriggerAction.Void(),
-          });
+            { sessionId: payload.sessionId, observationId: obsId },
+          );
         } else {
           const synthetic = buildSyntheticCompression(raw);
           await kv.set(
@@ -402,7 +403,7 @@ export function registerObserveFunction(
               data: { type: "compressed", observation: synthetic },
             },
           });
-          await sdk.trigger({
+          triggerDetached(sdk, {
             function_id: "stream::send",
             payload: {
               stream_name: STREAM.name,
@@ -415,7 +416,6 @@ export function registerObserveFunction(
                 sessionId: payload.sessionId,
               },
             },
-            action: TriggerAction.Void(),
           });
         }
 

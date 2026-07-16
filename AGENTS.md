@@ -57,6 +57,14 @@ sdk.registerFunction(
 );
 ```
 
+### Detached Function Calls
+
+While `iii-sdk` is pinned to 0.11.2, do not use `TriggerAction.Void()`. That
+engine path adds a generated ID to the worker's active invocation set, while
+the SDK deliberately sends no `InvocationResult` that could remove it. Use
+`triggerDetached()` from `src/utils/trigger-detached.ts` for non-blocking work;
+use a normal awaited `sdk.trigger()` when the caller needs the result.
+
 ### REST Endpoint Registration
 ```typescript
 sdk.registerFunction("api::your-endpoint", async (req: ApiRequest) => {

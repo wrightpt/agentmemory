@@ -1,4 +1,4 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import type { ISdk } from "iii-sdk";
 import type { Memory } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -153,7 +153,6 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             payload: {
               supersededMemoryId: supersededId,
             },
-            action: TriggerAction.Void(),
           });
         }
 

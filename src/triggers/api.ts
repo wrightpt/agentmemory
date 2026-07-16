@@ -14,6 +14,7 @@ import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
 import { selectSessionPage } from "../functions/session-list.js";
+import { triggerDetached } from "../utils/trigger-detached.js";
 import {
   isGraphExtractionEnabled,
   isConsolidationEnabled,
@@ -784,18 +785,14 @@ export function registerApiTriggers(
         { type: "set", path: "status", value: "completed" },
       ]);
       // Fan out session-stopped lifecycle (non-blocking).
-      try {
-        sdk.trigger({
+      triggerDetached(
+        sdk,
+        {
           function_id: "event::session::stopped",
           payload: { sessionId },
-          action: TriggerAction.Void(),
-        });
-      } catch (err) {
-        logger.warn("event::session::stopped trigger failed", {
-          sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+        },
+        { sessionId },
+      );
       return { status_code: 200, body: { success: true } };
     },
   );
