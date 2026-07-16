@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -96,6 +96,26 @@ describe("resolveProject — hook project basename resolver", () => {
       execFileSync("git", ["-C", dir, "remote", "add", "origin", "git@github.com:owner/stable-project.git"]);
       expect(resolveProject(dir)).toBe("stable-project");
       expect(resolveProjectContext(dir).worktree).toBe(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("handles a symlinked cwd whose git root has a canonical path", () => {
+    const dir = mkdtempSync(join(tmpdir(), "amem-symlink-root-"));
+    const repo = join(dir, "repo");
+    const alias = join(dir, "repo-alias");
+    try {
+      mkdirSync(repo);
+      execFileSync("git", ["init", "-q", repo]);
+      execFileSync("git", ["-C", repo, "remote", "add", "origin", "git@github.com:owner/stable-project.git"]);
+      symlinkSync(repo, alias, "dir");
+
+      expect(resolveProjectContext(alias)).toMatchObject({
+        project: "stable-project",
+        repoRoot: repo,
+        worktree: repo,
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
