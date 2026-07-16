@@ -1,10 +1,11 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import type { ISdk } from "iii-sdk";
 import type { CompressedObservation, HookPayload, Session } from "../types.js";
 import { KV, STREAM } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { isReflectEnabled } from "../functions/slots.js";
 import { isGraphExtractionEnabled } from "../config.js";
 import { logger } from "../logger.js";
+import { triggerDetached } from "../utils/trigger-detached.js";
 
 export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
@@ -66,18 +67,14 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
       payload: data,
     });
     if (isReflectEnabled()) {
-      try {
-        sdk.trigger({
+      triggerDetached(
+        sdk,
+        {
           function_id: "mem::slot-reflect",
           payload: { sessionId: data.sessionId },
-          action: TriggerAction.Void(),
-        });
-      } catch (err) {
-        logger.warn("slot-reflect trigger failed", {
-          sessionId: data.sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
+        },
+        { sessionId: data.sessionId },
+      );
     }
     if (isGraphExtractionEnabled()) {
       try {
@@ -86,11 +83,14 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
         );
         const compressed = observations.filter((o) => o.title);
         if (compressed.length > 0) {
-          sdk.trigger({
-            function_id: "mem::graph-extract",
-            payload: { observations: compressed },
-            action: TriggerAction.Void(),
-          });
+          triggerDetached(
+            sdk,
+            {
+              function_id: "mem::graph-extract",
+              payload: { observations: compressed },
+            },
+            { sessionId: data.sessionId },
+          );
         }
       } catch (err) {
         logger.warn("graph-extract trigger failed", {
@@ -137,7 +137,7 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
       const newCount = payload.new_value?.observationCount ?? 0;
       if (newCount <= oldCount) return { skipped: true };
 
-      await sdk.trigger({
+      triggerDetached(sdk, {
         function_id: "stream::send",
         payload: {
           stream_name: STREAM.name,
@@ -151,7 +151,6 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
             updatedAt: payload.new_value?.updatedAt ?? new Date().toISOString(),
           },
         },
-        action: TriggerAction.Void(),
       });
 
       return { emitted: true };

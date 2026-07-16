@@ -1,10 +1,11 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import type { ISdk } from "iii-sdk";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { getMaxBytes } from "../utils/image-store.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { logger } from "../logger.js";
 import type { StateScope, StateScopeKey } from "../types.js";
+import { triggerDetached } from "../utils/trigger-detached.js";
 
 const DISK_SIZE_KEY: StateScopeKey = "system:currentDiskSize";
 
@@ -26,10 +27,9 @@ export function registerDiskSizeManager(sdk: ISdk, kv: StateKV): void {
         await kv.set<StateScope[typeof DISK_SIZE_KEY]>(KV.state, DISK_SIZE_KEY, newTotal);
 
         if (data.deltaBytes > 0 && newTotal > getMaxBytes()) {
-          sdk.trigger({
+          triggerDetached(sdk, {
             function_id: "mem::image-quota-cleanup",
             payload: {},
-            action: TriggerAction.Void(),
           });
           logger.info("Disk quota exceeded, cleanup triggered", {
             currentBytes: newTotal,

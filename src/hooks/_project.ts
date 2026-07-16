@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, parse, resolve } from "node:path";
 
 export interface ProjectContext {
@@ -35,14 +35,25 @@ function git(cwd: string, args: string[]): string {
   }
 }
 
+function canonicalExistingPath(path: string): string {
+  try {
+    return realpathSync.native(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 function nearestProjectFile(cwd: string, boundary?: string): string | undefined {
-  let current = resolve(cwd);
-  const root = boundary ? resolve(boundary) : parse(current).root;
+  let current = canonicalExistingPath(cwd);
+  const filesystemRoot = parse(current).root;
+  const root = boundary ? canonicalExistingPath(boundary) : filesystemRoot;
   while (true) {
     const candidate = resolve(current, ".agentmemory", "project.json");
     if (existsSync(candidate)) return candidate;
-    if (current === root) return undefined;
-    current = dirname(current);
+    if (current === root || current === filesystemRoot) return undefined;
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
   }
 }
 

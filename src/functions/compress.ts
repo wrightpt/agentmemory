@@ -1,4 +1,4 @@
-import { TriggerAction, type ISdk } from "iii-sdk";
+import type { ISdk } from "iii-sdk";
 import { readFileSync } from "node:fs";
 import { isManagedImagePath } from "../utils/image-store.js";
 import type {
@@ -242,7 +242,6 @@ export function registerCompressFunction(
                 sessionId: data.sessionId,
               },
             },
-            action: TriggerAction.Void(),
           }),
         ]);
         for (const result of streamResults) {
