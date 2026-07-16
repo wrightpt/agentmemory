@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, parse, resolve } from "node:path";
 //#region src/hooks/_project.ts
 function git(cwd, args) {
@@ -18,14 +18,24 @@ function git(cwd, args) {
 		return "";
 	}
 }
+function canonicalExistingPath(path) {
+	try {
+		return realpathSync.native(path);
+	} catch {
+		return resolve(path);
+	}
+}
 function nearestProjectFile(cwd, boundary) {
-	let current = resolve(cwd);
-	const root = boundary ? resolve(boundary) : parse(current).root;
+	let current = canonicalExistingPath(cwd);
+	const filesystemRoot = parse(current).root;
+	const root = boundary ? canonicalExistingPath(boundary) : filesystemRoot;
 	while (true) {
 		const candidate = resolve(current, ".agentmemory", "project.json");
 		if (existsSync(candidate)) return candidate;
-		if (current === root) return void 0;
-		current = dirname(current);
+		if (current === root || current === filesystemRoot) return void 0;
+		const parent = dirname(current);
+		if (parent === current) return void 0;
+		current = parent;
 	}
 }
 function readProjectFile(cwd, boundary) {
