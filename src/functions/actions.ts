@@ -22,6 +22,7 @@ import {
 } from "./action-model.js";
 import {
   ActionNormalizationError,
+  ActionRevisionConflictError,
   persistActionEdgeUnlocked,
   persistActionUnlocked,
   readActionStoreSnapshot,
@@ -746,6 +747,15 @@ function isValidEdgeType(value: string): value is ActionEdge["type"] {
 }
 
 function actionStoreError(error: unknown) {
+  if (error instanceof ActionRevisionConflictError) {
+    return {
+      success: false,
+      error: "action_revision_conflict",
+      actionId: error.actionId,
+      fields: error.fields,
+      message: error.message,
+    };
+  }
   if (error instanceof ActionNormalizationError) {
     return {
       success: false,

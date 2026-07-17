@@ -4,7 +4,11 @@ import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import type { Action, Checkpoint, Lease, Sentinel } from "../types.js";
 import { recordAudit } from "./audit.js";
-import { persistAction, readActionStoreSnapshot } from "./action-store.js";
+import {
+  ActionRevisionConflictError,
+  persistAction,
+  readActionStoreSnapshot,
+} from "./action-store.js";
 import { propagateActionCompletion } from "./actions.js";
 import { classifyAction } from "./action-model.js";
 
@@ -87,21 +91,33 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
         };
 
         await kv.set(KV.leases, lease.id, lease);
-        await recordAudit(kv, "lease_acquire", "mem::lease-acquire", [lease.id], {
-          actionId: data.actionId,
-          agentId: data.agentId,
-          expiresAt: lease.expiresAt,
-        });
-
         const before = { ...action };
         action.status = "active";
         action.lifecycle = "active";
         action.assignedTo = data.agentId;
         action.updatedAt = now.toISOString();
-        const persisted = await persistAction(kv, action, {
-          actor: data.agentId,
-          before,
-          reason: "lease acquired",
+        let persisted: Awaited<ReturnType<typeof persistAction>>;
+        try {
+          persisted = await persistAction(kv, action, {
+            actor: data.agentId,
+            before,
+            reason: "lease acquired",
+          });
+        } catch (error) {
+          await kv.delete(KV.leases, lease.id).catch(() => {});
+          if (error instanceof ActionRevisionConflictError) {
+            return {
+              success: false,
+              error: "action_revision_conflict",
+              fields: error.fields,
+            };
+          }
+          throw error;
+        }
+        await recordAudit(kv, "lease_acquire", "mem::lease-acquire", [lease.id], {
+          actionId: data.actionId,
+          agentId: data.agentId,
+          expiresAt: lease.expiresAt,
         });
         await recordAudit(kv, "action_update", "mem::lease-acquire", [action.id], {
           before,
@@ -167,6 +183,18 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
           if (data.result) {
             await propagateActionCompletion(kv, action.id, data.agentId);
           }
+        } else if (
+          action &&
+          action.status !== "done" &&
+          action.status !== "cancelled"
+        ) {
+          const before = structuredClone(action);
+          action.updatedAt = new Date().toISOString();
+          await persistAction(kv, action, {
+            actor: data.agentId,
+            before,
+            reason: "lease released; readiness revision refreshed",
+          });
         }
 
         return { success: true, released: true };
@@ -275,6 +303,19 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
                   action: "status-change",
                   newStatus: action.status,
                   actionId: action.id,
+                });
+              } else if (
+                action &&
+                !otherActiveLease &&
+                action.status !== "done" &&
+                action.status !== "cancelled"
+              ) {
+                const before = structuredClone(action);
+                action.updatedAt = new Date().toISOString();
+                await persistAction(kv, action, {
+                  actor: "lease-cleanup",
+                  before,
+                  reason: "expired lease; readiness revision refreshed",
                 });
               }
               return true;

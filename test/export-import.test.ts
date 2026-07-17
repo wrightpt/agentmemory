@@ -12,6 +12,7 @@ import type {
   SessionSummary,
   ExportData,
   Action,
+  ActionEdge,
   ActionCollectionState,
   ActionEvent,
 } from "../src/types.js";
@@ -374,6 +375,61 @@ describe("Export/Import Functions", () => {
       awaitingHuman: false,
     });
     expect(stored?.tags).toEqual(["agent:kimi", "worktree:legacy"]);
+  });
+
+  it("does not turn a legacy dependency block into a permanent manual block on import", async () => {
+    const createdAt = "2026-07-01T00:00:00.000Z";
+    const dependency = {
+      id: "act_dependency",
+      title: "Dependency",
+      description: "",
+      status: "pending",
+      priority: 5,
+      createdAt,
+      updatedAt: createdAt,
+      createdBy: "unknown",
+      project: "agentmemory",
+      tags: [],
+      sourceObservationIds: [],
+      sourceMemoryIds: [],
+    } satisfies Action;
+    const dependent = {
+      ...dependency,
+      id: "act_dependent",
+      title: "Dependent",
+      status: "blocked",
+    } satisfies Action;
+    const edge = {
+      id: "ae_dependency",
+      type: "requires",
+      sourceActionId: dependent.id,
+      targetActionId: dependency.id,
+      createdAt,
+    } satisfies ActionEdge;
+    const exportData: ExportData = {
+      version: "0.9.27",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      actions: [dependency, dependent],
+      actionEdges: [edge],
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "replace",
+    })) as { success: boolean };
+    const stored = await kv.get<Action>("mem:actions", dependent.id);
+
+    expect(result.success).toBe(true);
+    expect(stored).toMatchObject({
+      schemaVersion: 2,
+      lifecycle: "pending",
+      status: "blocked",
+    });
+    expect(stored?.blockedReason).toBeUndefined();
   });
 
   it("rejects invalid action snapshot counts before replace mutation", async () => {

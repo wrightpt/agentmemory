@@ -173,6 +173,83 @@ describe("Actions v2 migration", () => {
     });
   });
 
+  it("keeps the legacy queue scope authoritative when multiple project tags are context", async () => {
+    const kv = mockKV();
+    const action = legacyAction("act_initiative", {
+      project: "initiative-agent-tooling",
+      tags: [
+        "projectId:repo-brain",
+        "projectId:workstation-shell",
+        "agent:codex",
+      ],
+    });
+    await kv.set("mem:actions", action.id, action);
+
+    const result = await migrateActionsV2(kv as never, { dryRun: false });
+    const migrated = await kv.get<Action>("mem:actions", action.id);
+
+    expect(result).toMatchObject({
+      success: true,
+      conflictCount: 0,
+      changed: 1,
+    });
+    expect(result.preview[0].warnings).toContain(
+      "project_tags_retained_as_context",
+    );
+    expect(migrated).toMatchObject({
+      project: "initiative-agent-tooling",
+      projectId: "initiative-agent-tooling",
+    });
+    expect(migrated?.tags).toEqual(action.tags);
+  });
+
+  it("warns about an invalid contextual project tag when a valid queue scope exists", async () => {
+    const kv = mockKV();
+    const action = legacyAction("act_selftest", {
+      project: "agentmemory-todo-selftest",
+      tags: ["projectId:/tmp"],
+    });
+    await kv.set("mem:actions", action.id, action);
+
+    const result = await migrateActionsV2(kv as never, { dryRun: true });
+
+    expect(result).toMatchObject({
+      success: true,
+      conflictCount: 0,
+      changed: 1,
+    });
+    expect(result.preview[0].warnings).toEqual(
+      expect.arrayContaining([
+        "project_tags_retained_as_context",
+        "invalid_project_tag_ignored",
+      ]),
+    );
+    expect(result.preview[0].projectId).toBe("agentmemory-todo-selftest");
+  });
+
+  it("still rejects ambiguous project tags when no queue scope exists", async () => {
+    const kv = mockKV();
+    const action = legacyAction("act_ambiguous", {
+      tags: ["projectId:alpha", "projectId:beta"],
+    });
+    await kv.set("mem:actions", action.id, action);
+
+    const result = await migrateActionsV2(kv as never, { dryRun: false });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "migration_conflict",
+      conflictCount: 1,
+      unresolvedActionIds: [action.id],
+      revisionBefore: 0,
+      revisionAfter: 0,
+    });
+    expect(result.preview[0].conflicts).toContain(
+      "conflicting_project_tags",
+    );
+    expect(await kv.get("mem:actions", action.id)).toEqual(action);
+  });
+
   it("stops before any mutation when explicit project identities conflict", async () => {
     const kv = mockKV();
     const legacyPath = "/legacy/repo";

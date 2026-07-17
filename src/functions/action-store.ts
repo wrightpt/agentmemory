@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import type { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV, generateId } from "../state/schema.js";
@@ -47,6 +48,20 @@ export class ActionNormalizationError extends Error {
   }
 }
 
+export class ActionRevisionConflictError extends Error {
+  constructor(
+    readonly actionId: string,
+    readonly fields: string[],
+  ) {
+    super(
+      fields.length > 0
+        ? `Action ${actionId} changed concurrently in: ${fields.join(", ")}`
+        : `Action ${actionId} changed concurrently`,
+    );
+    this.name = "ActionRevisionConflictError";
+  }
+}
+
 export function withActionStoreLock<T>(fn: () => Promise<T>): Promise<T> {
   return withKeyedLock(ACTION_STORE_LOCK, fn);
 }
@@ -84,15 +99,17 @@ export async function persistActionUnlocked(
   options: PersistActionOptions = {},
 ): Promise<PersistActionResult> {
   const state = await recoverActionStoreUnlocked(kv);
-  const before =
+  const current = await kv.get<Action>(KV.actions, input.id);
+  const candidate =
     options.before === undefined
-      ? await kv.get<Action>(KV.actions, input.id)
-      : options.before;
+      ? input
+      : rebaseActionMutation(input, options.before, current);
+  const before = current;
   const revision = state.revision + 1;
   const hasDerivedBlockers =
     options.hasDerivedBlockers ??
     (await actionHasUnresolvedDerivedBlockers(kv, input.id));
-  const normalization = normalizeActionV2(input, {
+  const normalization = normalizeActionV2(candidate, {
     projectAliases: options.projectAliases,
     defaultProjectId: options.defaultProjectId,
     hasDerivedBlockers,
@@ -377,4 +394,55 @@ async function actionHasUnresolvedDerivedBlockers(
 
 function clone<T>(value: T): T {
   return structuredClone(value);
+}
+
+function rebaseActionMutation(
+  input: Action,
+  expectedBefore: Action | null,
+  current: Action | null,
+): Action {
+  if (!expectedBefore || !current) {
+    if (expectedBefore === current) return input;
+    throw new ActionRevisionConflictError(input.id, []);
+  }
+
+  const managedFields = new Set<keyof Action>([
+    "schemaVersion",
+    "revision",
+    "updatedAt",
+  ]);
+  const keys = new Set<keyof Action>([
+    ...(Object.keys(expectedBefore) as Array<keyof Action>),
+    ...(Object.keys(input) as Array<keyof Action>),
+    ...(Object.keys(current) as Array<keyof Action>),
+  ]);
+  const intendedFields = [...keys].filter(
+    (field) =>
+      !managedFields.has(field) &&
+      !isDeepStrictEqual(expectedBefore[field], input[field]),
+  );
+  const conflicts = intendedFields.filter(
+    (field) =>
+      !isDeepStrictEqual(expectedBefore[field], current[field]) &&
+      !isDeepStrictEqual(input[field], current[field]),
+  );
+  if (conflicts.length > 0) {
+    throw new ActionRevisionConflictError(
+      input.id,
+      conflicts.map(String).sort(),
+    );
+  }
+
+  const rebased = structuredClone(current) as Action &
+    Record<string, unknown>;
+  const source = input as Action & Record<string, unknown>;
+  for (const field of intendedFields) {
+    if (Object.prototype.hasOwnProperty.call(source, field)) {
+      rebased[field] = structuredClone(source[field]);
+    } else {
+      delete rebased[field];
+    }
+  }
+  rebased.updatedAt = input.updatedAt;
+  return rebased;
 }

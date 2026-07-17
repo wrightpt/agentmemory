@@ -58,6 +58,15 @@ export interface ActionViewContext {
   leases: Lease[];
   agentId?: string;
   now?: number;
+  index?: ActionViewIndex;
+}
+
+export interface ActionViewIndex {
+  actionMap: Map<string, Action>;
+  edgesByActionId: Map<string, ActionEdge[]>;
+  checkpointMap: Map<string, Checkpoint>;
+  sentinelMap: Map<string, Sentinel>;
+  activeLeaseMap: Map<string, Lease>;
 }
 
 interface ActionCursorPayload {
@@ -124,7 +133,10 @@ export function normalizeActionV2(
   if (!Array.isArray(raw.tags)) warnings.push("tags_normalized");
 
   const tagProjectIds = uniqueTagValues(tags, "projectId");
-  if (tagProjectIds.length > 1) conflicts.push("conflicting_project_tags");
+  const validTagProjectIds = tagProjectIds.filter(isCanonicalProjectId);
+  const invalidTagProjectIds = tagProjectIds.filter(
+    (value) => !isCanonicalProjectId(value),
+  );
 
   const legacyProject = nonEmpty(raw.project);
   const explicitProjectId = nonEmpty(raw.projectId);
@@ -150,23 +162,33 @@ export function normalizeActionV2(
       warnings.push("project_resolved_from_alias_map");
     }
   }
-  if (tagProjectIds[0]) {
-    if (!isCanonicalProjectId(tagProjectIds[0])) {
-      conflicts.push("invalid_project_tag");
-    } else if (projectId && tagProjectIds[0] !== projectId) {
-      conflicts.push("conflicting_project_tag");
-    } else {
-      projectId = tagProjectIds[0];
-      if (!explicitProjectId && !mappedProject) {
-        warnings.push("project_resolved_from_tag");
-      }
-    }
-  }
   if (!projectId && legacyProject && !isProjectPath(legacyProject)) {
     if (isCanonicalProjectId(legacyProject)) {
       projectId = legacyProject;
     } else {
       conflicts.push("invalid_legacy_project_id");
+    }
+  }
+  const projectResolvedWithoutTags = projectId !== undefined;
+  if (!projectId) {
+    if (validTagProjectIds.length > 1) {
+      conflicts.push("conflicting_project_tags");
+    } else if (validTagProjectIds[0]) {
+      projectId = validTagProjectIds[0];
+      warnings.push("project_resolved_from_tag");
+    }
+    if (invalidTagProjectIds.length > 0) {
+      conflicts.push("invalid_project_tag");
+    }
+  } else {
+    const contextualProjectTags = tagProjectIds.filter(
+      (value) => value !== projectId,
+    );
+    if (contextualProjectTags.length > 0) {
+      warnings.push("project_tags_retained_as_context");
+    }
+    if (invalidTagProjectIds.length > 0) {
+      warnings.push("invalid_project_tag_ignored");
     }
   }
   if (!projectId && legacyProject && isProjectPath(legacyProject)) {
@@ -190,6 +212,17 @@ export function normalizeActionV2(
       conflicts.push("invalid_default_project_id");
       projectId = DEFAULT_ACTION_PROJECT_ID;
     }
+  }
+
+  if (
+    !projectResolvedWithoutTags &&
+    projectId &&
+    invalidTagProjectIds.length > 0 &&
+    conflicts.includes("invalid_project_tag")
+  ) {
+    // An invalid tag remains a hard conflict when it was part of identity
+    // resolution. Path inference or fallback must not silently hide it.
+    warnings.push("project_identity_requires_review");
   }
 
   const projectAliases = new Set(
@@ -337,19 +370,9 @@ export function classifyAction(
   context: ActionViewContext,
 ): ActionViewItem {
   const now = context.now ?? Date.now();
-  const actionEdges = context.edges.filter(
-    (edge) =>
-      edge.sourceActionId === input.id || edge.targetActionId === input.id,
-  );
-  const actionMap = new Map(
-    context.actions.map((candidate) => [candidate.id, candidate]),
-  );
-  const checkpointMap = new Map(
-    context.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
-  );
-  const sentinelMap = new Map(
-    context.sentinels.map((sentinel) => [sentinel.id, sentinel]),
-  );
+  const index = context.index ?? buildActionViewIndex(context);
+  const actionEdges = index.edgesByActionId.get(input.id) ?? [];
+  const { actionMap, checkpointMap, sentinelMap } = index;
   const hasDerivedBlockers = actionEdges.some(
     (edge) => {
       if (edge.sourceActionId !== input.id) return false;
@@ -440,12 +463,7 @@ export function classifyAction(
     }
   }
 
-  const activeLease = context.leases.find(
-    (lease) =>
-      lease.actionId === action.id &&
-      lease.status === "active" &&
-      Date.parse(lease.expiresAt) > now,
-  );
+  const activeLease = index.activeLeaseMap.get(action.id);
   const leased = activeLease !== undefined;
   if (
     activeLease &&
@@ -485,6 +503,45 @@ export function classifyAction(
     }
   }
   return { action, view: "actionable", blockers: [], leased };
+}
+
+export function buildActionViewIndex(
+  context: Omit<ActionViewContext, "index">,
+): ActionViewIndex {
+  const now = context.now ?? Date.now();
+  const edgesByActionId = new Map<string, ActionEdge[]>();
+  for (const edge of context.edges) {
+    const sourceEdges = edgesByActionId.get(edge.sourceActionId) ?? [];
+    sourceEdges.push(edge);
+    edgesByActionId.set(edge.sourceActionId, sourceEdges);
+    if (edge.targetActionId !== edge.sourceActionId) {
+      const targetEdges = edgesByActionId.get(edge.targetActionId) ?? [];
+      targetEdges.push(edge);
+      edgesByActionId.set(edge.targetActionId, targetEdges);
+    }
+  }
+  const activeLeaseMap = new Map<string, Lease>();
+  for (const lease of context.leases) {
+    if (
+      lease.status === "active" &&
+      Date.parse(lease.expiresAt) > now
+    ) {
+      activeLeaseMap.set(lease.actionId, lease);
+    }
+  }
+  return {
+    actionMap: new Map(
+      context.actions.map((candidate) => [candidate.id, candidate]),
+    ),
+    edgesByActionId,
+    checkpointMap: new Map(
+      context.checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+    ),
+    sentinelMap: new Map(
+      context.sentinels.map((sentinel) => [sentinel.id, sentinel]),
+    ),
+    activeLeaseMap,
+  };
 }
 
 export function computeActionScore(

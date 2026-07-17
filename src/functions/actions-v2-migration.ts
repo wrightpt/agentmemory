@@ -66,14 +66,14 @@ export async function migrateActionsV2(
       ? ordered.filter((action) => action.id > afterId)
       : ordered;
     const page = eligible.slice(0, limit);
+    const unresolvedDerivedActionIds = collectUnresolvedDerivedActionIds(
+      actions,
+      edges,
+      checkpoints,
+      sentinels,
+    );
     const candidates: MigrationCandidate[] = page.map((action) => {
-      const hasDerivedBlockers = hasUnresolvedDerivedBlockers(
-        action.id,
-        actions,
-        edges,
-        checkpoints,
-        sentinels,
-      );
+      const hasDerivedBlockers = unresolvedDerivedActionIds.has(action.id);
       return {
         action,
         hasDerivedBlockers,
@@ -218,13 +218,12 @@ function validateMigrationInput(input: ActionsV2MigrationInput): string[] {
   return [...new Set(errors)];
 }
 
-function hasUnresolvedDerivedBlockers(
-  actionId: string,
+function collectUnresolvedDerivedActionIds(
   actions: Action[],
   edges: ActionEdge[],
   checkpoints: Checkpoint[],
   sentinels: Sentinel[],
-): boolean {
+): Set<string> {
   const actionMap = new Map(actions.map((action) => [action.id, action]));
   const checkpointMap = new Map(
     checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
@@ -232,22 +231,25 @@ function hasUnresolvedDerivedBlockers(
   const sentinelMap = new Map(
     sentinels.map((sentinel) => [sentinel.id, sentinel]),
   );
-  return edges.some((edge) => {
-    if (edge.sourceActionId !== actionId) return false;
+  const unresolved = new Set<string>();
+  for (const edge of edges) {
     if (edge.type === "requires") {
       const dependency = actionMap.get(edge.targetActionId);
-      return (
-        (dependency?.lifecycle ?? dependency?.status) !== "done"
-      );
+      if ((dependency?.lifecycle ?? dependency?.status) !== "done") {
+        unresolved.add(edge.sourceActionId);
+      }
+      continue;
     }
     if (edge.type === "gated_by") {
-      return (
+      if (
         checkpointMap.get(edge.targetActionId)?.status !== "passed" &&
         sentinelMap.get(edge.targetActionId)?.status !== "triggered"
-      );
+      ) {
+        unresolved.add(edge.sourceActionId);
+      }
     }
-    return false;
-  });
+  }
+  return unresolved;
 }
 
 function normalizeLimit(value?: number): number {

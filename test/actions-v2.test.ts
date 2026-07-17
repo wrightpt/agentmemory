@@ -7,7 +7,10 @@ vi.mock("../src/logger.js", () => ({
 import { registerActionsFunction } from "../src/functions/actions.js";
 import { registerSentinelsFunction } from "../src/functions/sentinels.js";
 import { registerCheckpointsFunction } from "../src/functions/checkpoints.js";
-import { persistAction } from "../src/functions/action-store.js";
+import {
+  ActionRevisionConflictError,
+  persistAction,
+} from "../src/functions/action-store.js";
 import { registerLeasesFunction } from "../src/functions/leases.js";
 import type {
   Action,
@@ -15,6 +18,7 @@ import type {
   ActionEvent,
   ActionViewItem,
   Checkpoint,
+  Lease,
   Sentinel,
 } from "../src/types.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
@@ -180,6 +184,74 @@ describe("Actions v2", () => {
       error: `action is ${view}`,
     });
     expect(await kv.list("mem:leases")).toEqual([]);
+  });
+
+  it("invalidates readiness revisions when a legacy lease is released without an assignment projection", async () => {
+    const created = (await sdk.trigger("mem::action-create", {
+      title: "Legacy leased action",
+    })) as { action: Action };
+    const lease: Lease = {
+      id: "lse_legacy",
+      actionId: created.action.id,
+      agentId: "worker-a",
+      acquiredAt: "2026-07-17T10:00:00.000Z",
+      expiresAt: "2999-07-17T11:00:00.000Z",
+      status: "active",
+    };
+    await kv.set("mem:leases", lease.id, lease);
+    const before = (await sdk.trigger("mem::action-list", {
+      agentId: "worker-b",
+    })) as { revision: number };
+
+    const released = (await sdk.trigger("mem::lease-release", {
+      actionId: created.action.id,
+      agentId: "worker-a",
+    })) as { success: boolean };
+    const stale = (await sdk.trigger("mem::action-list", {
+      agentId: "worker-b",
+      revision: before.revision,
+    })) as { success: boolean; error: string };
+
+    expect(released.success).toBe(true);
+    expect(stale).toMatchObject({
+      success: false,
+      error: "revision_conflict",
+    });
+  });
+
+  it("rolls back a lease when the action completes during acquisition", async () => {
+    const created = (await sdk.trigger("mem::action-create", {
+      title: "Racing action",
+    })) as { action: Action };
+    const originalSet = kv.set;
+    let injectedCompletion = false;
+    kv.set = async <T>(scope: string, key: string, value: T): Promise<T> => {
+      const stored = await originalSet(scope, key, value);
+      if (scope === "mem:leases" && !injectedCompletion) {
+        injectedCompletion = true;
+        await sdk.trigger("mem::action-update", {
+          actionId: created.action.id,
+          lifecycle: "done",
+          actor: "concurrent-worker",
+        });
+      }
+      return stored;
+    };
+
+    const result = (await sdk.trigger("mem::lease-acquire", {
+      actionId: created.action.id,
+      agentId: "worker-a",
+    })) as { success: boolean; error: string };
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "action_revision_conflict",
+    });
+    expect(await kv.list("mem:leases")).toEqual([]);
+    expect(await kv.get<Action>("mem:actions", created.action.id)).toMatchObject({
+      lifecycle: "done",
+      status: "done",
+    });
   });
 
   it("derives sentinel gates as blocked until the sentinel triggers", async () => {
@@ -427,6 +499,70 @@ describe("Actions v2", () => {
       status: "blocked",
       description: "Metadata touch",
     });
+  });
+
+  it("rebases a stale secondary mutation when concurrent fields do not overlap", async () => {
+    const created = (await sdk.trigger("mem::action-create", {
+      title: "Original title",
+    })) as { action: Action };
+    const stale = structuredClone(created.action);
+    const concurrent = (await sdk.trigger("mem::action-update", {
+      actionId: created.action.id,
+      description: "Concurrent description",
+      actor: "primary-writer",
+    })) as { action: Action };
+
+    const secondaryInput = {
+      ...stale,
+      title: "Secondary title",
+      updatedAt: "2026-07-17T12:00:00.000Z",
+    };
+    const persisted = await persistAction(kv as never, secondaryInput, {
+      actor: "secondary-writer",
+      before: stale,
+    });
+
+    expect(persisted.action).toMatchObject({
+      title: "Secondary title",
+      description: "Concurrent description",
+    });
+    expect(persisted.action.revision).toBeGreaterThan(
+      concurrent.action.revision ?? 0,
+    );
+  });
+
+  it("rejects a stale secondary mutation when the same field changed concurrently", async () => {
+    const created = (await sdk.trigger("mem::action-create", {
+      title: "Original title",
+    })) as { action: Action };
+    const stale = structuredClone(created.action);
+    const concurrent = (await sdk.trigger("mem::action-update", {
+      actionId: created.action.id,
+      title: "Primary title",
+      actor: "primary-writer",
+    })) as { action: Action };
+
+    const secondaryInput = {
+      ...stale,
+      title: "Secondary title",
+      updatedAt: "2026-07-17T12:00:00.000Z",
+    };
+
+    await expect(
+      persistAction(kv as never, secondaryInput, {
+        actor: "secondary-writer",
+        before: stale,
+      }),
+    ).rejects.toEqual(
+      expect.objectContaining<ActionRevisionConflictError>({
+        name: "ActionRevisionConflictError",
+        actionId: created.action.id,
+        fields: ["title"],
+      }),
+    );
+    expect(await kv.get<Action>("mem:actions", created.action.id)).toEqual(
+      concurrent.action,
+    );
   });
 
   it("does not turn a transient v2 assignee into the durable owner", async () => {

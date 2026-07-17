@@ -8,6 +8,7 @@ import type {
 } from "../types.js";
 import {
   actionFilterFingerprint,
+  buildActionViewIndex,
   classifyAction,
   decodeActionCursor,
   encodeActionCursor,
@@ -111,16 +112,21 @@ export function selectActionPage(
     );
   }
 
+  const viewContext = {
+    actions: snapshot.actions,
+    edges: snapshot.edges,
+    checkpoints,
+    sentinels,
+    leases,
+    agentId: options.agentId,
+    now: asOf,
+  };
+  const index = buildActionViewIndex(viewContext);
   const views = snapshot.actions
     .map((action) =>
       classifyAction(action, {
-        actions: snapshot.actions,
-        edges: snapshot.edges,
-        checkpoints,
-        sentinels,
-        leases,
-        agentId: options.agentId,
-        now: asOf,
+        ...viewContext,
+        index,
       }),
     )
     .filter((item) => {

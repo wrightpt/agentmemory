@@ -8,7 +8,11 @@ import type {
   Lease,
   Sentinel,
 } from "../types.js";
-import { classifyAction, computeActionScore } from "./action-model.js";
+import {
+  buildActionViewIndex,
+  classifyAction,
+  computeActionScore,
+} from "./action-model.js";
 import { matchesActionProject } from "./action-query.js";
 import { readActionStoreSnapshot } from "./action-store.js";
 
@@ -36,6 +40,16 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
         kv.list<Sentinel>(KV.sentinels).catch(() => []),
       ]);
       const now = Date.now();
+      const viewContext = {
+        actions: snapshot.actions,
+        edges: snapshot.edges,
+        checkpoints,
+        sentinels,
+        leases,
+        agentId: data.includeLeasedByOthers ? undefined : data.agentId,
+        now,
+      };
+      const index = buildActionViewIndex(viewContext);
       const frontier = snapshot.actions
         .filter(
           (action) =>
@@ -43,19 +57,18 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
         )
         .map((action) =>
           classifyAction(action, {
-            actions: snapshot.actions,
-            edges: snapshot.edges,
-            checkpoints,
-            sentinels,
-            leases,
-            agentId: data.includeLeasedByOthers ? undefined : data.agentId,
-            now,
+            ...viewContext,
+            index,
           }),
         )
         .filter((item) => item.view === "actionable")
         .map<FrontierItem>((item) => ({
           ...item,
-          score: computeActionScore(item.action, snapshot.edges, now),
+          score: computeActionScore(
+            item.action,
+            index.edgesByActionId.get(item.action.id) ?? [],
+            now,
+          ),
         }))
         .sort(
           (left, right) =>

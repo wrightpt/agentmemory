@@ -143,8 +143,10 @@ Project selection uses this precedence:
 
 1. an explicit valid `projectId`;
 2. an explicit migration alias map entry for the legacy `project` value;
-3. one unambiguous `projectId:<id>` legacy tag;
-4. a non-path legacy `project` value;
+3. a valid non-path legacy `project` value, because this is the authoritative
+   queue scope used by existing `memory_next` and `todo` callers;
+4. one unambiguous `projectId:<id>` legacy tag when the action has no
+   authoritative queue scope;
 5. the final path segment of an absolute legacy repository path, recorded as an
    inferred mapping and preserved in `projectAliases`;
 6. the caller-supplied migration fallback, defaulting to `workstation` only for
@@ -155,6 +157,13 @@ letters, numbers, dots, underscores, and hyphens. All prior path/name values
 are retained in `projectAliases`. The migration reports explicit, inferred,
 defaulted, and conflicting mappings separately so rollout can stop on an
 unexpected inference.
+
+Existing cross-repo actions may legitimately carry multiple `projectId:<id>`
+tags as repository context while their `project` is an initiative queue. When
+an authoritative project is present, those tags are retained as context and
+reported as warnings rather than treated as competing identities. Ambiguous or
+invalid project tags remain hard conflicts only when the row has no
+authoritative project from which to migrate.
 
 New v2 callers should send `projectId`. Legacy callers may continue sending
 `project`; the normalizer produces the same persisted v2 shape and includes
@@ -239,6 +248,13 @@ If the worker stops mid-write, the next action-store operation reconciles the
 pending marker. An existing event is replayed into the projection; a marker
 without an event is cleared without advancing the revision. Normal reads never
 observe intermediate writes because they use the same in-process lock.
+
+Secondary action writers supply the projection they read as an optimistic base.
+The store rebases non-overlapping field changes onto the current projection and
+rejects same-field races with `action_revision_conflict`. This keeps checkpoint,
+lease, sketch, routine, mesh, crystallization, and healing updates from silently
+overwriting a concurrent action change even when their larger workflows use
+different entity locks.
 
 The existing audit log remains. Action events are the domain history; audit
 entries remain the system-wide operational record.

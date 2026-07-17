@@ -845,6 +845,18 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                     reason: "release-expired-lease",
                     newStatus: "pending",
                   });
+                } else if (
+                  action &&
+                  action.status !== "done" &&
+                  action.status !== "cancelled"
+                ) {
+                  const before = structuredClone(action);
+                  action.updatedAt = new Date().toISOString();
+                  await persistAction(kv, action, {
+                    actor: "heal",
+                    before,
+                    reason: "expired lease; readiness revision refreshed",
+                  });
                 }
                 return true;
               },

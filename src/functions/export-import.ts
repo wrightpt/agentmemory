@@ -296,14 +296,6 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           return { success: false, error: `Duplicate action: ${action.id}` };
         }
         actionIds.add(action.id);
-        const normalized = normalizeActionV2(action);
-        if (normalized.conflicts.length > 0) {
-          return {
-            success: false,
-            error: `Invalid action ${action.id}: ${normalized.conflicts.join(", ")}`,
-          };
-        }
-        normalizedImportedActions.push(normalized.action);
       }
       const importedActionEdges = importData.actionEdges ?? [];
       if (!Array.isArray(importedActionEdges)) {
@@ -324,6 +316,25 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           return { success: false, error: `Duplicate action edge: ${edge.id}` };
         }
         edgeIds.add(edge.id);
+      }
+      const importedActionsWithDerivedBlockers =
+        collectImportedActionsWithDerivedBlockers(
+          importedActions,
+          importedActionEdges,
+          Array.isArray(importData.checkpoints) ? importData.checkpoints : [],
+          Array.isArray(importData.sentinels) ? importData.sentinels : [],
+        );
+      for (const action of importedActions) {
+        const normalized = normalizeActionV2(action, {
+          hasDerivedBlockers: importedActionsWithDerivedBlockers.has(action.id),
+        });
+        if (normalized.conflicts.length > 0) {
+          return {
+            success: false,
+            error: `Invalid action ${action.id}: ${normalized.conflicts.join(", ")}`,
+          };
+        }
+        normalizedImportedActions.push(normalized.action);
       }
       const importedActionEvents = importData.actionEvents ?? [];
       if (!Array.isArray(importedActionEvents)) {
@@ -824,6 +835,40 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       return { success: true, strategy, ...stats };
     },
   );
+}
+
+function collectImportedActionsWithDerivedBlockers(
+  actions: Action[],
+  edges: ActionEdge[],
+  checkpoints: Checkpoint[],
+  sentinels: Sentinel[],
+): Set<string> {
+  const actionMap = new Map(actions.map((action) => [action.id, action]));
+  const checkpointMap = new Map(
+    checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+  );
+  const sentinelMap = new Map(
+    sentinels.map((sentinel) => [sentinel.id, sentinel]),
+  );
+  const unresolved = new Set<string>();
+  for (const edge of edges) {
+    if (edge.type === "requires") {
+      const dependency = actionMap.get(edge.targetActionId);
+      if ((dependency?.lifecycle ?? dependency?.status) !== "done") {
+        unresolved.add(edge.sourceActionId);
+      }
+      continue;
+    }
+    if (edge.type === "gated_by") {
+      if (
+        checkpointMap.get(edge.targetActionId)?.status !== "passed" &&
+        sentinelMap.get(edge.targetActionId)?.status !== "triggered"
+      ) {
+        unresolved.add(edge.sourceActionId);
+      }
+    }
+  }
+  return unresolved;
 }
 
 function isValidActionEventImage(event: ActionEvent): boolean {
