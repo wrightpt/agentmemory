@@ -45,7 +45,7 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
       const frontier: FrontierItem[] = [];
 
       for (const action of actions) {
-        if (action.status === "done" || action.status === "cancelled") continue;
+        if (action.status !== "pending" && action.status !== "active") continue;
         if (data.project && action.project !== data.project) continue;
 
         const blockers: string[] = [];
