@@ -12,6 +12,8 @@ import type {
   ProceduralMemory,
   Action,
   ActionEdge,
+  ActionCollectionState,
+  ActionEvent,
   Routine,
   Signal,
   Checkpoint,
@@ -30,6 +32,14 @@ import { StateKV } from "../state/kv.js";
 import { VERSION } from "../version.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
+import {
+  ACTION_SCHEMA_VERSION,
+  normalizeActionV2,
+} from "./action-model.js";
+import {
+  readActionStoreSnapshot,
+  withActionStoreLock,
+} from "./action-store.js";
 
 export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::export", 
@@ -77,8 +87,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         graphEdges,
         semanticMemories,
         proceduralMemories,
-        actions,
-        actionEdges,
+        actionStore,
         sentinels,
         sketches,
         crystals,
@@ -94,8 +103,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         kv.list<GraphEdge>(KV.graphEdges).catch(() => []),
         kv.list<SemanticMemory>(KV.semantic).catch(() => []),
         kv.list<ProceduralMemory>(KV.procedural).catch(() => []),
-        kv.list<Action>(KV.actions).catch(() => []),
-        kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
+        readActionStoreSnapshot(kv, { includeEvents: true }),
         kv.list<Sentinel>(KV.sentinels).catch(() => []),
         kv.list<Sketch>(KV.sketches).catch(() => []),
         kv.list<Crystal>(KV.crystals).catch(() => []),
@@ -122,8 +130,19 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           semanticMemories.length > 0 ? semanticMemories : undefined,
         proceduralMemories:
           proceduralMemories.length > 0 ? proceduralMemories : undefined,
-        actions: actions.length > 0 ? actions : undefined,
-        actionEdges: actionEdges.length > 0 ? actionEdges : undefined,
+        actions:
+          actionStore.actions.length > 0 ? actionStore.actions : undefined,
+        actionEdges:
+          actionStore.edges.length > 0 ? actionStore.edges : undefined,
+        actionEvents:
+          actionStore.events.length > 0 ? actionStore.events : undefined,
+        actionSnapshot: {
+          schemaVersion: ACTION_SCHEMA_VERSION,
+          revision: actionStore.state.revision,
+          actionCount: actionStore.actions.length,
+          edgeCount: actionStore.edges.length,
+          eventCount: actionStore.events.length,
+        },
         sentinels: sentinels.length > 0 ? sentinels : undefined,
         sketches: sketches.length > 0 ? sketches : undefined,
         crystals: crystals.length > 0 ? crystals : undefined,
@@ -190,6 +209,9 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       const MAX_OBS_PER_SESSION = 5_000;
       const MAX_TOTAL_OBSERVATIONS = 500_000;
       const MAX_ACCESS_LOGS = 50_000;
+      const MAX_ACTIONS = 100_000;
+      const MAX_ACTION_EDGES = 250_000;
+      const MAX_ACTION_EVENTS = 500_000;
 
       if (!Array.isArray(importData.sessions)) {
         return { success: false, error: "sessions must be an array" };
@@ -255,11 +277,160 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         };
       }
 
+      const importedActions = Array.isArray(importData.actions)
+        ? importData.actions
+        : [];
+      if (importedActions.length > MAX_ACTIONS) {
+        return {
+          success: false,
+          error: `Too many actions (max ${MAX_ACTIONS})`,
+        };
+      }
+      const normalizedImportedActions: Action[] = [];
+      const actionIds = new Set<string>();
+      for (const action of importedActions) {
+        if (!isImportableAction(action)) {
+          return { success: false, error: "Invalid action" };
+        }
+        if (actionIds.has(action.id)) {
+          return { success: false, error: `Duplicate action: ${action.id}` };
+        }
+        actionIds.add(action.id);
+      }
+      const importedActionEdges = importData.actionEdges ?? [];
+      if (!Array.isArray(importedActionEdges)) {
+        return { success: false, error: "actionEdges must be an array" };
+      }
+      if (importedActionEdges.length > MAX_ACTION_EDGES) {
+        return {
+          success: false,
+          error: `Too many action edges (max ${MAX_ACTION_EDGES})`,
+        };
+      }
+      const edgeIds = new Set<string>();
+      for (const edge of importedActionEdges) {
+        if (!isImportableActionEdge(edge)) {
+          return { success: false, error: "Invalid action edge" };
+        }
+        if (edgeIds.has(edge.id)) {
+          return { success: false, error: `Duplicate action edge: ${edge.id}` };
+        }
+        edgeIds.add(edge.id);
+      }
+      const importedActionsWithDerivedBlockers =
+        collectImportedActionsWithDerivedBlockers(
+          importedActions,
+          importedActionEdges,
+          Array.isArray(importData.checkpoints) ? importData.checkpoints : [],
+          Array.isArray(importData.sentinels) ? importData.sentinels : [],
+        );
+      for (const action of importedActions) {
+        const normalized = normalizeActionV2(action, {
+          hasDerivedBlockers: importedActionsWithDerivedBlockers.has(action.id),
+        });
+        if (normalized.conflicts.length > 0) {
+          return {
+            success: false,
+            error: `Invalid action ${action.id}: ${normalized.conflicts.join(", ")}`,
+          };
+        }
+        normalizedImportedActions.push(normalized.action);
+      }
+      const importedActionEvents = importData.actionEvents ?? [];
+      if (!Array.isArray(importedActionEvents)) {
+        return { success: false, error: "actionEvents must be an array" };
+      }
+      if (importedActionEvents.length > MAX_ACTION_EVENTS) {
+        return {
+          success: false,
+          error: `Too many action events (max ${MAX_ACTION_EVENTS})`,
+        };
+      }
+      const eventIds = new Set<string>();
+      const validActionEventTypes = new Set([
+        "created",
+        "fields_changed",
+        "lifecycle_changed",
+        "result_recorded",
+        "corrected",
+        "migrated",
+        "deleted",
+        "edge_created",
+        "edge_deleted",
+      ]);
+      for (const event of importedActionEvents) {
+        if (
+          !event ||
+          event.schemaVersion !== ACTION_SCHEMA_VERSION ||
+          typeof event.id !== "string" ||
+          !event.id ||
+          typeof event.actionId !== "string" ||
+          !event.actionId ||
+          (event.entityType !== "action" && event.entityType !== "edge") ||
+          !validActionEventTypes.has(event.type) ||
+          typeof event.actor !== "string" ||
+          !event.actor ||
+          typeof event.timestamp !== "string" ||
+          Number.isNaN(Date.parse(event.timestamp)) ||
+          !Number.isInteger(event.revision) ||
+          event.revision < 1
+        ) {
+          return { success: false, error: "Invalid action event" };
+        }
+        if (eventIds.has(event.id)) {
+          return { success: false, error: `Duplicate action event: ${event.id}` };
+        }
+        eventIds.add(event.id);
+        if (!isValidActionEventImage(event)) {
+          return { success: false, error: `Invalid action event image: ${event.id}` };
+        }
+      }
+      const importedActionSnapshot = importData.actionSnapshot;
+      if (importedActionSnapshot) {
+        if (
+          importedActionSnapshot.schemaVersion !== ACTION_SCHEMA_VERSION ||
+          importedActionSnapshot.actionCount !== normalizedImportedActions.length ||
+          importedActionSnapshot.edgeCount !== importedActionEdges.length ||
+          importedActionSnapshot.eventCount !== importedActionEvents.length ||
+          !Number.isInteger(importedActionSnapshot.revision) ||
+          importedActionSnapshot.revision < 0 ||
+          importedActionSnapshot.revision <
+            Math.max(
+              0,
+              ...normalizedImportedActions.map(
+                (action) => action.revision ?? 0,
+              ),
+              ...importedActionEvents.map((event) => event.revision),
+            )
+        ) {
+          return { success: false, error: "Action snapshot counts or revision are invalid" };
+        }
+      }
+      if (strategy === "merge" || strategy === "skip") {
+        for (const event of importedActionEvents) {
+          const existing = await kv
+            .get<ActionEvent>(KV.actionEvents, event.id)
+            .catch(() => null);
+          if (
+            existing &&
+            JSON.stringify(existing) !== JSON.stringify(event)
+          ) {
+            return {
+              success: false,
+              error: `Action event ID conflict: ${event.id}`,
+            };
+          }
+        }
+      }
+
       const stats = {
         sessions: 0,
         observations: 0,
         memories: 0,
         summaries: 0,
+        actions: 0,
+        actionEdges: 0,
+        actionEvents: 0,
         skipped: 0,
       };
 
@@ -281,12 +452,6 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         const existingSummaries = await kv.list<SessionSummary>(KV.summaries);
         for (const s of existingSummaries) {
           await kv.delete(KV.summaries, s.sessionId);
-        }
-        for (const a of await kv.list<Action>(KV.actions).catch(() => [])) {
-          await kv.delete(KV.actions, a.id);
-        }
-        for (const e of await kv.list<ActionEdge>(KV.actionEdges).catch(() => [])) {
-          await kv.delete(KV.actionEdges, e.id);
         }
         for (const r of await kv.list<Routine>(KV.routines).catch(() => [])) {
           await kv.delete(KV.routines, r.id);
@@ -448,24 +613,110 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      if (importData.actions) {
-        for (const action of importData.actions) {
+      await withActionStoreLock(async () => {
+        const priorActionState = await kv
+          .get<ActionCollectionState>(KV.actionState, "current")
+          .catch(() => null);
+        let replacedExistingActionData = false;
+        if (strategy === "replace") {
+          const existingActions = await kv.list<Action>(KV.actions).catch(() => []);
+          const existingEdges = await kv
+            .list<ActionEdge>(KV.actionEdges)
+            .catch(() => []);
+          const existingEvents = await kv
+            .list<ActionEvent>(KV.actionEvents)
+            .catch(() => []);
+          replacedExistingActionData = Boolean(
+            priorActionState ||
+              existingActions.length ||
+              existingEdges.length ||
+              existingEvents.length,
+          );
+          for (const action of existingActions) {
+            await kv.delete(KV.actions, action.id);
+          }
+          for (const edge of existingEdges) {
+            await kv.delete(KV.actionEdges, edge.id);
+          }
+          for (const event of existingEvents) {
+            await kv.delete(KV.actionEvents, event.id);
+          }
+          await kv.delete(KV.actionState, "current").catch(() => {});
+        }
+
+        for (const action of normalizedImportedActions) {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.actions, action.id).catch(() => null);
-            if (existing) { stats.skipped++; continue; }
+            const existing = await kv
+              .get(KV.actions, action.id)
+              .catch(() => null);
+            if (existing) {
+              stats.skipped++;
+              continue;
+            }
           }
           await kv.set(KV.actions, action.id, action);
+          stats.actions++;
         }
-      }
-      if (importData.actionEdges) {
-        for (const edge of importData.actionEdges) {
+        for (const edge of importedActionEdges) {
           if (strategy === "skip") {
-            const existing = await kv.get(KV.actionEdges, edge.id).catch(() => null);
-            if (existing) { stats.skipped++; continue; }
+            const existing = await kv
+              .get(KV.actionEdges, edge.id)
+              .catch(() => null);
+            if (existing) {
+              stats.skipped++;
+              continue;
+            }
           }
           await kv.set(KV.actionEdges, edge.id, edge);
+          stats.actionEdges++;
         }
-      }
+        for (const event of importedActionEvents) {
+          if (strategy === "skip" || strategy === "merge") {
+            const existing = await kv
+              .get<ActionEvent>(KV.actionEvents, event.id)
+              .catch(() => null);
+            if (existing) {
+              stats.skipped++;
+              continue;
+            }
+          }
+          await kv.set(KV.actionEvents, event.id, event);
+          stats.actionEvents++;
+        }
+
+        const actionDataChanged =
+          stats.actions > 0 ||
+          stats.actionEdges > 0 ||
+          stats.actionEvents > 0 ||
+          replacedExistingActionData ||
+          (strategy === "replace" &&
+            (normalizedImportedActions.length > 0 ||
+              importedActionEdges.length > 0 ||
+              importedActionEvents.length > 0));
+        if (actionDataChanged || importedActionSnapshot) {
+          const currentActionState = await kv
+            .get<ActionCollectionState>(KV.actionState, "current")
+            .catch(() => null);
+          const importedRevision = Math.max(
+            importedActionSnapshot?.revision ?? 0,
+            ...normalizedImportedActions.map((action) => action.revision ?? 0),
+            ...importedActionEvents.map((event) => event.revision),
+          );
+          const revision =
+            strategy === "replace"
+              ? replacedExistingActionData
+                ? Math.max(priorActionState?.revision ?? 0, importedRevision) +
+                  1
+                : importedRevision
+              : Math.max(currentActionState?.revision ?? 0, importedRevision) + 1;
+          const nextActionState: ActionCollectionState = {
+            schemaVersion: ACTION_SCHEMA_VERSION,
+            revision,
+            updatedAt: new Date().toISOString(),
+          };
+          await kv.set(KV.actionState, "current", nextActionState);
+        }
+      });
       if (importData.routines) {
         for (const routine of importData.routines) {
           if (strategy === "skip") {
@@ -583,5 +834,119 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       });
       return { success: true, strategy, ...stats };
     },
+  );
+}
+
+function collectImportedActionsWithDerivedBlockers(
+  actions: Action[],
+  edges: ActionEdge[],
+  checkpoints: Checkpoint[],
+  sentinels: Sentinel[],
+): Set<string> {
+  const actionMap = new Map(actions.map((action) => [action.id, action]));
+  const checkpointMap = new Map(
+    checkpoints.map((checkpoint) => [checkpoint.id, checkpoint]),
+  );
+  const sentinelMap = new Map(
+    sentinels.map((sentinel) => [sentinel.id, sentinel]),
+  );
+  const unresolved = new Set<string>();
+  for (const edge of edges) {
+    if (edge.type === "requires") {
+      const dependency = actionMap.get(edge.targetActionId);
+      if ((dependency?.lifecycle ?? dependency?.status) !== "done") {
+        unresolved.add(edge.sourceActionId);
+      }
+      continue;
+    }
+    if (edge.type === "gated_by") {
+      if (
+        checkpointMap.get(edge.targetActionId)?.status !== "passed" &&
+        sentinelMap.get(edge.targetActionId)?.status !== "triggered"
+      ) {
+        unresolved.add(edge.sourceActionId);
+      }
+    }
+  }
+  return unresolved;
+}
+
+function isValidActionEventImage(event: ActionEvent): boolean {
+  const isDeletion = event.type === "deleted" || event.type === "edge_deleted";
+  if (isDeletion ? !event.before || event.after : !event.after) return false;
+  if (
+    event.entityType === "action" &&
+    (event.type === "edge_created" || event.type === "edge_deleted")
+  ) {
+    return false;
+  }
+  if (
+    event.entityType === "edge" &&
+    event.type !== "edge_created" &&
+    event.type !== "edge_deleted" &&
+    event.type !== "fields_changed"
+  ) {
+    return false;
+  }
+  for (const image of [event.before, event.after]) {
+    if (!image || typeof image !== "object") continue;
+    if (event.entityType === "action") {
+      if ((image as Action).id !== event.actionId) return false;
+      continue;
+    }
+    const edge = image as ActionEdge;
+    if (
+      typeof edge.id !== "string" ||
+      !edge.id ||
+      edge.sourceActionId !== event.actionId ||
+      typeof edge.targetActionId !== "string" ||
+      !edge.targetActionId
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isImportableAction(value: unknown): value is Action {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const action = value as Partial<Action>;
+  return (
+    typeof action.id === "string" &&
+    Boolean(action.id) &&
+    typeof action.title === "string" &&
+    typeof action.description === "string" &&
+    ["pending", "active", "done", "blocked", "cancelled"].includes(
+      String(action.status),
+    ) &&
+    typeof action.priority === "number" &&
+    Number.isFinite(action.priority) &&
+    typeof action.createdAt === "string" &&
+    !Number.isNaN(Date.parse(action.createdAt)) &&
+    typeof action.updatedAt === "string" &&
+    !Number.isNaN(Date.parse(action.updatedAt)) &&
+    typeof action.createdBy === "string"
+  );
+}
+
+function isImportableActionEdge(value: unknown): value is ActionEdge {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const edge = value as Partial<ActionEdge>;
+  return (
+    typeof edge.id === "string" &&
+    Boolean(edge.id) &&
+    [
+      "requires",
+      "unlocks",
+      "spawned_by",
+      "gated_by",
+      "conflicts_with",
+    ].includes(String(edge.type)) &&
+    typeof edge.sourceActionId === "string" &&
+    Boolean(edge.sourceActionId) &&
+    typeof edge.targetActionId === "string" &&
+    Boolean(edge.targetActionId) &&
+    typeof edge.createdAt === "string" &&
+    !Number.isNaN(Date.parse(edge.createdAt))
   );
 }

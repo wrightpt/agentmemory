@@ -2,6 +2,7 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import type { Action, ActionEdge, Crystal, MemoryProvider } from "../types.js";
+import { persistAction } from "./action-store.js";
 
 interface CrystalDigest {
   narrative: string;
@@ -92,7 +93,11 @@ export function registerCrystallizeFunction(
 
         for (const action of actions) {
           const updated = { ...action, crystallizedInto: crystal.id };
-          await kv.set(KV.actions, action.id, updated);
+          await persistAction(kv, updated, {
+            actor: "crystallize",
+            before: action,
+            reason: `Crystallized into ${crystal.id}`,
+          });
         }
 
         return { success: true, crystal };

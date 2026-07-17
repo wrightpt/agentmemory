@@ -339,6 +339,8 @@ export interface ExportData {
   proceduralMemories?: ProceduralMemory[];
   actions?: Action[];
   actionEdges?: ActionEdge[];
+  actionEvents?: ActionEvent[];
+  actionSnapshot?: ActionSnapshot;
   routines?: Routine[];
   signals?: Signal[];
   checkpoints?: Checkpoint[];
@@ -683,6 +685,111 @@ export interface Action {
   metadata?: Record<string, unknown>;
   sketchId?: string;
   crystallizedInto?: string;
+  schemaVersion?: 2;
+  revision?: number;
+  lifecycle?: ActionLifecycle;
+  projectId?: string;
+  projectAliases?: string[];
+  owner?: string;
+  notBefore?: string;
+  dueAt?: string;
+  awaitingHuman?: boolean;
+  approval?: ActionApproval;
+  blockedReason?: string;
+  repoRoot?: string;
+  worktree?: string;
+  branch?: string;
+  taskSlug?: string;
+}
+
+export type ActionLifecycle = "pending" | "active" | "done" | "cancelled";
+
+export type ActionReadinessView =
+  | "actionable"
+  | "scheduled"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "cancelled";
+
+export type ActionApprovalState =
+  | "not_required"
+  | "pending"
+  | "approved"
+  | "rejected";
+
+export interface ActionApproval {
+  state: ActionApprovalState;
+  requestedAt?: string;
+  requestedBy?: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  note?: string;
+}
+
+export type ActionEventType =
+  | "created"
+  | "fields_changed"
+  | "lifecycle_changed"
+  | "result_recorded"
+  | "corrected"
+  | "migrated"
+  | "deleted"
+  | "edge_created"
+  | "edge_deleted";
+
+export interface ActionEvent {
+  schemaVersion: 2;
+  id: string;
+  actionId: string;
+  entityType: "action" | "edge";
+  revision: number;
+  type: ActionEventType;
+  actor: string;
+  timestamp: string;
+  reason?: string;
+  correctionOf?: string;
+  before?: Action | ActionEdge;
+  after?: Action | ActionEdge;
+}
+
+export interface ActionCollectionState {
+  schemaVersion: 2;
+  revision: number;
+  updatedAt: string;
+  pending?: {
+    revision: number;
+    eventId: string;
+  };
+}
+
+export interface ActionSnapshot {
+  schemaVersion: 2;
+  revision: number;
+  actionCount: number;
+  edgeCount: number;
+  eventCount: number;
+}
+
+export interface ActionBlocker {
+  type:
+    | "manual"
+    | "requires"
+    | "checkpoint"
+    | "conflict"
+    | "lease"
+    | "approval"
+    | "schedule";
+  id?: string;
+  message: string;
+}
+
+export interface ActionViewItem {
+  action: Action;
+  view: ActionReadinessView;
+  blockers: ActionBlocker[];
+  leased: boolean;
+  score?: number;
 }
 
 export type ActionEdgeType =

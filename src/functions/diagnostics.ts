@@ -3,6 +3,11 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAudit } from "./audit.js";
+import {
+  deleteAction,
+  deleteActionEdge,
+  persistAction,
+} from "./action-store.js";
 import type {
   Action,
   ActionEdge,
@@ -685,9 +690,16 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                       return target && target.status === "done";
                     });
                     if (!stillAllDone) return false;
+                    const before = structuredClone(fresh);
                     fresh.status = "pending";
+                    fresh.lifecycle = "pending";
                     fresh.updatedAt = new Date().toISOString();
-                    await kv.set(KV.actions, fresh.id, fresh);
+                    await persistAction(kv, fresh, {
+                      actor: "heal",
+                      before,
+                      hasDerivedBlockers: false,
+                      reason: "blocked dependencies completed",
+                    });
                     await recordAudit(kv, "heal", "mem::heal", [fresh.id], {
                       reason: "blocked-deps-done",
                       previousStatus: "blocked",
@@ -744,9 +756,16 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                       return !target || target.status !== "done";
                     });
                     if (!stillUnsatisfied) return false;
+                    const before = structuredClone(fresh);
                     fresh.status = "blocked";
+                    fresh.lifecycle = "pending";
                     fresh.updatedAt = new Date().toISOString();
-                    await kv.set(KV.actions, fresh.id, fresh);
+                    await persistAction(kv, fresh, {
+                      actor: "heal",
+                      before,
+                      hasDerivedBlockers: true,
+                      reason: "pending action has unsatisfied dependencies",
+                    });
                     await recordAudit(kv, "heal", "mem::heal", [fresh.id], {
                       reason: "pending-unsatisfied-deps",
                       previousStatus: "pending",
@@ -811,14 +830,32 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                   action.status === "active" &&
                   action.assignedTo === fresh.agentId
                 ) {
+                  const before = structuredClone(action);
                   action.status = "pending";
+                  action.lifecycle = "pending";
                   action.assignedTo = undefined;
                   action.updatedAt = new Date().toISOString();
-                  await kv.set(KV.actions, action.id, action);
+                  await persistAction(kv, action, {
+                    actor: "heal",
+                    before,
+                    reason: "released expired lease",
+                  });
                   await recordAudit(kv, "heal", "mem::heal", [action.id], {
                     entityType: "action",
                     reason: "release-expired-lease",
                     newStatus: "pending",
+                  });
+                } else if (
+                  action &&
+                  action.status !== "done" &&
+                  action.status !== "cancelled"
+                ) {
+                  const before = structuredClone(action);
+                  action.updatedAt = new Date().toISOString();
+                  await persistAction(kv, action, {
+                    actor: "heal",
+                    before,
+                    reason: "expired lease; readiness revision refreshed",
                   });
                 }
                 return true;
@@ -941,7 +978,10 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                     actionIdSet.has(edge.sourceActionId) ||
                     actionIdSet.has(edge.targetActionId)
                   ) {
-                    await kv.delete(KV.actionEdges, edge.id);
+                    await deleteActionEdge(kv, edge.id, {
+                      actor: "heal",
+                      reason: `Garbage-collected discarded sketch ${fresh.id}`,
+                    });
                     await recordAudit(kv, "heal", "mem::heal", [edge.id], {
                       entityType: "actionEdge",
                       reason: "sketch-gc-discard",
@@ -950,7 +990,10 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                   }
                 }
                 for (const actionId of fresh.actionIds) {
-                  await kv.delete(KV.actions, actionId);
+                  await deleteAction(kv, actionId, {
+                    actor: "heal",
+                    reason: `Garbage-collected discarded sketch ${fresh.id}`,
+                  });
                   await recordAudit(kv, "heal", "mem::heal", [actionId], {
                     entityType: "action",
                     reason: "sketch-gc-discard",

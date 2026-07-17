@@ -61,4 +61,82 @@ describe("Actions REST pagination", () => {
     expect(response.status_code).toBe(400);
     expect(response.body.error).toBe(error);
   });
+
+  it("returns 409 when the collection changes between cursor pages", async () => {
+    const first = (await sdk.trigger("api::action-list", {
+      headers: {},
+      query_params: { limit: "10" },
+    })) as {
+      status_code: number;
+      body: { nextCursor: string; revision: number };
+    };
+    expect(first.status_code).toBe(200);
+
+    await sdk.trigger("mem::action-create", { title: "Concurrent task" });
+    const second = (await sdk.trigger("api::action-list", {
+      headers: {},
+      query_params: { limit: "10", cursor: first.body.nextCursor },
+    })) as {
+      status_code: number;
+      body: { success: boolean; error: string };
+    };
+
+    expect(second.status_code).toBe(409);
+    expect(second.body).toMatchObject({
+      success: false,
+      error: "revision_conflict",
+    });
+  });
+
+  it("whitelists action-create fields instead of forwarding the raw body", async () => {
+    let received: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::action-create", async (data) => {
+      received = data as Record<string, unknown>;
+      return { success: true, action: { id: "act_whitelist" } };
+    });
+
+    const response = (await sdk.trigger("api::action-create", {
+      headers: {},
+      body: {
+        title: "Allowed",
+        projectId: "agentmemory",
+        actor: "codex",
+        injectedInternalFlag: true,
+      },
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(201);
+    expect(received).toMatchObject({
+      title: "Allowed",
+      projectId: "agentmemory",
+      actor: "codex",
+    });
+    expect(received).not.toHaveProperty("injectedInternalFlag");
+  });
+
+  it("whitelists actions-v2 migration controls", async () => {
+    let received: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::migrate", async (data) => {
+      received = data as Record<string, unknown>;
+      return { success: true, ...received };
+    });
+
+    const response = (await sdk.trigger("api::migrate", {
+      headers: {},
+      body: {
+        step: "actions-v2",
+        projectAliases: { "/legacy": "agentmemory" },
+        limit: 25,
+        injectedInternalFlag: true,
+      },
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(200);
+    expect(received).toMatchObject({
+      step: "actions-v2",
+      projectAliases: { "/legacy": "agentmemory" },
+      limit: 25,
+    });
+    expect(received).not.toHaveProperty("injectedInternalFlag");
+  });
 });

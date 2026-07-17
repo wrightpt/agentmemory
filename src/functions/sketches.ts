@@ -4,6 +4,12 @@ import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import type { Action, ActionEdge, Sketch } from "../types.js";
 import { safeAudit } from "./audit.js";
+import {
+  deleteAction,
+  deleteActionEdge,
+  persistAction,
+  persistActionEdge,
+} from "./action-store.js";
 
 export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::sketch-create", 
@@ -68,7 +74,10 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
           id: generateId("act"),
           title: data.title.trim(),
           description: (data.description || "").trim(),
-          status: "pending",
+          status:
+            data.dependsOn && data.dependsOn.length > 0
+              ? "blocked"
+              : "pending",
           priority: Math.max(1, Math.min(10, data.priority || 5)),
           createdAt: now,
           updatedAt: now,
@@ -92,7 +101,13 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
           }
         }
 
-        await kv.set(KV.actions, action.id, action);
+        const persistedAction = await persistAction(kv, action, {
+          actor: "sketch",
+          type: "created",
+          before: null,
+          hasDerivedBlockers: Boolean(data.dependsOn?.length),
+          reason: `Added to sketch ${sketch.id}`,
+        });
         await safeAudit(kv, "sketch_create", "mem::sketch-add", [action.id], {
           action: "add.action",
           sketchId: sketch.id,
@@ -108,7 +123,11 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
               targetActionId: depId,
               createdAt: now,
             };
-            await kv.set(KV.actionEdges, edge.id, edge);
+            await persistActionEdge(kv, edge, {
+              actor: "sketch",
+              before: null,
+              reason: `Sketch ${sketch.id} dependency`,
+            });
             await safeAudit(kv, "sketch_create", "mem::sketch-add", [edge.id], {
               action: "add.edge",
               sketchId: sketch.id,
@@ -124,7 +143,7 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
           addedActionId: action.id,
         });
 
-        return { success: true, action, edges: createdEdges };
+        return { success: true, action: persistedAction.action, edges: createdEdges };
       });
     },
   );
@@ -148,12 +167,25 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
         for (const actionId of sketch.actionIds) {
           const action = await kv.get<Action>(KV.actions, actionId);
           if (action) {
+            const before = structuredClone(action);
             delete action.sketchId;
             if (data.project) {
+              const previousProject = action.projectId || action.project;
               action.project = data.project;
+              action.projectId = undefined;
+              action.projectAliases = [
+                ...new Set([
+                  ...(action.projectAliases ?? []),
+                  ...(previousProject ? [previousProject] : []),
+                ]),
+              ];
             }
             action.updatedAt = new Date().toISOString();
-            await kv.set(KV.actions, action.id, action);
+            await persistAction(kv, action, {
+              actor: "sketch-promote",
+              before,
+              reason: `Promoted from sketch ${sketch.id}`,
+            });
             await safeAudit(kv, "sketch_promote", "mem::sketch-promote", [action.id], {
               action: "promote.action",
               sketchId: sketch.id,
@@ -198,7 +230,10 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
             actionIdSet.has(edge.sourceActionId) ||
             actionIdSet.has(edge.targetActionId)
           ) {
-            await kv.delete(KV.actionEdges, edge.id);
+            await deleteActionEdge(kv, edge.id, {
+              actor: "sketch-discard",
+              reason: `Discarded sketch ${sketch.id}`,
+            });
             await safeAudit(kv, "sketch_discard", "mem::sketch-discard", [edge.id], {
               action: "discard.edge",
               sketchId: sketch.id,
@@ -207,7 +242,10 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         for (const actionId of sketch.actionIds) {
-          await kv.delete(KV.actions, actionId);
+          await deleteAction(kv, actionId, {
+            actor: "sketch-discard",
+            reason: `Discarded sketch ${sketch.id}`,
+          });
           await safeAudit(kv, "sketch_discard", "mem::sketch-discard", [actionId], {
             action: "discard.action",
             sketchId: sketch.id,
@@ -283,7 +321,10 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
               actionIdSet.has(edge.sourceActionId) ||
               actionIdSet.has(edge.targetActionId)
             ) {
-              await kv.delete(KV.actionEdges, edge.id);
+              await deleteActionEdge(kv, edge.id, {
+                actor: "sketch-gc",
+                reason: `Expired sketch ${current.id}`,
+              });
               await safeAudit(kv, "sketch_discard", "mem::sketch-gc", [edge.id], {
                 action: "gc.edge",
                 sketchId: current.id,
@@ -292,7 +333,10 @@ export function registerSketchesFunction(sdk: ISdk, kv: StateKV): void {
           }
 
           for (const actionId of current.actionIds) {
-            await kv.delete(KV.actions, actionId);
+            await deleteAction(kv, actionId, {
+              actor: "sketch-gc",
+              reason: `Expired sketch ${current.id}`,
+            });
             await safeAudit(kv, "sketch_discard", "mem::sketch-gc", [actionId], {
               action: "gc.action",
               sketchId: current.id,

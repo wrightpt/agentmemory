@@ -46,6 +46,8 @@ export const KV = {
   audit: "mem:audit",
   actions: "mem:actions",
   actionEdges: "mem:action-edges",
+  actionEvents: "mem:action-events",
+  actionState: "mem:action-state",
   leases: "mem:leases",
   routines: "mem:routines",
   routineRuns: "mem:routine-runs",

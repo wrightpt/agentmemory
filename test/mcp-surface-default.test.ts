@@ -6,7 +6,7 @@ import {
   WORKSTATION_TOOLS,
 } from "../src/mcp/tools-registry.js";
 
-// plugin manifests and README advertise 51 MCP tools. The old
+// Plugin manifests and README advertise the full MCP surface. The old
 // default was AGENTMEMORY_TOOLS=core which silently capped the surface
 // at a lean subset with no indication the other tools existed. Default
 // flipped to "all"; the lean set is still accessible via
@@ -21,7 +21,7 @@ describe("MCP tool surface default (#553)", () => {
     else process.env["AGENTMEMORY_TOOLS"] = ORIG;
   });
 
-  it("default returns the full 51-tool surface, matching plugin advertising", () => {
+  it("default returns the full tool surface, matching plugin advertising", () => {
     const visible = getVisibleTools();
     const all = getAllTools();
     expect(visible.length).toBe(all.length);
@@ -55,6 +55,7 @@ describe("MCP tool surface default (#553)", () => {
     const names = new Set(getVisibleTools().map((tool) => tool.name));
     expect(names).toEqual(WORKSTATION_TOOLS);
     expect(names.has("memory_action_create")).toBe(true);
+    expect(names.has("memory_action_list")).toBe(true);
     expect(names.has("memory_lease")).toBe(true);
     expect(names.has("memory_signal_send")).toBe(true);
     expect(names.has("memory_consolidate")).toBe(false);

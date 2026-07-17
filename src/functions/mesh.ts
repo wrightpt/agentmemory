@@ -15,6 +15,7 @@ import type {
 } from "../types.js";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { persistAction } from "./action-store.js";
 
 function isPrivateIP(ip: string): boolean {
   if (ip === "127.0.0.1" || ip === "::1" || ip === "0.0.0.0") return true;
@@ -99,6 +100,42 @@ async function lwwMergeList<T extends { id: string }>(
         return true;
       }
       return false;
+    });
+    if (wrote) count++;
+  }
+  return count;
+}
+
+async function lwwMergeActions(
+  kv: StateKV,
+  items: Action[] | undefined,
+): Promise<number> {
+  if (!items || !Array.isArray(items)) return 0;
+  let count = 0;
+  for (const item of items) {
+    if (
+      !item?.id ||
+      typeof item.id !== "string" ||
+      typeof item.updatedAt !== "string" ||
+      Number.isNaN(Date.parse(item.updatedAt))
+    ) {
+      continue;
+    }
+    const wrote = await withKeyedLock(`mem:action:${item.id}`, async () => {
+      const existing = await kv.get<Action>(KV.actions, item.id);
+      if (
+        existing &&
+        Date.parse(existing.updatedAt) >= Date.parse(item.updatedAt)
+      ) {
+        return false;
+      }
+      await persistAction(kv, item, {
+        actor: "mesh-sync",
+        before: existing,
+        type: existing ? "fields_changed" : "created",
+        reason: "Last-write-wins mesh synchronization",
+      });
+      return true;
     });
     if (wrote) count++;
   }
@@ -340,7 +377,7 @@ export function registerMeshFunction(
       let accepted = 0;
 
       accepted += await lwwMergeList(kv, KV.memories, data.memories, "mem:memory", "updatedAt");
-      accepted += await lwwMergeList(kv, KV.actions, data.actions, "mem:action", "updatedAt");
+      accepted += await lwwMergeActions(kv, data.actions);
       accepted += await lwwMergeList(kv, KV.semantic, data.semantic, "mem:semantic", "updatedAt");
       accepted += await lwwMergeList(kv, KV.procedural, data.procedural, "mem:procedural", "updatedAt");
       if (data.relations && Array.isArray(data.relations)) {
@@ -461,7 +498,7 @@ async function applySyncData(
     applied += await lwwMergeList(kv, KV.memories, data.memories, "mem:memory", "updatedAt");
   }
   if (scopes.includes("actions")) {
-    applied += await lwwMergeList(kv, KV.actions, data.actions, "mem:action", "updatedAt");
+    applied += await lwwMergeActions(kv, data.actions);
   }
   if (scopes.includes("semantic")) {
     applied += await lwwMergeList(kv, KV.semantic, data.semantic, "mem:semantic", "updatedAt");

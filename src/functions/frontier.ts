@@ -1,122 +1,96 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
-import type { Action, ActionEdge, Checkpoint, Lease } from "../types.js";
+import type {
+  ActionBlocker,
+  ActionReadinessView,
+  Checkpoint,
+  Lease,
+  Sentinel,
+} from "../types.js";
+import {
+  buildActionViewIndex,
+  classifyAction,
+  computeActionScore,
+} from "./action-model.js";
+import { matchesActionProject } from "./action-query.js";
+import { readActionStoreSnapshot } from "./action-store.js";
 
 export interface FrontierItem {
-  action: Action;
+  action: import("../types.js").Action;
   score: number;
-  blockers: string[];
+  blockers: ActionBlocker[];
   leased: boolean;
+  view: ActionReadinessView;
 }
 
 export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
-  sdk.registerFunction("mem::frontier", 
+  sdk.registerFunction(
+    "mem::frontier",
     async (data: {
       project?: string;
       agentId?: string;
       limit?: number;
       includeLeasedByOthers?: boolean;
     }) => {
-      const actions = await kv.list<Action>(KV.actions);
-      const edges = await kv.list<ActionEdge>(KV.actionEdges);
-      const leases = await kv.list<Lease>(KV.leases);
-      const checkpoints = await kv.list<Checkpoint>(KV.checkpoints);
+      const [snapshot, leases, checkpoints, sentinels] = await Promise.all([
+        readActionStoreSnapshot(kv),
+        kv.list<Lease>(KV.leases).catch(() => []),
+        kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
+        kv.list<Sentinel>(KV.sentinels).catch(() => []),
+      ]);
       const now = Date.now();
-
-      const activeLeaseMap = new Map<string, Lease>();
-      for (const lease of leases) {
-        if (
-          lease.status === "active" &&
-          new Date(lease.expiresAt).getTime() > now
-        ) {
-          activeLeaseMap.set(lease.actionId, lease);
-        }
-      }
-
-      const checkpointMap = new Map<string, Checkpoint>();
-      for (const cp of checkpoints) {
-        checkpointMap.set(cp.id, cp);
-      }
-
-      const actionMap = new Map<string, Action>();
-      for (const a of actions) actionMap.set(a.id, a);
-
-      const frontier: FrontierItem[] = [];
-
-      for (const action of actions) {
-        if (action.status !== "pending" && action.status !== "active") continue;
-        if (data.project && action.project !== data.project) continue;
-
-        const blockers: string[] = [];
-        const inEdges = edges.filter(
-          (e) => e.sourceActionId === action.id && e.type === "requires",
+      const viewContext = {
+        actions: snapshot.actions,
+        edges: snapshot.edges,
+        checkpoints,
+        sentinels,
+        leases,
+        agentId: data.includeLeasedByOthers ? undefined : data.agentId,
+        now,
+      };
+      const index = buildActionViewIndex(viewContext);
+      const frontier = snapshot.actions
+        .filter(
+          (action) =>
+            !data.project || matchesActionProject(action, data.project),
+        )
+        .map((action) =>
+          classifyAction(action, {
+            ...viewContext,
+            index,
+          }),
+        )
+        .filter((item) => item.view === "actionable")
+        .map<FrontierItem>((item) => ({
+          ...item,
+          score: computeActionScore(
+            item.action,
+            index.edgesByActionId.get(item.action.id) ?? [],
+            now,
+          ),
+        }))
+        .sort(
+          (left, right) =>
+            right.score - left.score ||
+            left.action.id.localeCompare(right.action.id),
         );
-
-        for (const edge of inEdges) {
-          const dep = actionMap.get(edge.targetActionId);
-          if (dep && dep.status !== "done") {
-            blockers.push(`requires:${dep.id}:${dep.title}`);
-          }
-        }
-
-        const gateEdges = edges.filter(
-          (e) => e.sourceActionId === action.id && e.type === "gated_by",
-        );
-        for (const edge of gateEdges) {
-          const cp = checkpointMap.get(edge.targetActionId);
-          if (cp && cp.status !== "passed") {
-            blockers.push(`checkpoint:${cp.id}:${cp.name}`);
-          }
-        }
-
-        const conflictEdges = edges.filter(
-          (e) =>
-            (e.sourceActionId === action.id ||
-              e.targetActionId === action.id) &&
-            e.type === "conflicts_with",
-        );
-        for (const edge of conflictEdges) {
-          const otherId =
-            edge.sourceActionId === action.id
-              ? edge.targetActionId
-              : edge.sourceActionId;
-          const other = actionMap.get(otherId);
-          if (other && other.status === "active") {
-            blockers.push(`conflict:${other.id}:${other.title}`);
-          }
-        }
-
-        if (blockers.length > 0) continue;
-
-        const lease = activeLeaseMap.get(action.id);
-        const leasedByOther =
-          lease && data.agentId && lease.agentId !== data.agentId;
-        if (leasedByOther && !data.includeLeasedByOthers) continue;
-
-        const score = computeScore(action, edges, now);
-
-        frontier.push({
-          action,
-          score,
-          blockers: [],
-          leased: !!lease,
-        });
-      }
-
-      frontier.sort((a, b) => b.score - a.score);
-      const limit = data.limit || 20;
-
+      const limit =
+        Number.isInteger(data.limit) && (data.limit ?? 0) > 0
+          ? Math.min(data.limit!, 500)
+          : 20;
       return {
         success: true,
         frontier: frontier.slice(0, limit),
-        totalActions: actions.length,
+        totalActions: snapshot.actions.length,
         totalUnblocked: frontier.length,
+        revision: snapshot.state.revision,
       };
     },
   );
 
-  sdk.registerFunction("mem::next", 
+  sdk.registerFunction(
+    "mem::next",
     async (data: { project?: string; agentId?: string }) => {
       const result = await sdk.trigger<
         { project?: string; agentId?: string; limit?: number },
@@ -125,12 +99,12 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
           frontier: FrontierItem[];
           totalActions: number;
           totalUnblocked: number;
+          revision: number;
         }
-      >({ function_id: "mem::frontier", payload: {
-        project: data.project,
-        agentId: data.agentId,
-        limit: 1,
-      } });
+      >({
+        function_id: "mem::frontier",
+        payload: { project: data.project, agentId: data.agentId, limit: 1 },
+      });
 
       if (!result.success) {
         return {
@@ -146,6 +120,8 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
           suggestion: null,
           message: "No actionable work found",
           totalActions: result.totalActions || 0,
+          totalUnblocked: 0,
+          revision: result.revision,
         };
       }
 
@@ -159,36 +135,15 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
           priority: top.action.priority,
           score: top.score,
           tags: top.action.tags,
+          view: top.view,
+          dueAt: top.action.dueAt,
+          owner: top.action.owner,
         },
         message: `Suggested: ${top.action.title} (priority ${top.action.priority}, score ${top.score.toFixed(2)})`,
         totalActions: result.totalActions,
         totalUnblocked: result.totalUnblocked,
+        revision: result.revision,
       };
     },
   );
-}
-
-function computeScore(
-  action: Action,
-  edges: ActionEdge[],
-  now: number,
-): number {
-  let score = action.priority * 10;
-
-  const ageHours =
-    (now - new Date(action.createdAt).getTime()) / (1000 * 60 * 60);
-  score += Math.min(ageHours * 0.5, 20);
-
-  const unlockCount = edges.filter(
-    (e) => e.sourceActionId === action.id && e.type === "unlocks",
-  ).length;
-  score += unlockCount * 5;
-
-  if (edges.some((e) => e.sourceActionId === action.id && e.type === "spawned_by")) {
-    score += 3;
-  }
-
-  if (action.status === "active") score += 15;
-
-  return Math.round(score * 100) / 100;
 }

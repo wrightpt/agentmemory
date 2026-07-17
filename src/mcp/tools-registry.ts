@@ -386,7 +386,18 @@ export const V050_TOOLS: McpToolDef[] = [
           type: "number",
           description: "Priority 1-10 (10 highest)",
         },
-        project: { type: "string", description: "Project path" },
+        project: {
+          type: "string",
+          description: "Legacy project identifier or alias",
+        },
+        projectId: {
+          type: "string",
+          description: "Canonical non-path project identifier",
+        },
+        projectAliases: {
+          type: "string",
+          description: "Comma-separated legacy project aliases",
+        },
         tags: {
           type: "string",
           description: "Comma-separated tags",
@@ -400,6 +411,33 @@ export const V050_TOOLS: McpToolDef[] = [
           description:
             "Comma-separated action IDs that must complete before this",
         },
+        lifecycle: {
+          type: "string",
+          description: "Canonical lifecycle: pending, active, done, or cancelled",
+        },
+        owner: { type: "string", description: "Durable action owner" },
+        notBefore: {
+          type: "string",
+          description: "ISO timestamp before which the action is scheduled",
+        },
+        dueAt: { type: "string", description: "ISO due timestamp" },
+        awaitingHuman: {
+          type: "boolean",
+          description: "Whether progress waits for human input",
+        },
+        approvalState: {
+          type: "string",
+          description: "not_required, pending, approved, or rejected",
+        },
+        blockedReason: {
+          type: "string",
+          description: "Explicit manual blocking reason",
+        },
+        repoRoot: { type: "string", description: "Repository root context" },
+        worktree: { type: "string", description: "Worktree path or label" },
+        branch: { type: "string", description: "Git branch context" },
+        taskSlug: { type: "string", description: "Stable task slug" },
+        actor: { type: "string", description: "Agent or human making the change" },
       },
       required: ["title"],
     },
@@ -416,13 +454,89 @@ export const V050_TOOLS: McpToolDef[] = [
           type: "string",
           description: "New status: pending, active, done, blocked, cancelled",
         },
+        lifecycle: {
+          type: "string",
+          description: "Canonical lifecycle: pending, active, done, or cancelled",
+        },
+        title: { type: "string", description: "Replacement action title" },
+        description: {
+          type: "string",
+          description: "Replacement action description",
+        },
         result: {
           type: "string",
           description: "Outcome description (when completing)",
         },
         priority: { type: "number", description: "New priority 1-10" },
+        assignedTo: {
+          type: "string",
+          description: "Current worker assignment",
+        },
+        owner: { type: "string", description: "Durable action owner" },
+        tags: { type: "string", description: "Comma-separated replacement tags" },
+        project: {
+          type: "string",
+          description: "Legacy project identifier or alias",
+        },
+        projectId: {
+          type: "string",
+          description: "Canonical non-path project identifier",
+        },
+        projectAliases: {
+          type: "string",
+          description: "Comma-separated legacy project aliases",
+        },
+        notBefore: { type: "string", description: "ISO scheduling timestamp" },
+        dueAt: { type: "string", description: "ISO due timestamp" },
+        awaitingHuman: {
+          type: "boolean",
+          description: "Whether progress waits for human input",
+        },
+        approvalState: {
+          type: "string",
+          description: "not_required, pending, approved, or rejected",
+        },
+        blockedReason: {
+          type: "string",
+          description: "Explicit manual blocking reason",
+        },
+        repoRoot: { type: "string", description: "Repository root context" },
+        worktree: { type: "string", description: "Worktree path or label" },
+        branch: { type: "string", description: "Git branch context" },
+        taskSlug: { type: "string", description: "Stable task slug" },
+        actor: { type: "string", description: "Agent or human making the change" },
+        correctionOf: {
+          type: "string",
+          description: "Event ID corrected by this append-only change",
+        },
+        correctionReason: {
+          type: "string",
+          description: "Reason for the correction",
+        },
       },
       required: ["actionId"],
+    },
+  },
+  {
+    name: "memory_action_list",
+    description:
+      "List actions through revision-bound actionable, scheduled, waiting, blocked, completed, or cancelled views.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project: { type: "string", description: "Canonical project ID or alias" },
+        status: { type: "string", description: "Legacy status filter" },
+        view: {
+          type: "string",
+          description: "actionable, scheduled, waiting, blocked, completed, or cancelled",
+        },
+        owner: { type: "string", description: "Durable owner filter" },
+        tags: { type: "string", description: "Comma-separated tag filter" },
+        agentId: { type: "string", description: "Agent ID for lease readiness" },
+        limit: { type: "number", description: "Page size (default 50, maximum 500)" },
+        cursor: { type: "string", description: "Opaque nextCursor from the prior page" },
+        revision: { type: "number", description: "Expected collection revision" },
+      },
     },
   },
   {
@@ -952,6 +1066,7 @@ export const WORKSTATION_TOOLS = new Set([
   "memory_file_history",
   "memory_action_create",
   "memory_action_update",
+  "memory_action_list",
   "memory_frontier",
   "memory_next",
   "memory_lease",

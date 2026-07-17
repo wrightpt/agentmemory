@@ -5,7 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerLeasesFunction } from "../src/functions/leases.js";
-import type { Action, Lease } from "../src/types.js";
+import type { Action, ActionEdge, Lease } from "../src/types.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -219,6 +219,35 @@ describe("Lease Functions", () => {
       expect(action!.status).toBe("done");
       expect(action!.result).toBe("completed successfully");
       expect(action!.assignedTo).toBeUndefined();
+    });
+
+    it("unblocks dependents when a lease is released with a result", async () => {
+      const dependent = (await kv.get<Action>("mem:actions", "act_4"))!;
+      dependent.status = "blocked";
+      await kv.set("mem:actions", dependent.id, dependent);
+      const edge: ActionEdge = {
+        id: "ae_lease_completion",
+        type: "requires",
+        sourceActionId: dependent.id,
+        targetActionId: "act_1",
+        createdAt: "2026-07-17T06:00:00.000Z",
+      };
+      await kv.set("mem:action-edges", edge.id, edge);
+      await sdk.trigger("mem::lease-acquire", {
+        actionId: "act_1",
+        agentId: "agent-a",
+      });
+
+      await sdk.trigger("mem::lease-release", {
+        actionId: "act_1",
+        agentId: "agent-a",
+        result: "dependency complete",
+      });
+
+      expect(await kv.get<Action>("mem:actions", dependent.id)).toMatchObject({
+        status: "pending",
+        lifecycle: "pending",
+      });
     });
 
     it("sets action to pending when no result is provided", async () => {
