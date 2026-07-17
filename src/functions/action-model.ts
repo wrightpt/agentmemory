@@ -359,10 +359,25 @@ export function normalizeActionV2(
 
   return {
     action,
-    changed: JSON.stringify(action) !== JSON.stringify(input),
+    changed: canonicalJson(action) !== canonicalJson(input),
     warnings: [...new Set(warnings)],
     conflicts: [...new Set(conflicts)],
   };
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested) => {
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+      return nested;
+    }
+    return Object.fromEntries(
+      Object.entries(nested)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        ),
+    );
+  });
 }
 
 export function classifyAction(

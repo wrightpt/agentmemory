@@ -149,6 +149,47 @@ describe("Actions v2 migration", () => {
     expect(await kv.list("mem:audit")).toHaveLength(1);
   });
 
+  it("does not rewrite an approval when only its JSON key order changed", async () => {
+    const kv = mockKV();
+    const action = legacyAction("act_approval_order", {
+      project: "workstation",
+      tags: ["requires-confirmation"],
+    });
+    await kv.set("mem:actions", action.id, action);
+
+    const first = await migrateActionsV2(kv as never, {
+      dryRun: false,
+      actor: "migration-test",
+    });
+    const migrated = await kv.get<Action>("mem:actions", action.id);
+    expect(first).toMatchObject({ success: true, changed: 1, revisionAfter: 1 });
+    expect(migrated?.approval).toMatchObject({
+      state: "pending",
+      requestedAt: action.createdAt,
+    });
+
+    const reordered = JSON.parse(JSON.stringify(migrated)) as Action;
+    reordered.approval = {
+      requestedAt: migrated?.approval?.requestedAt,
+      state: "pending",
+    };
+    await kv.set("mem:actions", action.id, reordered);
+
+    const retry = await migrateActionsV2(kv as never, {
+      dryRun: false,
+      actor: "migration-test",
+    });
+
+    expect(retry).toMatchObject({
+      success: true,
+      changed: 0,
+      skipped: 1,
+      revisionBefore: 1,
+      revisionAfter: 1,
+    });
+    expect(await kv.list("mem:action-events")).toHaveLength(1);
+  });
+
   it("infers canonical IDs from Unix and Windows repository paths", async () => {
     const kv = mockKV();
     await kv.set(
