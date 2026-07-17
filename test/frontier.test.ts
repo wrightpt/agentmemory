@@ -125,11 +125,16 @@ describe("Frontier Functions", () => {
       );
     });
 
-    it("excludes done and cancelled actions", async () => {
+    it("excludes blocked, done, and cancelled actions", async () => {
       const pending = makeAction({
         id: "act_pending",
         title: "Pending",
         status: "pending",
+      });
+      const blocked = makeAction({
+        id: "act_blocked",
+        title: "Blocked",
+        status: "blocked",
       });
       const done = makeAction({
         id: "act_done",
@@ -143,6 +148,7 @@ describe("Frontier Functions", () => {
       });
 
       await kv.set("mem:actions", pending.id, pending);
+      await kv.set("mem:actions", blocked.id, blocked);
       await kv.set("mem:actions", done.id, done);
       await kv.set("mem:actions", cancelled.id, cancelled);
 
@@ -150,12 +156,14 @@ describe("Frontier Functions", () => {
         success: boolean;
         frontier: FrontierItem[];
         totalActions: number;
+        totalUnblocked: number;
       };
 
       expect(result.success).toBe(true);
       expect(result.frontier.length).toBe(1);
       expect(result.frontier[0].action.id).toBe("act_pending");
-      expect(result.totalActions).toBe(3);
+      expect(result.totalActions).toBe(4);
+      expect(result.totalUnblocked).toBe(1);
     });
 
     it("excludes blocked actions with unsatisfied requires edge", async () => {
@@ -416,6 +424,28 @@ describe("Frontier Functions", () => {
 
       expect(result.success).toBe(true);
       expect(result.suggestion).toBeNull();
+      expect(result.totalActions).toBe(1);
+    });
+
+    it("returns null when all actions are blocked", async () => {
+      const blockedAction = makeAction({
+        id: "act_blocked",
+        title: "Waiting for approval",
+        status: "blocked",
+        priority: 10,
+      });
+      await kv.set("mem:actions", blockedAction.id, blockedAction);
+
+      const result = (await sdk.trigger("mem::next", {})) as {
+        success: boolean;
+        suggestion: null;
+        message: string;
+        totalActions: number;
+      };
+
+      expect(result.success).toBe(true);
+      expect(result.suggestion).toBeNull();
+      expect(result.message).toContain("No actionable work");
       expect(result.totalActions).toBe(1);
     });
 
