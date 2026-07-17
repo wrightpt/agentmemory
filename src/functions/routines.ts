@@ -4,6 +4,7 @@ import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import type { Action, Routine, RoutineStep, RoutineRun } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { persistAction, persistActionEdge } from "./action-store.js";
 
 export function registerRoutinesFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::routine-create", 
@@ -138,7 +139,13 @@ export function registerRoutinesFunction(sdk: ISdk, kv: StateKV): void {
             metadata: { routineId: routine.id, stepOrder: step.order },
           };
 
-          await kv.set(KV.actions, action.id, action);
+          await persistAction(kv, action, {
+            actor: data.initiatedBy || "routine",
+            type: "created",
+            before: null,
+            hasDerivedBlockers: hasDeps,
+            reason: `Routine ${routine.id} instantiated`,
+          });
           stepOrderToActionId.set(step.order, action.id);
           actionIds.push(action.id);
           stepStatus[step.order] = "pending";
@@ -158,7 +165,11 @@ export function registerRoutinesFunction(sdk: ISdk, kv: StateKV): void {
               targetActionId: depActionId,
               createdAt: now,
             };
-            await kv.set(KV.actionEdges, edge.id, edge);
+            await persistActionEdge(kv, edge, {
+              actor: data.initiatedBy || "routine",
+              before: null,
+              reason: `Routine ${routine.id} dependency`,
+            });
           }
         }
 

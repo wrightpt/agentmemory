@@ -10,6 +10,10 @@ import type {
   SessionSummary,
 } from "../types.js";
 import { logger } from "../logger.js";
+import {
+  migrateActionsV2,
+  type ActionsV2MigrationInput,
+} from "./actions-v2-migration.js";
 
 const ALLOWED_DIRS = [resolve(homedir(), ".agentmemory")];
 
@@ -87,8 +91,42 @@ export async function inferMemoryProjects(
 
 export function registerMigrateFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::migrate",
-    async (data: { dbPath?: string; step?: string; dryRun?: boolean }) => {
+    async (data: {
+      dbPath?: string;
+      step?: string;
+      dryRun?: boolean;
+      projectAliases?: Record<string, string>;
+      defaultProjectId?: string;
+      limit?: number;
+      cursor?: string;
+      actor?: string;
+    }) => {
       // In-place KV migration steps (no SQLite dependency).
+      if (data.step === "actions-v2") {
+        const migrationInput: ActionsV2MigrationInput = {
+          dryRun: data.dryRun ?? true,
+          projectAliases: data.projectAliases,
+          defaultProjectId: data.defaultProjectId,
+          limit: data.limit,
+          cursor: data.cursor,
+          actor: data.actor,
+        };
+        logger.info("Migration step: actions-v2", {
+          dryRun: migrationInput.dryRun,
+          limit: migrationInput.limit,
+          hasCursor: Boolean(migrationInput.cursor),
+          aliasCount: Object.keys(migrationInput.projectAliases ?? {}).length,
+        });
+        try {
+          return await migrateActionsV2(kv, migrationInput);
+        } catch (error) {
+          return {
+            success: false,
+            step: "actions-v2",
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      }
       if (data.step === "infer-memory-projects") {
         const dryRun = data.dryRun ?? false;
         logger.info("Migration step: infer-memory-projects", { dryRun });

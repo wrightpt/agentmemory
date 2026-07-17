@@ -122,6 +122,17 @@ function asNonEmptyString(value: unknown): string | null {
   return trimmed ? trimmed : null;
 }
 
+function pickDefinedFields(
+  body: Record<string, unknown>,
+  fields: readonly string[],
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const field of fields) {
+    if (body[field] !== undefined) result[field] = body[field];
+  }
+  return result;
+}
+
 function sessionContextFields(body: Record<string, unknown>): Partial<HookPayload> {
   const result: Partial<HookPayload> = {};
   for (const field of [
@@ -1249,7 +1260,16 @@ export function registerApiTriggers(
 
   sdk.registerFunction("api::migrate",
     async (
-      req: ApiRequest<{ dbPath?: string; step?: string; dryRun?: boolean }>,
+      req: ApiRequest<{
+        dbPath?: string;
+        step?: string;
+        dryRun?: boolean;
+        projectAliases?: Record<string, string>;
+        defaultProjectId?: string;
+        limit?: number;
+        cursor?: string;
+        actor?: string;
+      }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
@@ -1263,13 +1283,52 @@ export function registerApiTriggers(
           body: { error: "Either step (string) or dbPath (string) is required" },
         };
       }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (
+        body.dryRun !== undefined &&
+        typeof body.dryRun !== "boolean"
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "dryRun must be boolean" },
+        };
+      }
+      if (
+        body.projectAliases !== undefined &&
+        (typeof body.projectAliases !== "object" ||
+          body.projectAliases === null ||
+          Array.isArray(body.projectAliases) ||
+          Object.values(body.projectAliases).some(
+            (value) => typeof value !== "string",
+          ))
+      ) {
+        return {
+          status_code: 400,
+          body: { error: "projectAliases must map strings to strings" },
+        };
+      }
+      const limit = parseOptionalPositiveInt(body.limit);
+      if (limit === null) {
+        return {
+          status_code: 400,
+          body: { error: "limit must be a positive integer" },
+        };
+      }
       const result = await sdk.trigger({
         function_id: "mem::migrate",
-        payload: {
-          ...(req.body.step !== undefined && { step: req.body.step }),
-          ...(req.body.dbPath !== undefined && { dbPath: req.body.dbPath }),
-          ...(req.body.dryRun !== undefined && { dryRun: req.body.dryRun }),
-        },
+        payload: pickDefinedFields(
+          { ...body, ...(limit !== undefined ? { limit } : {}) },
+          [
+            "step",
+            "dbPath",
+            "dryRun",
+            "projectAliases",
+            "defaultProjectId",
+            "limit",
+            "cursor",
+            "actor",
+          ],
+        ),
       });
       return { status_code: 200, body: result };
     },
@@ -2386,25 +2445,44 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::action-create",
-    async (
-      req: ApiRequest<{
-        title: string;
-        description?: string;
-        priority?: number;
-        createdBy?: string;
-        project?: string;
-        tags?: string[];
-        parentId?: string;
-        edges?: Array<{ type: string; targetActionId: string }>;
-      }>,
-    ): Promise<Response> => {
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.title) {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.title)) {
         return { status_code: 400, body: { error: "title is required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::action-create", payload: req.body });
-      return { status_code: 201, body: result };
+      const result = await sdk.trigger({
+        function_id: "mem::action-create",
+        payload: pickDefinedFields(body, [
+          "title",
+          "description",
+          "priority",
+          "createdBy",
+          "actor",
+          "project",
+          "projectId",
+          "projectAliases",
+          "tags",
+          "parentId",
+          "sourceObservationIds",
+          "sourceMemoryIds",
+          "edges",
+          "lifecycle",
+          "owner",
+          "notBefore",
+          "dueAt",
+          "awaitingHuman",
+          "approval",
+          "blockedReason",
+          "repoRoot",
+          "worktree",
+          "branch",
+          "taskSlug",
+        ]),
+      });
+      const success = (result as { success?: boolean }).success !== false;
+      return { status_code: success ? 201 : 400, body: result };
     },
   );
   sdk.registerTrigger({
@@ -2414,23 +2492,45 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::action-update", 
-    async (
-      req: ApiRequest<{
-        actionId: string;
-        status?: string;
-        title?: string;
-        description?: string;
-        priority?: number;
-        result?: string;
-      }>,
-    ): Promise<Response> => {
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.actionId) {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!asNonEmptyString(body.actionId)) {
         return { status_code: 400, body: { error: "actionId is required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::action-update", payload: req.body });
-      return { status_code: 200, body: result };
+      const result = await sdk.trigger({
+        function_id: "mem::action-update",
+        payload: pickDefinedFields(body, [
+          "actionId",
+          "status",
+          "lifecycle",
+          "title",
+          "description",
+          "priority",
+          "assignedTo",
+          "owner",
+          "result",
+          "tags",
+          "project",
+          "projectId",
+          "projectAliases",
+          "notBefore",
+          "dueAt",
+          "awaitingHuman",
+          "approval",
+          "blockedReason",
+          "repoRoot",
+          "worktree",
+          "branch",
+          "taskSlug",
+          "actor",
+          "correctionOf",
+          "correctionReason",
+        ]),
+      });
+      const success = (result as { success?: boolean }).success !== false;
+      return { status_code: success ? 200 : 400, body: result };
     },
   );
   sdk.registerTrigger({
@@ -2457,14 +2557,40 @@ export function registerApiTriggers(
           body: { error: "offset must be a non-negative integer" },
         };
       }
+      const revision = parseOptionalNonNegativeInt(
+        req.query_params?.["revision"],
+      );
+      if (revision === null) {
+        return {
+          status_code: 400,
+          body: { error: "revision must be a non-negative integer" },
+        };
+      }
+      const tags = asNonEmptyString(req.query_params?.["tags"])
+        ?.split(",")
+        .map((tag) => tag.trim())
+        .filter(Boolean);
       const result = await sdk.trigger({ function_id: "mem::action-list", payload: {
         status: req.query_params?.["status"],
         project: req.query_params?.["project"],
         parentId: req.query_params?.["parentId"],
+        owner: req.query_params?.["owner"],
+        view: req.query_params?.["view"],
+        agentId: req.query_params?.["agentId"],
+        cursor: req.query_params?.["cursor"],
+        tags,
+        revision,
         limit,
         offset,
       } });
-      return { status_code: 200, body: result };
+      const error = (result as { error?: string }).error;
+      const statusCode =
+        error === "revision_conflict"
+          ? 409
+          : error
+            ? 400
+            : 200;
+      return { status_code: statusCode, body: result };
     },
   );
   sdk.registerTrigger({
@@ -2492,20 +2618,25 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::action-edge", 
-    async (
-      req: ApiRequest<{
-        sourceActionId: string;
-        targetActionId: string;
-        type: string;
-      }>,
-    ): Promise<Response> => {
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.sourceActionId || !req.body?.targetActionId || !req.body?.type) {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!body.sourceActionId || !body.targetActionId || !body.type) {
         return { status_code: 400, body: { error: "sourceActionId, targetActionId, and type are required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::action-edge-create", payload: req.body });
-      return { status_code: 201, body: result };
+      const result = await sdk.trigger({
+        function_id: "mem::action-edge-create",
+        payload: pickDefinedFields(body, [
+          "sourceActionId",
+          "targetActionId",
+          "type",
+          "metadata",
+          "actor",
+        ]),
+      });
+      const success = (result as { success?: boolean }).success !== false;
+      return { status_code: success ? 201 : 400, body: result };
     },
   );
   sdk.registerTrigger({

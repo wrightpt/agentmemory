@@ -2,8 +2,11 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import type { Action, Lease } from "../types.js";
+import type { Action, Checkpoint, Lease, Sentinel } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { persistAction, readActionStoreSnapshot } from "./action-store.js";
+import { propagateActionCompletion } from "./actions.js";
+import { classifyAction } from "./action-model.js";
 
 const DEFAULT_LEASE_TTL_MS = 10 * 60 * 1000;
 const MAX_LEASE_TTL_MS = 60 * 60 * 1000;
@@ -28,18 +31,19 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
         if (action.status === "done" || action.status === "cancelled") {
           return { success: false, error: "action already completed" };
         }
-        if (action.status === "blocked") {
-          return { success: false, error: "action is blocked" };
-        }
-
-        const existingLeases = await kv.list<Lease>(KV.leases);
+        const [snapshot, existingLeases, checkpoints, sentinels] =
+          await Promise.all([
+            readActionStoreSnapshot(kv),
+            kv.list<Lease>(KV.leases),
+            kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
+            kv.list<Sentinel>(KV.sentinels).catch(() => []),
+          ]);
         const activeLease = existingLeases.find(
-          (l) =>
-            l.actionId === data.actionId &&
-            l.status === "active" &&
-            new Date(l.expiresAt).getTime() > Date.now(),
+          (lease) =>
+            lease.actionId === data.actionId &&
+            lease.status === "active" &&
+            new Date(lease.expiresAt).getTime() > Date.now(),
         );
-
         if (activeLease) {
           if (activeLease.agentId === data.agentId) {
             return {
@@ -54,6 +58,21 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
             error: "action already leased",
             heldBy: activeLease.agentId,
             expiresAt: activeLease.expiresAt,
+          };
+        }
+        const readiness = classifyAction(action, {
+          actions: snapshot.actions,
+          edges: snapshot.edges,
+          checkpoints,
+          sentinels,
+          leases: existingLeases,
+          agentId: data.agentId,
+        });
+        if (readiness.view !== "actionable") {
+          return {
+            success: false,
+            error: `action is ${readiness.view}`,
+            blockers: readiness.blockers,
           };
         }
 
@@ -76,12 +95,17 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
 
         const before = { ...action };
         action.status = "active";
+        action.lifecycle = "active";
         action.assignedTo = data.agentId;
         action.updatedAt = now.toISOString();
-        await kv.set(KV.actions, action.id, action);
+        const persisted = await persistAction(kv, action, {
+          actor: data.agentId,
+          before,
+          reason: "lease acquired",
+        });
         await recordAudit(kv, "action_update", "mem::lease-acquire", [action.id], {
           before,
-          after: action,
+          after: persisted.action,
         });
 
         return { success: true, lease, renewed: false };
@@ -122,18 +146,27 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
           const before = { ...action };
           if (data.result) {
             action.status = "done";
+            action.lifecycle = "done";
             action.result = data.result;
           } else {
             action.status = "pending";
+            action.lifecycle = "pending";
           }
           action.assignedTo = undefined;
           action.updatedAt = new Date().toISOString();
-          await kv.set(KV.actions, action.id, action);
+          const persisted = await persistAction(kv, action, {
+            actor: data.agentId,
+            before,
+            reason: data.result ? "lease released with result" : "lease released",
+          });
           await recordAudit(kv, "action_update", "mem::lease-release", [action.id], {
             before,
-            after: action,
+            after: persisted.action,
             agentId: data.agentId,
           });
+          if (data.result) {
+            await propagateActionCompletion(kv, action.id, data.agentId);
+          }
         }
 
         return { success: true, released: true };
@@ -228,10 +261,16 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
                 action.status === "active" &&
                 action.assignedTo === currentLease.agentId
               ) {
+                const before = structuredClone(action);
                 action.status = "pending";
+                action.lifecycle = "pending";
                 action.assignedTo = undefined;
                 action.updatedAt = new Date().toISOString();
-                await kv.set(KV.actions, action.id, action);
+                await persistAction(kv, action, {
+                  actor: "lease-cleanup",
+                  before,
+                  reason: "expired lease cleanup",
+                });
                 await recordAudit(kv, "action_update", "mem::lease-cleanup", [action.id], {
                   action: "status-change",
                   newStatus: action.status,

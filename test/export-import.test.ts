@@ -11,6 +11,9 @@ import type {
   Memory,
   SessionSummary,
   ExportData,
+  Action,
+  ActionCollectionState,
+  ActionEvent,
 } from "../src/types.js";
 
 function mockKV() {
@@ -248,5 +251,226 @@ describe("Export/Import Functions", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("Unsupported export version");
+  });
+
+  it("exports and replace-imports a coherent action snapshot and event history", async () => {
+    const action: Action = {
+      id: "act_v2",
+      title: "Actions v2",
+      description: "",
+      status: "active",
+      lifecycle: "active",
+      priority: 9,
+      createdAt: "2026-07-17T05:00:00.000Z",
+      updatedAt: "2026-07-17T06:00:00.000Z",
+      createdBy: "codex",
+      project: "agentmemory",
+      projectId: "agentmemory",
+      projectAliases: [],
+      owner: "codex",
+      tags: ["schema-v2"],
+      sourceObservationIds: [],
+      sourceMemoryIds: [],
+      schemaVersion: 2,
+      revision: 9,
+      awaitingHuman: false,
+    };
+    const event: ActionEvent = {
+      schemaVersion: 2,
+      id: "aev_v2",
+      actionId: action.id,
+      entityType: "action",
+      revision: 9,
+      type: "lifecycle_changed",
+      actor: "codex",
+      timestamp: action.updatedAt,
+      after: action,
+    };
+    await kv.set("mem:actions", action.id, action);
+    await kv.set("mem:action-events", event.id, event);
+    await kv.set<ActionCollectionState>("mem:action-state", "current", {
+      schemaVersion: 2,
+      revision: 9,
+      updatedAt: action.updatedAt,
+    });
+
+    const exported = (await sdk.trigger("mem::export", {})) as ExportData;
+    expect(exported.actions).toEqual([action]);
+    expect(exported.actionEvents).toEqual([event]);
+    expect(exported.actionSnapshot).toEqual({
+      schemaVersion: 2,
+      revision: 9,
+      actionCount: 1,
+      edgeCount: 0,
+      eventCount: 1,
+    });
+
+    const freshKv = mockKV();
+    const freshSdk = mockSdk();
+    registerExportImportFunction(freshSdk as never, freshKv as never);
+    const imported = (await freshSdk.trigger("mem::import", {
+      exportData: exported,
+      strategy: "replace",
+    })) as { success: boolean; actions: number; actionEvents: number };
+    expect(imported).toMatchObject({
+      success: true,
+      actions: 1,
+      actionEvents: 1,
+    });
+    expect(
+      await freshKv.get<ActionCollectionState>("mem:action-state", "current"),
+    ).toMatchObject({ schemaVersion: 2, revision: 9 });
+
+    const reExported = (await freshSdk.trigger(
+      "mem::export",
+      {},
+    )) as ExportData;
+    expect(reExported.actionSnapshot).toEqual(exported.actionSnapshot);
+    expect(JSON.parse(JSON.stringify(reExported.actions))).toEqual(
+      JSON.parse(JSON.stringify(exported.actions)),
+    );
+    expect(reExported.actionEvents).toEqual(exported.actionEvents);
+  });
+
+  it("normalizes actions from an old export before persistence", async () => {
+    const legacy = {
+      id: "act_legacy",
+      title: "Legacy export action",
+      description: "",
+      status: "pending",
+      priority: 5,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+      createdBy: "unknown",
+      project: "/home/cp/repos/agent-infra/agentmemory",
+      tags: "agent:kimi,worktree:legacy",
+      sourceObservationIds: [],
+      sourceMemoryIds: [],
+    } as unknown as Action;
+    const exportData: ExportData = {
+      version: "0.9.27",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      actions: [legacy],
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "merge",
+    })) as { success: boolean; actions: number };
+    const stored = await kv.get<Action>("mem:actions", legacy.id);
+
+    expect(result).toMatchObject({ success: true, actions: 1 });
+    expect(stored).toMatchObject({
+      schemaVersion: 2,
+      lifecycle: "pending",
+      project: "agentmemory",
+      projectId: "agentmemory",
+      owner: "kimi",
+      worktree: "legacy",
+      awaitingHuman: false,
+    });
+    expect(stored?.tags).toEqual(["agent:kimi", "worktree:legacy"]);
+  });
+
+  it("rejects invalid action snapshot counts before replace mutation", async () => {
+    const preserved = {
+      id: "act_preserved",
+      title: "Preserve me",
+      description: "",
+      status: "pending",
+      priority: 5,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+      createdBy: "codex",
+      tags: [],
+      sourceObservationIds: [],
+      sourceMemoryIds: [],
+    } satisfies Action;
+    await kv.set("mem:actions", preserved.id, preserved);
+    const exportData: ExportData = {
+      version: "0.9.27",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      actions: [],
+      actionSnapshot: {
+        schemaVersion: 2,
+        revision: 1,
+        actionCount: 1,
+        edgeCount: 0,
+        eventCount: 0,
+      },
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "replace",
+    })) as { success: boolean; error: string };
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "Action snapshot counts or revision are invalid",
+    });
+    expect(await kv.get("mem:actions", preserved.id)).toEqual(preserved);
+    expect(await kv.get("mem:sessions", "ses_1")).toEqual(testSession);
+  });
+
+  it("advances the local revision when replace import changes an existing action collection", async () => {
+    const existing = {
+      id: "act_existing",
+      title: "Existing action",
+      description: "",
+      status: "pending",
+      priority: 5,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+      createdBy: "codex",
+      tags: [],
+      sourceObservationIds: [],
+      sourceMemoryIds: [],
+    } satisfies Action;
+    await kv.set("mem:actions", existing.id, existing);
+    await kv.set<ActionCollectionState>("mem:action-state", "current", {
+      schemaVersion: 2,
+      revision: 9,
+      updatedAt: "2026-07-17T06:00:00.000Z",
+    });
+    const emptySnapshot: ExportData = {
+      version: "0.9.27",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      actions: [],
+      actionEdges: [],
+      actionEvents: [],
+      actionSnapshot: {
+        schemaVersion: 2,
+        revision: 0,
+        actionCount: 0,
+        edgeCount: 0,
+        eventCount: 0,
+      },
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData: emptySnapshot,
+      strategy: "replace",
+    })) as { success: boolean };
+    const state = await kv.get<ActionCollectionState>(
+      "mem:action-state",
+      "current",
+    );
+
+    expect(result.success).toBe(true);
+    expect(await kv.get("mem:actions", existing.id)).toBeNull();
+    expect(state?.revision).toBe(10);
   });
 });

@@ -685,14 +685,39 @@ export function registerMcpEndpoints(
             const tags = typeof args.tags === "string" && args.tags.trim()
               ? args.tags.split(",").map((t: string) => t.trim()).filter(Boolean)
               : [];
+            const projectAliases =
+              typeof args.projectAliases === "string" &&
+              args.projectAliases.trim()
+                ? args.projectAliases
+                    .split(",")
+                    .map((alias: string) => alias.trim())
+                    .filter(Boolean)
+                : undefined;
             const actionResult = await sdk.trigger({ function_id: "mem::action-create", payload: {
               title: args.title,
               description: args.description,
               priority: args.priority,
               project: args.project,
+              projectId: args.projectId,
+              projectAliases,
               tags,
               parentId: args.parentId,
               edges: edges.length > 0 ? edges : undefined,
+              lifecycle: args.lifecycle,
+              owner: args.owner,
+              notBefore: args.notBefore,
+              dueAt: args.dueAt,
+              awaitingHuman: args.awaitingHuman,
+              approval:
+                typeof args.approvalState === "string"
+                  ? { state: args.approvalState }
+                  : undefined,
+              blockedReason: args.blockedReason,
+              repoRoot: args.repoRoot,
+              worktree: args.worktree,
+              branch: args.branch,
+              taskSlug: args.taskSlug,
+              actor: args.actor,
             } });
             return {
               status_code: 200,
@@ -711,17 +736,84 @@ export function registerMcpEndpoints(
                 body: { error: "actionId is required" },
               };
             }
+            const tags =
+              typeof args.tags === "string"
+                ? args.tags
+                    .split(",")
+                    .map((tag: string) => tag.trim())
+                    .filter(Boolean)
+                : undefined;
+            const projectAliases =
+              typeof args.projectAliases === "string"
+                ? args.projectAliases
+                    .split(",")
+                    .map((alias: string) => alias.trim())
+                    .filter(Boolean)
+                : undefined;
             const updateResult = await sdk.trigger({ function_id: "mem::action-update", payload: {
               actionId: args.actionId,
               status: args.status,
+              lifecycle: args.lifecycle,
+              title: args.title,
+              description: args.description,
               result: args.result,
               priority: args.priority,
+              assignedTo: args.assignedTo,
+              owner: args.owner,
+              tags,
+              project: args.project,
+              projectId: args.projectId,
+              projectAliases,
+              notBefore: args.notBefore,
+              dueAt: args.dueAt,
+              awaitingHuman: args.awaitingHuman,
+              approval:
+                typeof args.approvalState === "string"
+                  ? { state: args.approvalState }
+                  : undefined,
+              blockedReason: args.blockedReason,
+              repoRoot: args.repoRoot,
+              worktree: args.worktree,
+              branch: args.branch,
+              taskSlug: args.taskSlug,
+              actor: args.actor,
+              correctionOf: args.correctionOf,
+              correctionReason: args.correctionReason,
             } });
             return {
               status_code: 200,
               body: {
                 content: [
                   { type: "text", text: JSON.stringify(updateResult, null, 2) },
+                ],
+              },
+            };
+          }
+
+          case "memory_action_list": {
+            const tags =
+              typeof args.tags === "string" && args.tags.trim()
+                ? args.tags
+                    .split(",")
+                    .map((tag: string) => tag.trim())
+                    .filter(Boolean)
+                : undefined;
+            const listResult = await sdk.trigger({ function_id: "mem::action-list", payload: {
+              project: args.project,
+              status: args.status,
+              view: args.view,
+              owner: args.owner,
+              tags,
+              agentId: args.agentId,
+              limit: args.limit,
+              cursor: args.cursor,
+              revision: args.revision,
+            } });
+            return {
+              status_code: 200,
+              body: {
+                content: [
+                  { type: "text", text: JSON.stringify(listResult, null, 2) },
                 ],
               },
             };

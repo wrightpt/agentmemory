@@ -2,8 +2,10 @@ import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
-import type { Action, ActionEdge, Checkpoint, CompressedObservation, FunctionMetrics, Sentinel, Session } from "../types.js";
+import type { Action, ActionEdge, CompressedObservation, FunctionMetrics, Sentinel, Session } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { persistActionEdge } from "./action-store.js";
+import { refreshLinkedActionReadiness } from "./action-readiness-refresh.js";
 
 const VALID_TYPES: Sentinel["type"][] = [
   "webhook",
@@ -123,13 +125,23 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
             targetActionId: sentinel.id,
             createdAt: now.toISOString(),
           };
-          await kv.set(KV.actionEdges, edge.id, edge);
+          await persistActionEdge(kv, edge, {
+            actor: "sentinel-create",
+            before: null,
+            reason: `Sentinel ${sentinel.id} gate added`,
+          });
           await recordAudit(kv, "sentinel_create", "mem::sentinel-create", [edge.id], {
             action: "sentinel.create.edge",
             sentinelId: sentinel.id,
             sourceActionId: actionId,
           });
         }
+        await refreshLinkedActionReadiness(
+          kv,
+          data.linkedActionIds,
+          "sentinel-create",
+          `Sentinel ${sentinel.id} gate added`,
+        );
       }
 
       if (data.type === "timer") {
@@ -148,7 +160,12 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
                 reason: "timer_elapsed",
                 durationMs,
               });
-              await unblockLinkedActions(kv, fresh);
+              await refreshLinkedActionReadiness(
+                kv,
+                fresh.linkedActionIds,
+                "sentinel-timer",
+                `Sentinel ${fresh.id} triggered`,
+              );
             });
           } catch (err) {
             console.error("sentinel timer callback failed", sentinel.id, err);
@@ -193,10 +210,12 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
             result: data.result,
           });
 
-          let unblockedCount = 0;
-          if (sentinel.linkedActionIds.length > 0) {
-            unblockedCount = await unblockLinkedActions(kv, sentinel);
-          }
+          const unblockedCount = await refreshLinkedActionReadiness(
+            kv,
+            sentinel.linkedActionIds,
+            "sentinel-trigger",
+            `Sentinel ${sentinel.id} triggered`,
+          );
 
           return { success: true, sentinel, unblockedCount };
         },
@@ -252,7 +271,12 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
                   action: "sentinel.threshold_trigger",
                   result: fresh.result,
                 });
-                await unblockLinkedActions(kv, fresh);
+                await refreshLinkedActionReadiness(
+                  kv,
+                  fresh.linkedActionIds,
+                  "sentinel-check",
+                  `Sentinel ${fresh.id} threshold triggered`,
+                );
               },
             );
             triggered.push(sentinel.id);
@@ -304,7 +328,12 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
                   action: "sentinel.pattern_trigger",
                   result: fresh.result,
                 });
-                await unblockLinkedActions(kv, fresh);
+                await refreshLinkedActionReadiness(
+                  kv,
+                  fresh.linkedActionIds,
+                  "sentinel-check",
+                  `Sentinel ${fresh.id} pattern triggered`,
+                );
               },
             );
             triggered.push(sentinel.id);
@@ -345,6 +374,12 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
             action: "sentinel.cancel",
             status: "cancelled",
           });
+          await refreshLinkedActionReadiness(
+            kv,
+            sentinel.linkedActionIds,
+            "sentinel-cancel",
+            `Sentinel ${sentinel.id} cancelled`,
+          );
 
           return { success: true, sentinel };
         },
@@ -399,6 +434,12 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
                 action: "sentinel.expire",
                 status: "expired",
               });
+              await refreshLinkedActionReadiness(
+                kv,
+                fresh.linkedActionIds,
+                "sentinel-expire",
+                `Sentinel ${fresh.id} expired`,
+              );
               return true;
             },
           );
@@ -409,47 +450,4 @@ export function registerSentinelsFunction(sdk: ISdk, kv: StateKV): void {
       return { success: true, expired };
     },
   );
-}
-
-async function unblockLinkedActions(
-  kv: StateKV,
-  sentinel: Sentinel,
-): Promise<number> {
-  if (sentinel.linkedActionIds.length === 0) return 0;
-
-  const allEdges = await kv.list<ActionEdge>(KV.actionEdges);
-  const allSentinels = await kv.list<Sentinel>(KV.sentinels);
-  const allCheckpoints = await kv.list<Checkpoint>(KV.checkpoints);
-  const gateMap = new Map<string, { status: string }>();
-  for (const s of allSentinels) gateMap.set(s.id, { status: s.status === "triggered" ? "passed" : s.status });
-  for (const c of allCheckpoints) gateMap.set(c.id, { status: c.status });
-
-  let unblockedCount = 0;
-
-  for (const actionId of sentinel.linkedActionIds) {
-    await withKeyedLock(`mem:action:${actionId}`, async () => {
-      const action = await kv.get<Action>(KV.actions, actionId);
-      if (action && action.status === "blocked") {
-        const gates = allEdges.filter(
-          (e) => e.sourceActionId === actionId && e.type === "gated_by",
-        );
-        const allPassed = gates.every((g) => {
-          const gate = gateMap.get(g.targetActionId);
-          return gate && gate.status === "passed";
-        });
-        if (allPassed) {
-          action.status = "pending";
-          action.updatedAt = new Date().toISOString();
-          await kv.set(KV.actions, action.id, action);
-          await recordAudit(kv, "action_update", "mem::sentinel-unblock", [action.id], {
-            action: "action.unblocked",
-            sentinelId: sentinel.id,
-          });
-          unblockedCount++;
-        }
-      }
-    });
-  }
-
-  return unblockedCount;
 }
