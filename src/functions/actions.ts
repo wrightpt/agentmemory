@@ -23,6 +23,7 @@ import {
 import {
   ActionNormalizationError,
   ActionRevisionConflictError,
+  deleteAction,
   persistActionEdgeUnlocked,
   persistActionUnlocked,
   readActionStoreSnapshot,
@@ -434,6 +435,79 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       revision: snapshot.state.revision,
     };
   });
+
+  sdk.registerFunction(
+    "mem::action-gc",
+    async (data: {
+      maxAgeDays?: number;
+      dryRun?: boolean;
+      limit?: number;
+      actor?: string;
+    }) => {
+      const maxAgeDays = data.maxAgeDays ?? 30;
+      const dryRun = data.dryRun ?? true;
+      const limit = data.limit ?? 500;
+      if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
+        return { success: false, error: "maxAgeDays must be a non-negative number" };
+      }
+      if (typeof dryRun !== "boolean") {
+        return { success: false, error: "dryRun must be a boolean" };
+      }
+      if (!Number.isInteger(limit) || limit < 1 || limit > 5000) {
+        return { success: false, error: "limit must be an integer between 1 and 5000" };
+      }
+      try {
+        const cutoff = Date.now() - maxAgeDays * 86_400_000;
+        const snapshot = await readActionStoreSnapshot(kv);
+        const edgeEndpoints = new Set(
+          snapshot.edges.flatMap((edge) => [
+            edge.sourceActionId,
+            edge.targetActionId,
+          ]),
+        );
+        const isCollectable = (action: Action): boolean =>
+          (action.lifecycle === "done" || action.lifecycle === "cancelled") &&
+          Date.parse(action.updatedAt) < cutoff &&
+          !edgeEndpoints.has(action.id);
+        const candidates = snapshot.actions
+          .filter(isCollectable)
+          .sort((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+          .slice(0, limit);
+        const actor = data.actor || "action-gc";
+        const deleted: string[] = [];
+        if (!dryRun) {
+          for (const candidate of candidates) {
+            const current = await kv.get<Action>(KV.actions, candidate.id);
+            if (!current || !isCollectable(current)) continue;
+            const result = await deleteAction(kv, candidate.id, {
+              actor,
+              reason: `terminal action older than ${maxAgeDays}d`,
+            });
+            if (result.deleted) deleted.push(candidate.id);
+          }
+          if (deleted.length > 0) {
+            await recordAudit(
+              kv,
+              "action_delete",
+              "mem::action-gc",
+              deleted,
+              { actor, maxAgeDays, dryRun: false, deleted: deleted.length },
+            );
+          }
+        }
+        return {
+          success: true,
+          dryRun,
+          maxAgeDays,
+          cutoff: new Date(cutoff).toISOString(),
+          candidates: candidates.map((action) => action.id),
+          deleted,
+        };
+      } catch (error) {
+        return actionStoreError(error);
+      }
+    },
+  );
 }
 
 async function propagateCompletionUnlocked(

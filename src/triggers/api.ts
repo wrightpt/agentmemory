@@ -2617,6 +2617,30 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/actions/get", http_method: "GET" },
   });
 
+  sdk.registerFunction("api::action-gc",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const result = await sdk.trigger({
+        function_id: "mem::action-gc",
+        payload: pickDefinedFields(body, [
+          "maxAgeDays",
+          "dryRun",
+          "limit",
+          "actor",
+        ]),
+      });
+      const success = (result as { success?: boolean }).success !== false;
+      return { status_code: success ? 200 : 400, body: result };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::action-gc",
+    config: { api_path: "/agentmemory/actions/gc", http_method: "POST" },
+  });
+
   sdk.registerFunction("api::action-edge", 
     async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);

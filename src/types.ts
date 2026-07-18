@@ -596,6 +596,7 @@ export interface AuditEntry {
     | "export"
     | "action_create"
     | "action_update"
+    | "action_delete"
     | "lease_acquire"
     | "lease_release"
     | "routine_run"
