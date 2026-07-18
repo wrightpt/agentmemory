@@ -9,8 +9,17 @@ agentmemory is a persistent memory system for AI coding agents, built on iii-eng
 - **Build**: TypeScript → ESM via tsdown, output to `dist/`
 - **Test**: vitest (`npm test` excludes integration tests)
 
-## Consistency Rules
+## iii-engine State Semantics
 
+- `state::get` resolves **`undefined`** (absent result field) for missing keys or scopes — not `null`. `StateKV.get` normalizes this to `null` (`value ?? null`), so `T | null` is the guaranteed contract everywhere downstream; never bypass `StateKV` to call `state::get` directly, and never compare store results with strict `=== null` upstream of it. (2026-07-17: this gap made every `mem::action-create` throw `action_revision_conflict` while updates kept working.)
+- `state::list` returns `[]` for missing scopes; `state::update` reports `old_value: null`; `state::delete` returns `{}`. Only `get` has the undefined gap (probed live 2026-07-17).
+- In-memory test mocks (`test/helpers/mocks.ts`) return `null` because that is the `StateKV` contract. Engine-faithful boundary coverage (undefined-returning trigger) lives in `test/state-kv.test.ts` — add new `state::*` semantics probes there.
+
+## Workstation Deployment
+
+On the workstation the global package (`npm ls -g @agentmemory/agentmemory`) is a **symlink to this repo's checkout**, so a deploy is: `npm run build`, then `systemctl --user restart agentmemory.service`. The health sentinel (`agentmemory_health_sentinel.sh`, 15-min timer) verifies the running buildId/source revision against `agent-workspace-config/agentmemory-lock.json` and canaries the actions write path every run.
+
+## Consistency Rules
 **When adding or removing MCP tools, you MUST update ALL of the following:**
 1. `src/mcp/tools-registry.ts` — tool definition + `getAllTools()` array
 2. `src/mcp/server.ts` — handler case in the `mcp::tools::call` switch
