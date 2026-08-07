@@ -606,6 +606,11 @@ export interface AuditEntry {
     | "action_create"
     | "action_update"
     | "action_delete"
+    | "input_enqueue"
+    | "input_claim"
+    | "input_delivery"
+    | "input_settle"
+    | "input_cancel"
     | "lease_acquire"
     | "lease_release"
     | "routine_run"
@@ -828,6 +833,47 @@ export interface Lease {
   expiresAt: string;
   renewedAt?: string;
   status: "active" | "expired" | "released";
+}
+
+export type InputIntentStatus =
+  | "queued"
+  | "claimed"
+  | "accepted"
+  | "ambiguous"
+  | "blocked"
+  | "cancelled";
+
+export interface InputDeliveryEvidence {
+  source: "provider_transcript";
+  observedAt: string;
+  messageSha256: string;
+  transcriptCursor?: string;
+}
+
+export interface InputIntent {
+  schemaVersion: 1;
+  id: string;
+  idempotencyKey: string;
+  targetSession: string;
+  sourceSession?: string;
+  payloadRef: string;
+  payloadSha256: string;
+  payloadBytes: number;
+  status: InputIntentStatus;
+  attempts: number;
+  maxAttempts: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+  notBefore?: string;
+  expiresAt?: string;
+  claimedBy?: string;
+  claimToken?: string;
+  claimExpiresAt?: string;
+  deliveryStartedAt?: string;
+  settledAt?: string;
+  evidence?: InputDeliveryEvidence;
+  lastErrorCode?: string;
 }
 
 export interface Routine {

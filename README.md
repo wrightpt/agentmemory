@@ -1697,7 +1697,14 @@ for retrieval ordering, egress, fallback, and cache invariants.
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-136 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+142 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+
+The operational input ledger uses `/agentmemory/input/intents`,
+`/agentmemory/input/claim`, `/agentmemory/input/start`,
+`/agentmemory/input/settle`, and `/agentmemory/input/cancel`. It stores opaque
+payload references, hashes, delivery leases, and canonical-transcript evidence;
+prompt text remains outside AgentMemory. An expired claim that reached
+`input/start` becomes `ambiguous` and is never automatically redelivered.
 
 <details>
 <summary>Key endpoints</summary>

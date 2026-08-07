@@ -48,6 +48,7 @@ export const KV = {
   actionEdges: "mem:action-edges",
   actionEvents: "mem:action-events",
   actionState: "mem:action-state",
+  inputIntents: "mem:input-intents",
   leases: "mem:leases",
   routines: "mem:routines",
   routineRuns: "mem:routine-runs",

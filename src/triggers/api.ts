@@ -2627,6 +2627,216 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/slot/reflect", http_method: "POST" },
   });
 
+  sdk.registerFunction(
+    "api::input-enqueue",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-enqueue",
+        payload: pickDefinedFields(body, [
+          "idempotencyKey",
+          "targetSession",
+          "sourceSession",
+          "payloadRef",
+          "payloadSha256",
+          "payloadBytes",
+          "maxAttempts",
+          "notBefore",
+          "expiresAt",
+          "actor",
+        ]),
+      })) as {
+        success?: boolean;
+        error?: string;
+        deduplicated?: boolean;
+      };
+      if (result.success === false) {
+        return {
+          status_code: result.error === "idempotency_conflict" ? 409 : 400,
+          body: result,
+        };
+      }
+      return {
+        status_code: result.deduplicated ? 200 : 201,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-enqueue",
+    config: {
+      api_path: "/agentmemory/input/intents",
+      http_method: "POST",
+    },
+  });
+
+  sdk.registerFunction(
+    "api::input-claim",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-claim",
+        payload: pickDefinedFields(
+          (req.body ?? {}) as Record<string, unknown>,
+          ["workerId", "targetSession", "ttlMs"],
+        ),
+      })) as { success?: boolean };
+      return {
+        status_code: result.success === false ? 400 : 200,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-claim",
+    config: {
+      api_path: "/agentmemory/input/claim",
+      http_method: "POST",
+    },
+  });
+
+  sdk.registerFunction(
+    "api::input-start",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-start",
+        payload: pickDefinedFields(
+          (req.body ?? {}) as Record<string, unknown>,
+          ["intentId", "workerId", "claimToken"],
+        ),
+      })) as { success?: boolean };
+      return {
+        status_code: result.success === false ? 409 : 200,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-start",
+    config: {
+      api_path: "/agentmemory/input/start",
+      http_method: "POST",
+    },
+  });
+
+  sdk.registerFunction(
+    "api::input-settle",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-settle",
+        payload: pickDefinedFields(
+          (req.body ?? {}) as Record<string, unknown>,
+          [
+            "intentId",
+            "workerId",
+            "claimToken",
+            "outcome",
+            "evidence",
+            "errorCode",
+            "notBefore",
+          ],
+        ),
+      })) as { success?: boolean };
+      return {
+        status_code: result.success === false ? 409 : 200,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-settle",
+    config: {
+      api_path: "/agentmemory/input/settle",
+      http_method: "POST",
+    },
+  });
+
+  sdk.registerFunction(
+    "api::input-list",
+    async (req: ApiRequest): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const limit = parseOptionalPositiveInt(req.query_params?.["limit"]);
+      if (limit === null) {
+        return {
+          status_code: 400,
+          body: { error: "limit must be a positive integer" },
+        };
+      }
+      const rawStatuses = req.query_params?.["statuses"];
+      const statuses =
+        typeof rawStatuses === "string" && rawStatuses.trim()
+          ? rawStatuses
+              .split(",")
+              .map((status) => status.trim())
+              .filter(Boolean)
+          : undefined;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-list",
+        payload: {
+          ...(req.query_params?.["intentId"]
+            ? { intentId: req.query_params["intentId"] }
+            : {}),
+          ...(req.query_params?.["targetSession"]
+            ? { targetSession: req.query_params["targetSession"] }
+            : {}),
+          ...(statuses ? { statuses } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        },
+      })) as { success?: boolean };
+      return {
+        status_code: result.success === false ? 400 : 200,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-list",
+    config: {
+      api_path: "/agentmemory/input/intents",
+      http_method: "GET",
+    },
+  });
+
+  sdk.registerFunction(
+    "api::input-cancel",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-cancel",
+        payload: pickDefinedFields(
+          (req.body ?? {}) as Record<string, unknown>,
+          ["intentId", "actor", "reason"],
+        ),
+      })) as { success?: boolean };
+      return {
+        status_code: result.success === false ? 409 : 200,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-cancel",
+    config: {
+      api_path: "/agentmemory/input/cancel",
+      http_method: "POST",
+    },
+  });
+
   sdk.registerFunction("api::action-create",
     async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
