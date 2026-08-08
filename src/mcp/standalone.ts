@@ -130,6 +130,13 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
       v.type = (args["type"] as string) || "fact";
       v.concepts = normalizeList(args["concepts"]);
       v.files = normalizeList(args["files"]);
+      const project = args["project"];
+      if (project !== undefined) {
+        if (typeof project !== "string" || !project.trim()) {
+          throw new Error("project must be a non-empty string");
+        }
+        v.project = project.trim();
+      }
       return v;
     }
     case "memory_recall":
@@ -195,6 +202,7 @@ async function handleProxy(
           type: v.type,
           concepts: v.concepts,
           files: v.files,
+          ...(v.project ? { project: v.project } : {}),
         }),
       });
       return textResponse(result);
@@ -283,6 +291,7 @@ async function handleLocal(
         version: 1,
         isLatest: true,
         sessionIds: [],
+        ...(v.project ? { project: v.project } : {}),
       });
       kvInstance.persist();
       return textResponse({ saved: id });

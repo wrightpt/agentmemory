@@ -242,6 +242,21 @@ describe("handleToolCall", () => {
     expect(mem?.files).toEqual(["src/auth.ts", "src/middleware.ts"]);
   });
 
+  it("memory_save persists canonical project scope in local fallback", async () => {
+    const kv = new InMemoryKV();
+    const result = await handleToolCall(
+      "memory_save",
+      { content: "Scoped local memory", project: " agentmemory " },
+      kv,
+    );
+    const saved = JSON.parse(result.content[0].text);
+    const mem = await kv.get<{ project?: string }>(
+      "mem:memories",
+      saved.saved,
+    );
+    expect(mem?.project).toBe("agentmemory");
+  });
+
   it("memory_save still accepts concepts/files as comma-separated strings (legacy)", async () => {
     const kv = new InMemoryKV();
     const result = await handleToolCall(
