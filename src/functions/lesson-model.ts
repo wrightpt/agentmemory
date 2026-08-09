@@ -673,6 +673,14 @@ export function parseImportedLesson(
         "supersededByLessonId must differ from lesson.id",
       );
     }
+    if (
+      parsed.value.lifecycle !== "superseded" &&
+      supersededByLessonId
+    ) {
+      throw new LessonInputError(
+        "supersededByLessonId requires lifecycle superseded",
+      );
+    }
 
     const candidate: Lesson = {
       id,
