@@ -126,6 +126,36 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(body.results[0].id).toBe("m1");
   });
 
+  it("preserves memory_save project scope through the proxy", async () => {
+    let rememberBody: Record<string, unknown> | undefined;
+    installFetch((url, init) => {
+      if (url.endsWith("/agentmemory/livez")) {
+        return new Response("ok", { status: 200 });
+      }
+      if (url.endsWith("/agentmemory/remember")) {
+        rememberBody = JSON.parse((init?.body as string) || "{}");
+        return new Response(JSON.stringify({ id: "mem-scoped" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    await handleToolCall("memory_save", {
+      content: "Scoped memory",
+      project: " trading-system ",
+    });
+
+    expect(rememberBody).toEqual({
+      content: "Scoped memory",
+      type: "fact",
+      concepts: [],
+      files: [],
+      project: "trading-system",
+    });
+  });
+
   it("proxies memory_recall to POST /agentmemory/search and forwards format/token_budget (#507)", async () => {
     const calls: Array<{ url: string; body?: unknown }> = [];
     installFetch((url, init) => {
