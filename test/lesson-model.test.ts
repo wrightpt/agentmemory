@@ -788,6 +788,18 @@ describe("causal lesson model", () => {
         deleteReason: "Evidence artifact was invalid",
       },
     });
+    const inconsistentLineage = parseImportedLesson({
+      ...legacyLesson(),
+      lifecycle: "retracted",
+      deleted: true,
+      supersededByLessonId: "lsn_replacement",
+    });
+    expect(inconsistentLineage).toMatchObject({
+      success: false,
+      error: expect.stringContaining(
+        "supersededByLessonId requires lifecycle superseded",
+      ),
+    });
   });
 
   it("produces ordering-stable fingerprints and separates evidence records", () => {
