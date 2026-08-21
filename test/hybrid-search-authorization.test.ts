@@ -130,6 +130,51 @@ describe("HybridSearch agent authorization", () => {
     ]);
   });
 
+  it("keeps low-value lexical rows searchable but out of natural-language reranking", async () => {
+    const bm25 = new SearchIndex();
+    const kv = mockKV();
+    const decisions = [
+      observation("obs_decision_a", "ses_decision_a", "codex"),
+      observation("obs_decision_b", "ses_decision_b", "kimi"),
+    ];
+    const routine: CompressedObservation = {
+      ...observation("obs_command", "ses_command", "codex"),
+      type: "command_run",
+      title: "Bash launch authority output",
+      narrative: "Routine command output mentioning launch authority",
+      importance: 5,
+    };
+    for (const candidate of [...decisions, routine]) {
+      bm25.add(candidate);
+      await kv.set(
+        `mem:obs:${candidate.sessionId}`,
+        candidate.id,
+        candidate,
+      );
+    }
+    const hybrid = new HybridSearch(
+      bm25,
+      null,
+      null,
+      kv as never,
+      0.4,
+      0.6,
+      0.3,
+      true,
+    );
+
+    const results = await hybrid.search("why use one launch authority", 10);
+
+    const rerankerInput = rerankMock.mock.calls[0][1] as HybridSearchResult[];
+    expect(rerankerInput.map((result) => result.observation.id).sort()).toEqual([
+      "obs_decision_a",
+      "obs_decision_b",
+    ]);
+    expect(results.map((result) => result.observation.id)).toContain(
+      "obs_command",
+    );
+  });
+
   it("removes unauthorized IDs before BM25, vector, and graph ranks are assigned", async () => {
     const kv = mockKV();
     const denied = observation("obs_kimi", "ses_kimi", "kimi");

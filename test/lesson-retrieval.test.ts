@@ -392,7 +392,7 @@ describe("causal lesson retrieval", () => {
     expect(noSignal.diagnostics.fallbackCode).toBe("semantic_no_signal");
   });
 
-  it("does no provider or cache work for zero candidates or candidate overflow", async () => {
+  it("does no provider work for zero candidates and bounds overflow with deterministic preselection", async () => {
     const embedder = provider();
     setEmbeddingProvider(embedder);
 
@@ -415,11 +415,66 @@ describe("causal lesson retrieval", () => {
       ),
       recallInput({ query: "candidate", retrievalMode: "hybrid" }),
     );
-    expect(overflow.diagnostics.fallbackCode).toBe(
-      "semantic_candidate_limit_exceeded",
+    expect(overflow.diagnostics).toMatchObject({
+      requestedMode: "hybrid",
+      usedMode: "hybrid",
+      candidateCount: 257,
+      semanticCandidateCount: 256,
+      preselectionApplied: true,
+    });
+    expect(embedder.embed).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(embedder.embedBatch).mock.calls.flatMap(([texts]) => texts),
+    ).toHaveLength(256);
+  });
+
+  it("preserves a minority related project in semantic preselection", async () => {
+    const embedder = provider({
+      embedBatch: vi.fn(async (texts: string[]) =>
+        texts.map((text) =>
+          text.includes("MINORITY_ARCHITECTURE_TARGET")
+            ? new Float32Array([1, 0])
+            : new Float32Array([0, 1]),
+        ),
+      ),
+    });
+    setEmbeddingProvider(embedder);
+    const current = Array.from({ length: 280 }, (_, index) =>
+      lesson(`current-${String(index).padStart(3, "0")}`, {
+        project: "trading-system",
+        content: `Unrelated current-project lesson ${index}`,
+      }),
     );
-    expect(embedder.embed).not.toHaveBeenCalled();
-    expect(embedder.embedBatch).not.toHaveBeenCalled();
+    const related = Array.from({ length: 20 }, (_, index) =>
+      lesson(`related-${String(index).padStart(3, "0")}`, {
+        project: "workstation-shell",
+        content:
+          index === 19
+            ? "MINORITY_ARCHITECTURE_TARGET"
+            : `Unrelated related-project lesson ${index}`,
+      }),
+    );
+
+    const result = await rankLessonRecallCandidates(
+      [...current, ...related],
+      recallInput({
+        query: "why one supervisor owns interactive starts",
+        retrievalMode: "hybrid",
+        projects: ["trading-system", "workstation-shell"],
+      }),
+    );
+
+    expect(ids(result.ranked)[0]).toBe("lsn_related-019");
+    expect(result.ranked[0]).toMatchObject({
+      lexicalScore: 0,
+      semanticScore: 1,
+    });
+    expect(result.diagnostics).toMatchObject({
+      usedMode: "hybrid",
+      candidateCount: 300,
+      semanticCandidateCount: 256,
+      preselectionApplied: true,
+    });
   });
 
   it("caches exact candidate documents and deduplicates concurrent cold misses", async () => {

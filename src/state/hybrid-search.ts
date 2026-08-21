@@ -319,13 +319,21 @@ export class HybridSearch {
     );
     const authorized = this.filterAgentAuthorized(enriched, context);
     const qualityFiltered = this.filterLegacySemanticOnlyNoise(authorized);
+    const { rerankable, lexicalOnly } = this.partitionRerankCandidates(
+      qualityFiltered,
+      query,
+    );
 
-    if (this.rerankEnabled && qualityFiltered.length > 1) {
+    if (this.rerankEnabled && rerankable.length > 1) {
       try {
-        const head = qualityFiltered.slice(0, rerankWindow);
-        const tail = qualityFiltered.slice(rerankWindow);
+        const head = rerankable.slice(0, rerankWindow);
+        const tail = rerankable.slice(rerankWindow);
         const reranked = await rerank(query, head, rerankWindow);
-        return this.applyPolicy(reranked.concat(tail), context, limit);
+        return this.applyPolicy(
+          reranked.concat(tail, lexicalOnly),
+          context,
+          limit,
+        );
       } catch {
         return this.applyPolicy(qualityFiltered, context, limit);
       }
@@ -438,6 +446,36 @@ export class HybridSearch {
         shouldSemanticallyIndexObservation(result.observation)
       );
     });
+  }
+
+  /**
+   * Lexical-only routine rows remain retrievable, but natural-language
+   * reranking must not promote command/status chatter above institutional
+   * decisions. Exact identifier queries and graph-supported rows retain the
+   * reranker path.
+   */
+  private partitionRerankCandidates(
+    results: HybridSearchResult[],
+    query: string,
+  ): {
+    rerankable: HybridSearchResult[];
+    lexicalOnly: HybridSearchResult[];
+  } {
+    const rerankable: HybridSearchResult[] = [];
+    const lexicalOnly: HybridSearchResult[] = [];
+    const exactLookup = isExactIdentifierQuery(query);
+    for (const result of results) {
+      if (
+        exactLookup ||
+        result.graphScore > 0 ||
+        shouldSemanticallyIndexObservation(result.observation)
+      ) {
+        rerankable.push(result);
+      } else {
+        lexicalOnly.push(result);
+      }
+    }
+    return { rerankable, lexicalOnly };
   }
 
   private applyPolicy(
@@ -582,4 +620,14 @@ export class HybridSearch {
     }
     return enriched;
   }
+}
+
+function isExactIdentifierQuery(query: string): boolean {
+  const value = query.trim();
+  return (
+    value.length > 1 &&
+    !/\s/.test(value) &&
+    /^[A-Za-z0-9_$./:@#-]+$/.test(value) &&
+    /[A-Z0-9_$./:@#-]/.test(value)
+  );
 }
