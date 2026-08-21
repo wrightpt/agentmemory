@@ -17,6 +17,7 @@ const REBUILD_BARRIER_KEY = "rebuild:in-progress";
 const BM25_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:bm25:`;
 const VECTOR_KEY = "vectors";
 const VECTOR_MANIFEST_KEY = "vectors:manifest";
+const VECTOR_FALLBACK_MANIFEST_KEY = "vectors:fallback-manifest";
 const VECTOR_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:vectors:`;
 const INDEX_SHARD_KEY = "data";
 const DEFAULT_INDEX_SHARD_CHARS = 2_000_000;
@@ -65,6 +66,19 @@ function statePath(scope: string, key: string): string {
   return `${scope}/${key}`;
 }
 
+export function shouldRebuildPersistedIndexes(options: {
+  bm25Size: number;
+  vectorConfigured: boolean;
+  vectorLoaded: boolean;
+  vectorFallbackUsed: boolean;
+}): boolean {
+  return (
+    options.bm25Size === 0 ||
+    (options.vectorConfigured &&
+      (!options.vectorLoaded || options.vectorFallbackUsed))
+  );
+}
+
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -89,6 +103,7 @@ export class IndexPersistence {
   private saveInFlight: Promise<boolean> | null = null;
   private saveRequested = false;
   private rebuilding = false;
+  private vectorFallbackUsed = false;
   private lastFailureLogAt = 0;
 
   constructor(
@@ -286,6 +301,7 @@ export class IndexPersistence {
     bm25: SearchIndex | null;
     vector: LocalVectorStore | null;
   }> {
+    this.vectorFallbackUsed = false;
     let bm25: SearchIndex | null = null;
     let vector: LocalVectorStore | null = null;
 
@@ -318,6 +334,10 @@ export class IndexPersistence {
     }
 
     return { bm25, vector };
+  }
+
+  get usedVectorFallback(): boolean {
+    return this.vectorFallbackUsed;
   }
 
   stop(): void {
@@ -361,6 +381,7 @@ export class IndexPersistence {
       VECTOR_MANIFEST_KEY,
       VECTOR_KEY,
       VECTOR_SHARD_SCOPE_PREFIX,
+      VECTOR_FALLBACK_MANIFEST_KEY,
     );
   }
 
@@ -369,10 +390,16 @@ export class IndexPersistence {
     manifestKey: string,
     legacyKey: string,
     scopePrefix: string,
+    fallbackManifestKey?: string,
   ): Promise<void> {
     const previous = await this.kv
       .get<IndexShardManifest>(KV.bm25Index, manifestKey)
       .catch(() => null);
+    const oldFallback = fallbackManifestKey
+      ? await this.kv
+          .get<IndexShardManifest>(KV.bm25Index, fallbackManifestKey)
+          .catch(() => null)
+      : null;
     const generation =
       this.options.createGeneration?.() ?? createIndexGeneration();
     const chunkChars = shardChars(this.options);
@@ -419,41 +446,53 @@ export class IndexPersistence {
       shards,
       chars: serialized.length,
     };
-    try {
-      await this.kv.set<IndexShardManifest>(
-        KV.bm25Index,
-        manifestKey,
-        nextManifest,
-      );
-      await this.auditIndexPersistence("manifest_publish", [
-        statePath(KV.bm25Index, manifestKey),
-      ], {
-        manifestKey,
-        generation,
-        chars: serialized.length,
-        shards: shards.length,
-        result: "committed",
-      });
-    } catch (err) {
-      if (await this.isManifestPublished(manifestKey, nextManifest)) {
-        await this.auditIndexPersistence("manifest_publish", [
-          statePath(KV.bm25Index, manifestKey),
-        ], {
-          manifestKey,
-          generation,
-          chars: serialized.length,
-          shards: shards.length,
-          result: "committed_after_error",
-          error: errorMessage(err),
-        });
-      } else {
-        await this.deleteShards(shards, "manifest_publish_rollback");
+
+    // iii-state's file adapter can acknowledge a new scope before its file is
+    // durable. Retain the prior vector generation for one complete publish
+    // cycle so a fast shutdown cannot leave a manifest whose shards vanished
+    // while the engine was exiting. BM25 generations are much larger, so this
+    // two-generation policy is intentionally limited to the vector snapshot.
+    let retainedPrevious: IndexShardManifest | null = null;
+    if (
+      fallbackManifestKey &&
+      previous?.v === 1 &&
+      Array.isArray(previous.shards) &&
+      (await this.loadManifestData(previous, "vector previous")) !== null
+    ) {
+      try {
+        await this.publishManifest(fallbackManifestKey, previous);
+        retainedPrevious = previous;
+      } catch (err) {
+        await this.deleteShards(shards, "fallback_publish_rollback");
+        throw err;
       }
+    }
+
+    try {
+      await this.publishManifest(manifestKey, nextManifest);
+    } catch (err) {
+      await this.deleteShards(shards, "manifest_publish_rollback");
       throw err;
     }
 
     await this.deleteKey(KV.bm25Index, legacyKey, "legacy_cleanup");
-    if (previous?.v === 1 && Array.isArray(previous.shards)) {
+    if (fallbackManifestKey) {
+      if (
+        retainedPrevious !== null &&
+        oldFallback?.v === 1 &&
+        Array.isArray(oldFallback.shards)
+      ) {
+        const retainedShardIds = new Set(
+          [...shards, ...(retainedPrevious?.shards ?? [])].map(
+            (shard) => `${shard.scope}\0${shard.key}`,
+          ),
+        );
+        for (const shard of oldFallback.shards) {
+          if (retainedShardIds.has(`${shard.scope}\0${shard.key}`)) continue;
+          await this.deleteShards([shard], "fallback_generation_cleanup");
+        }
+      }
+    } else if (previous?.v === 1 && Array.isArray(previous.shards)) {
       const currentShardIds = new Set(
         shards.map((shard) => `${shard.scope}\0${shard.key}`),
       );
@@ -462,6 +501,46 @@ export class IndexPersistence {
         await this.deleteShards([shard], "previous_generation_cleanup");
       }
     }
+  }
+
+  private async publishManifest(
+    manifestKey: string,
+    manifest: IndexShardManifest,
+  ): Promise<void> {
+    try {
+      await this.kv.set<IndexShardManifest>(
+        KV.bm25Index,
+        manifestKey,
+        manifest,
+      );
+    } catch (err) {
+      if (!(await this.isManifestPublished(manifestKey, manifest))) throw err;
+      await this.auditIndexPersistence(
+        "manifest_publish",
+        [statePath(KV.bm25Index, manifestKey)],
+        {
+          manifestKey,
+          generation: manifest.generation,
+          chars: manifest.chars,
+          shards: manifest.shards.length,
+          result: "committed_after_error",
+          error: errorMessage(err),
+        },
+      );
+      return;
+    }
+
+    await this.auditIndexPersistence(
+      "manifest_publish",
+      [statePath(KV.bm25Index, manifestKey)],
+      {
+        manifestKey,
+        generation: manifest.generation,
+        chars: manifest.chars,
+        shards: manifest.shards.length,
+        result: "committed",
+      },
+    );
   }
 
   private async auditIndexPersistence(
@@ -541,7 +620,37 @@ export class IndexPersistence {
   }
 
   private async loadVectorData(): Promise<string | null> {
-    return this.loadShardedData(VECTOR_KEY, VECTOR_MANIFEST_KEY, "vector");
+    const current = await this.loadShardedData(
+      VECTOR_KEY,
+      VECTOR_MANIFEST_KEY,
+      "vector",
+    );
+    if (current !== null) return current;
+
+    const fallback = await this.readIndexValue<IndexShardManifest>(
+      KV.bm25Index,
+      VECTOR_FALLBACK_MANIFEST_KEY,
+      "vector fallback",
+      "manifest",
+    );
+    if (
+      !fallback.ok ||
+      fallback.value == null ||
+      typeof fallback.value !== "object"
+    ) {
+      return null;
+    }
+    const restored = await this.loadManifestData(
+      fallback.value,
+      "vector fallback",
+    );
+    if (restored !== null) {
+      this.vectorFallbackUsed = true;
+      logger.warn("index persistence: restored previous vector generation", {
+        generation: fallback.value.generation,
+      });
+    }
+    return restored;
   }
 
   private async loadShardedData(
