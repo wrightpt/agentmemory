@@ -119,20 +119,59 @@ run did not test production dual-write recovery, backup/restore, upgrades,
 timeouts, isolation predicates under adversarial payloads, or end-to-end
 MCP/REST latency.
 
-The next bounded evaluation should:
+The non-default shadow adapter now implements the first production-shaped
+evaluation slice:
 
-1. implement a non-default Qdrant adapter behind `VectorStore` in an isolated
-   branch and shadow it from durable observations;
-2. over-fetch and deterministically tie-break before hybrid fusion;
-3. push canonical repo, mission, lifecycle, and permitted agent scope into
-   payload filters before rank assignment;
-4. fail open to BM25+graph on timeout while reporting vector degradation;
-5. compare against a local binary/chunked vector snapshot so Qdrant is not
-   chosen merely because the current JSON codec is monolithic;
-6. measure end-to-end smart-search, dual-write reconciliation, backup/restore,
-   and process/container failure injection.
+1. `QdrantVectorStore` lives behind `VectorStore`, over-fetches, and applies a
+   deterministic score/observation-ID tie-break;
+2. canonical repo, project, mission, lifecycle, and agent payload filters are
+   available without becoming an authorization boundary;
+3. `ShadowVectorStore` returns and persists only the local result, mirrors
+   mutations asynchronously, reconciles from durable local vectors/KV
+   provenance, and bounds outage queues;
+4. remote failure is visible in aggregate health diagnostics and cannot remove
+   local vector, BM25, or graph availability; and
+5. DSH receives only compact smart search plus selective expansion through an
+   enforced client-side proxy allowlist.
 
-No such adapter or production service is implemented by this change.
+The remaining gate is operational evidence: compare against a local
+binary/chunked snapshot, measure end-to-end MCP/REST smart-search, sustain
+concurrent shadow traffic, and record reconciliation/restore/container-outage
+behavior. The shadow is off by default and no external backend is approved to
+serve results.
+
+## Adapter and hardened-container proof
+
+Before merge, the runtime adapter was exercised against the pinned image on a
+disposable loopback-only container. This was a plumbing/failure-boundary proof,
+not another scale benchmark: 500 deterministic eight-dimensional vectors were
+reconciled through `ShadowVectorStore` in 208.590 ms. Local and Qdrant top-10
+sets overlapped completely, the canonical-repository plus `isLatest` payload
+filter returned 25/25 in-scope rows, and a repeated observation upsert left the
+remote size at 500.
+
+| Search path, 100 sequential queries | p50 | p95 | p99 |
+| ----------------------------------- | --: | --: | --: |
+| Local exact cosine                  | 0.163 ms | 0.277 ms | 0.614 ms |
+| Qdrant HTTP                         | 2.871 ms | 3.850 ms | 5.287 ms |
+
+At this deliberately small size, the external hop is slower and adds roughly
+155-159 MiB of service memory plus about 91-92 MiB of collection/storage
+overhead. That is expected base cost and further supports keeping local search
+authoritative for the current corpus.
+
+The proposed service hardening was also proved with a second disposable run:
+read-only root filesystem, UID/GID 1000, all Linux capabilities dropped,
+`no-new-privileges`, dedicated writable storage and snapshot mounts, telemetry
+disabled, a `127.0.0.1`-only published port, and API-key authentication. An
+unauthenticated collection request returned 401; the authenticated readiness
+probe and `QdrantVectorStore` add/filter/search path succeeded. Mounting only
+`/qdrant/storage` is insufficient for read-only-root operation because Qdrant
+also needs `/qdrant/snapshots`; the service definition must mount both.
+
+The production-shaped outage/restart and live end-to-end MCP proof remain the
+activation gate. The raw adapter receipt below records the non-production
+measurements separately from the four scale runs.
 
 ## Raw receipts
 
@@ -145,3 +184,4 @@ No such adapter or production service is implemented by this change.
 - `qdrant-vector-evaluation-2026-08-21-250k-fresh.json`
 - `qdrant-vector-evaluation-2026-08-21-250k-restore.json`
 - `qdrant-vector-evaluation-2026-08-21-operations.json`
+- `qdrant-shadow-adapter-proof-2026-08-21.json`

@@ -39,6 +39,37 @@ rebuild hydrates observations in bounded session batches; the cumulative
 indexes remain in memory, but raw observations are released before the next
 batch is loaded.
 
+## Non-authoritative Qdrant shadow
+
+`AGENTMEMORY_VECTOR_SHADOW=qdrant` may wrap the local store with a production-
+shaped but non-authoritative mirror. The wrapper always mutates and searches
+`LocalVectorStore` first, returns only the local result, and delegates the
+unchanged local v1 snapshot to existing index persistence. Qdrant receives
+asynchronous, bounded, idempotent mutations in a dedicated
+`agentmemory_shadow_*` collection.
+
+At startup, the shadow resets only that derived collection and streams the
+local vector corpus into it in batches. Mutations arriving during the reset are
+queued and replayed before the mirror becomes healthy. A remote timeout,
+dimension mismatch, malformed response, queue overflow, or outage marks
+shadow diagnostics degraded/needs-reconciliation but cannot fail an
+AgentMemory write, local vector search, or BM25/graph retrieval. The next
+reconciliation deterministically replaces stale or missing remote points.
+
+A configurable sample of searches is replayed asynchronously. Health exposes
+only aggregate counts, overlap-at-K, remote latency, queue depth, state, and
+bounded failure text; it stores no query text, vector, memory content, or
+result IDs. Qdrant payload metadata is resolved from authoritative KV rows and
+is limited to repository/project, mission, agent, memory type, lifecycle,
+attribution, and file provenance. Backend filters are an optimization and
+benchmark surface; hydration, authorization, lifecycle filtering, hybrid
+fusion, and the scope policy remain authoritative.
+
+The mode is off by default. An invalid opt-in configuration leaves the local
+store active and reports `configuration_error`. The endpoint must be loopback
+unless an explicit remote opt-in is present, the collection name is restricted,
+and an API key is rejected over non-loopback plaintext HTTP.
+
 ## Canonical repository identity
 
 `project` remains the stable, backward-compatible project registry key.
@@ -218,12 +249,23 @@ MCP or REST surface, use compact results in its working context, and expand
 only the few sources it intends to inspect. Neither integration should infer
 repository relationships from embedding similarity.
 
+The standalone MCP proxy also enforces a client's tool allowlist after it
+discovers the shared engine's broader tool profile. A DSH child configured with
+`AGENTMEMORY_TOOLS=memory_smart_search` therefore sees and may call exactly that
+tool. Hidden calls are rejected before forwarding. With
+`AGENTMEMORY_FORCE_PROXY=1`, an outage fails closed instead of silently reading
+or writing the shim's per-process fallback KV.
+
 ## Migration and operations
 
 This feature does not restart or deploy AgentMemory, mutate production memory,
 or silently rebuild a production index. Existing BM25/vector snapshots and
 legacy session rows remain readable. Any future identity backfill must be an
-explicit, idempotent offline operation with a dry-run report. Any later external
-vector implementation must pass the same retrieval, dimension, isolation,
-persistence-compatibility, and quality fixture tests before it can replace the
-local default.
+explicit, idempotent offline operation with a dry-run report.
+
+The Qdrant shadow does not satisfy the external-authority gate by itself. It
+must accumulate end-to-end latency, overlap, reconciliation, restore, memory,
+and failure-injection evidence under real concurrent load. Replacing the local
+default would still require the same retrieval, dimension, isolation,
+persistence-compatibility, and quality fixtures plus a separately reviewed
+migration and rollback design.

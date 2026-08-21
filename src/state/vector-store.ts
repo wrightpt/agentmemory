@@ -4,6 +4,18 @@ export interface VectorMetadata {
 
 export interface VectorSearchOptions {
   limit?: number;
+  /** Optional backend-side narrowing. HybridSearch still hydrates and applies
+   * its authoritative policy after retrieval; this is an optimization and a
+   * benchmark surface, never an authorization boundary by itself. */
+  filter?: VectorSearchFilter;
+}
+
+export interface VectorSearchFilter {
+  canonicalRepoIds?: readonly string[];
+  projectIds?: readonly string[];
+  missionIds?: readonly string[];
+  agentIds?: readonly string[];
+  isLatest?: boolean;
 }
 
 export interface VectorSearchResult {
@@ -45,6 +57,13 @@ export interface VectorDimensionValidation {
   seenDimensions: Set<number>;
 }
 
+export interface LocalVectorEntry {
+  obsId: string;
+  sessionId: string;
+  embedding: Float32Array;
+  metadata?: VectorMetadata;
+}
+
 /**
  * Local JSON snapshot capability used by AgentMemory's existing KV persistence.
  *
@@ -56,6 +75,9 @@ export interface PersistableLocalVectorStore extends VectorStore {
   serialize(): string;
   restoreFrom(other: PersistableLocalVectorStore): void;
   validateDimensions(expected: number): VectorDimensionValidation;
+  /** Streams a copy of each entry so a derived backend can reconcile without
+   * materializing a second full embedding corpus in memory. */
+  entries(): IterableIterator<LocalVectorEntry>;
 }
 
 type StoredVector = {
@@ -199,6 +221,17 @@ export class LocalVectorStore implements PersistableLocalVectorStore {
       }
     }
     return { mismatches, seenDimensions };
+  }
+
+  *entries(): IterableIterator<LocalVectorEntry> {
+    for (const [obsId, entry] of this.vectors) {
+      yield {
+        obsId,
+        sessionId: entry.sessionId,
+        embedding: new Float32Array(entry.embedding),
+        ...(entry.metadata === undefined ? {} : { metadata: entry.metadata }),
+      };
+    }
   }
 
   clear(): void {

@@ -22,6 +22,7 @@ import {
 import { StateKV } from "./state/kv.js";
 import { KV } from "./state/schema.js";
 import { LocalVectorStore } from "./state/vector-store.js";
+import { configureVectorShadow } from "./state/vector-shadow-runtime.js";
 import { HybridSearch } from "./state/hybrid-search.js";
 import {
   IndexPersistence,
@@ -230,7 +231,20 @@ async function main() {
   const metricsStore = new MetricsStore(kv);
   const dedupMap = new DedupMap();
 
-  const vectorStore = embeddingProvider ? new LocalVectorStore() : null;
+  const localVectorStore = embeddingProvider ? new LocalVectorStore() : null;
+  const shadowConfiguration = localVectorStore
+    ? configureVectorShadow(localVectorStore, embeddingProvider!.dimensions, kv)
+    : null;
+  const vectorStore = shadowConfiguration?.store ?? null;
+  const vectorShadow = shadowConfiguration?.shadow ?? null;
+  if (shadowConfiguration?.warning) {
+    console.warn(
+      `[agentmemory] Qdrant vector shadow disabled; local authority remains active: ` +
+        shadowConfiguration.warning,
+    );
+  } else if (vectorShadow) {
+    bootLog("Vector shadow: Qdrant mirror enabled (authority remains local)");
+  }
 
   setVectorStore(vectorStore);
   setEmbeddingProvider(embeddingProvider);
@@ -480,6 +494,7 @@ async function main() {
       void rebuildIndex(kv)
         .then(async (indexCount) => {
           const committed = await indexPersistence.completeRebuild();
+          void vectorShadow?.reconcile();
           if (committed) {
             bootLog(`Search index rebuilt: ${indexCount} entries`);
           } else {
@@ -543,6 +558,7 @@ async function main() {
         err,
       );
     }
+    void vectorShadow?.reconcile();
   }
 
   // Ready / Endpoints lines are emitted via `bootLog` so they're
@@ -636,6 +652,7 @@ async function main() {
     await indexPersistence.save().catch((err) => {
       console.warn(`[agentmemory] Failed to save index on shutdown:`, err);
     });
+    await vectorShadow?.shutdown(2_000);
     await sdk.shutdown();
     clearWorkerPidfile();
     process.exit(0);

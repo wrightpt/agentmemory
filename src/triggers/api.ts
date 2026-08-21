@@ -11,6 +11,7 @@ import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV, generateId } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { getLatestHealth } from "../health/monitor.js";
+import { getVectorShadowDiagnostics } from "../state/vector-shadow-runtime.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import type { ResilientProvider } from "../providers/resilient.js";
 import { VERSION } from "../version.js";
@@ -381,6 +382,7 @@ export function registerApiTriggers(
           health: health || null,
           functionMetrics,
           circuitBreaker,
+          vectorShadow: getVectorShadowDiagnostics(),
           viewerPort: getBoundViewerPort(),
           viewerSkipped: getViewerSkipped(),
         },

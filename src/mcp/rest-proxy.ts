@@ -13,7 +13,7 @@ function probeTimeoutMs(): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
 }
 
-function forceProxy(): boolean {
+export function isForceProxyEnabled(): boolean {
   const raw = process.env["AGENTMEMORY_FORCE_PROXY"];
   return raw === "1" || raw === "true";
 }
@@ -147,7 +147,7 @@ export async function resolveHandle(): Promise<Handle> {
   if (probeInFlight) return probeInFlight;
   const url = baseUrl();
   guardPlaintextCredential(url, outboundCredential());
-  const skipProbe = forceProxy();
+  const skipProbe = isForceProxyEnabled();
   probeInFlight = (async () => {
     const up = skipProbe ? true : await probe(url);
     if (skipProbe) {

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "proof": "agentmemory-qdrant-shadow-adapter",
+  "date": "2026-08-21",
+  "authority": "local",
+  "qdrant": {
+    "version": "1.19.0",
+    "commit": "74f3e85b",
+    "image_digest": "sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc",
+    "endpoint": "http://127.0.0.1:6335"
+  },
+  "adapter_run": {
+    "corpus_size": 500,
+    "dimensions": 8,
+    "reconcile_ms": 208.59,
+    "overlap_at_10": 1,
+    "filtered_results": 25,
+    "filtered_results_in_scope": 25,
+    "size_after_repeated_upsert": 500,
+    "local_latency_ms": {
+      "samples": 100,
+      "p50": 0.163,
+      "p95": 0.277,
+      "p99": 0.614
+    },
+    "qdrant_latency_ms": {
+      "samples": 100,
+      "p50": 2.871,
+      "p95": 3.85,
+      "p99": 5.287
+    },
+    "qdrant_process_memory_mib": 159.3,
+    "qdrant_storage_mib": 92
+  },
+  "hardened_container_run": {
+    "read_only_root": true,
+    "user": "1000:1000",
+    "capabilities_dropped": [
+      "ALL"
+    ],
+    "no_new_privileges": true,
+    "storage_mount": "/qdrant/storage",
+    "snapshots_mount": "/qdrant/snapshots",
+    "telemetry_disabled": true,
+    "published_address": "127.0.0.1",
+    "api_key_enabled": true,
+    "unauthenticated_collections_http_status": 401,
+    "authenticated_ready_http_status": 200,
+    "authenticated_adapter_add_search": "passed",
+    "qdrant_process_memory_mib": 155.2,
+    "qdrant_storage_mib": 91,
+    "qdrant_snapshots_mib": 0
+  },
+  "scope": "Disposable pre-merge adapter proof only; not a scale or production SLO run."
+}

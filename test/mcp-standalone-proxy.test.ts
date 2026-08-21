@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { handleToolCall } from "../src/mcp/standalone.js";
+import { handleToolCall, handleToolsList } from "../src/mcp/standalone.js";
 import {
   resetHandleForTests,
   resolveHandle,
@@ -34,6 +34,9 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     delete process.env["AGENTMEMORY_FORCE_PROXY"];
     delete process.env["AGENT_ID"];
     delete process.env["AGENTMEMORY_CALLER_TOKEN"];
+    delete process.env["AGENTMEMORY_TOOLS"];
+    delete process.env["AGENTMEMORY_DISABLED_TOOLS"];
+    delete process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"];
   });
 
   it("forwards server-resolved caller identity headers without exposing them in payloads", async () => {
@@ -124,6 +127,89 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     const body = JSON.parse(res.content[0].text);
     expect(body.query).toBe("auth bug");
     expect(body.results[0].id).toBe("m1");
+  });
+
+  it("intersects the remote tool surface with a client custom allowlist", async () => {
+    process.env["AGENTMEMORY_FORCE_PROXY"] = "1";
+    process.env["AGENTMEMORY_TOOLS"] = "memory_smart_search";
+    installFetch((url) => {
+      if (url.endsWith("/agentmemory/mcp/tools")) {
+        return new Response(
+          JSON.stringify({
+            tools: [
+              { name: "memory_save" },
+              { name: "memory_smart_search" },
+              { name: "memory_action_create" },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const listed = await handleToolsList();
+    expect(listed.tools).toEqual([{ name: "memory_smart_search" }]);
+  });
+
+  it("rejects a hidden proxy tool before sending an upstream request", async () => {
+    process.env["AGENTMEMORY_FORCE_PROXY"] = "1";
+    process.env["AGENTMEMORY_TOOLS"] = "memory_smart_search";
+    const fetchMock = installFetch(() =>
+      new Response(JSON.stringify({ content: [] }), { status: 200 }),
+    );
+
+    await expect(
+      handleToolCall("memory_save", { content: "must not forward" }),
+    ).rejects.toThrow(/not permitted.*allowlist/i);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("fails closed to an empty client surface when a custom allowlist has only unknown names", async () => {
+    process.env["AGENTMEMORY_FORCE_PROXY"] = "1";
+    process.env["AGENTMEMORY_TOOLS"] = "memory_typo_that_does_not_exist";
+    const fetchMock = installFetch((url) => {
+      if (url.endsWith("/agentmemory/mcp/tools")) {
+        return new Response(
+          JSON.stringify({ tools: [{ name: "memory_save" }, { name: "memory_smart_search" }] }),
+          { status: 200 },
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    expect((await handleToolsList()).tools).toEqual([]);
+    await expect(
+      handleToolCall("memory_smart_search", { query: "must not forward" }),
+    ).rejects.toThrow(/not permitted.*allowlist/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed on a forced proxy call outage instead of using local KV", async () => {
+    process.env["AGENTMEMORY_FORCE_PROXY"] = "1";
+    process.env["AGENTMEMORY_TOOLS"] = "memory_smart_search";
+    installFetch(() => {
+      throw new Error("forced proxy unavailable");
+    });
+    const localKv = new InMemoryKV(undefined);
+    await expect(
+      handleToolCall("memory_smart_search", { query: "must fail closed" }, localKv),
+    ).rejects.toThrow("forced proxy unavailable");
+  });
+
+  it("keeps a custom tool allowlist when the engine is unreachable", async () => {
+    process.env["AGENTMEMORY_TOOLS"] = "memory_smart_search";
+    installFetch(() => {
+      throw new Error("ECONNREFUSED");
+    });
+
+    const listed = await handleToolsList();
+    expect((listed.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
+      "memory_smart_search",
+    ]);
+    await expect(
+      handleToolCall("memory_save", { content: "must remain hidden" }),
+    ).rejects.toThrow(/not permitted.*allowlist/i);
   });
 
   it("proxies scope context and expansion-only smart search", async () => {
@@ -452,8 +538,7 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(joined).toMatch(/AGENTMEMORY_FORCE_PROXY/);
   });
 
-  it("local fallback tools/list returns all 7 IMPLEMENTED_TOOLS regardless of AGENTMEMORY_TOOLS env (#234)", async () => {
-    const { handleToolsList } = await import("../src/mcp/standalone.js");
+  it("local fallback exposes implemented tools within the configured profile (#234)", async () => {
     installFetch(() => {
       throw new Error("ECONNREFUSED");
     });
@@ -474,7 +559,14 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     resetHandleForTests();
     process.env["AGENTMEMORY_TOOLS"] = "core";
     const core = await handleToolsList();
-    expect((core.tools as unknown[]).length).toBe(7);
+    expect(
+      (core.tools as Array<{ name: string }>).map((tool) => tool.name).sort(),
+    ).toEqual([
+      "memory_recall",
+      "memory_save",
+      "memory_sessions",
+      "memory_smart_search",
+    ]);
     delete process.env["AGENTMEMORY_TOOLS"];
   });
 
