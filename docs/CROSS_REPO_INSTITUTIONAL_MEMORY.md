@@ -28,10 +28,12 @@ snapshot-specific operations are kept outside the general interface so a
 future remote implementation can own its persistence instead of pretending to
 serialize into the local KV snapshot.
 
-Local index snapshots are copy-on-write and single-flight. Writes arriving
-during a large BM25/vector snapshot are coalesced into one later generation
-instead of publishing and cleaning up overlapping shard manifests. Explicit
-delete and shutdown flushes join the active generation and persist the latest
+Local index snapshots are copy-on-write and single-flight. Scheduled snapshots
+use a trailing 60-second quiet period; writes arriving during a large
+BM25/vector snapshot are coalesced behind that quiet period instead of
+overlapping shard manifests or continuously repeating full-corpus saves. Raw
+observations remain durable while the derived index is dirty. Explicit delete
+and shutdown flushes join the active generation and persist the latest
 requested state before returning. If a snapshot is unavailable at startup,
 rebuild hydrates observations in bounded session batches; the cumulative
 indexes remain in memory, but raw observations are released before the next

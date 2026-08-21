@@ -8,7 +8,7 @@ import { KV, generateId } from "./schema.js";
 import { logger } from "../logger.js";
 import { safeAudit } from "../functions/audit.js";
 
-const DEBOUNCE_MS = 5000;
+const DEFAULT_DEBOUNCE_MS = 60_000;
 const FAILURE_LOG_THROTTLE_MS = 60_000;
 const INDEX_PERSISTENCE_FUNCTION_ID = "mem::index-persistence";
 const BM25_KEY = "data";
@@ -30,7 +30,17 @@ type IndexShardManifest = {
 type IndexPersistenceOptions = {
   shardChars?: number;
   createGeneration?: () => string;
+  debounceMs?: number;
 };
+
+function debounceMs(options: IndexPersistenceOptions): number {
+  const configured = options.debounceMs;
+  if (typeof configured !== "number" || !Number.isFinite(configured)) {
+    return DEFAULT_DEBOUNCE_MS;
+  }
+  const wholeMilliseconds = Math.floor(configured);
+  return wholeMilliseconds >= 1 ? wholeMilliseconds : DEFAULT_DEBOUNCE_MS;
+}
 
 function shardChars(options: IndexPersistenceOptions): number {
   const configured = options.shardChars;
@@ -89,9 +99,12 @@ export class IndexPersistence {
     }
     // A write that arrives while a snapshot is already being persisted is
     // intentionally coalesced. The active generation owns the state adapter
-    // until it settles; a new debounce window is armed afterwards for the
-    // latest in-memory index. This prevents two copy-on-write generations
-    // from publishing and cleaning up each other's shards.
+    // until it settles; a new quiet-period debounce window is armed afterwards
+    // for the latest in-memory index. Large indexes can take minutes to
+    // serialize, so immediately repeating the full snapshot for every live
+    // observation would turn sustained agent activity into a permanent save
+    // loop. Raw observations are already durable, and explicit save() still
+    // flushes the latest index during graceful shutdown.
     if (this.saveInFlight) {
       this.timer = null;
       return;
@@ -112,7 +125,7 @@ export class IndexPersistence {
       } catch (err) {
         this.logFailure(err);
       }
-    }, DEBOUNCE_MS);
+    }, debounceMs(this.options));
   }
 
   async save(): Promise<void> {
