@@ -101,6 +101,9 @@ export interface LessonRetrievalDiagnostics {
   returnedCount: number;
   fallbackCode?: string;
   noticeCode?: string;
+  candidateCount?: number;
+  semanticCandidateCount?: number;
+  preselectionApplied?: boolean;
 }
 
 export interface RankedLesson {
@@ -362,15 +365,17 @@ export async function rankLessonRecallCandidates(
       },
     };
   }
-  if (candidates.length > MAX_SEMANTIC_CANDIDATES) {
-    return lexicalOnly("semantic_candidate_limit_exceeded");
-  }
-
   const provider = getEmbeddingProvider();
   if (!provider) {
     return lexicalOnly("embedding_provider_unavailable");
   }
-  const policy = embeddingPolicy(provider, candidates);
+  const semanticCandidates = preselectSemanticCandidates(
+    candidates,
+    lexical,
+    MAX_SEMANTIC_CANDIDATES,
+  );
+  const preselectionApplied = semanticCandidates.length < candidates.length;
+  const policy = embeddingPolicy(provider, semanticCandidates);
   if ("failureCode" in policy) {
     return lexicalOnly(policy.failureCode);
   }
@@ -456,8 +461,69 @@ export async function rankLessonRecallCandidates(
       usedMode: "hybrid",
       returnedCount: ranked.length,
       ...(policy.noticeCode ? { noticeCode: policy.noticeCode } : {}),
+      candidateCount: candidates.length,
+      semanticCandidateCount: policy.semanticEligible.length,
+      ...(preselectionApplied ? { preselectionApplied: true } : {}),
     },
   };
+}
+
+/**
+ * Keep semantic lesson work bounded without turning a large multi-repository
+ * candidate set into lexical-only retrieval. Each represented project gets a
+ * deterministic share before the remaining capacity is filled globally.
+ */
+function preselectSemanticCandidates(
+  candidates: LessonReadModel[],
+  lexical: RankedLesson[],
+  limit: number,
+): LessonReadModel[] {
+  if (candidates.length <= limit) return candidates;
+  const lexicalScore = new Map(
+    lexical.map((item) => [item.lesson.id, item.lexicalScore]),
+  );
+  const compare = (left: LessonReadModel, right: LessonReadModel): number =>
+    (lexicalScore.get(right.id) ?? 0) -
+      (lexicalScore.get(left.id) ?? 0) ||
+    right.confidence - left.confidence ||
+    left.id.localeCompare(right.id);
+  const groups = new Map<string, LessonReadModel[]>();
+  for (const candidate of candidates) {
+    const group = candidate.project?.trim().toLowerCase() || "~unattributed";
+    const existing = groups.get(group) ?? [];
+    existing.push(candidate);
+    groups.set(group, existing);
+  }
+  const orderedGroups = [...groups.entries()]
+    .map(([group, lessons]) => ({
+      group,
+      lessons: lessons.sort(compare),
+    }))
+    .sort(
+      (left, right) =>
+        compare(left.lessons[0], right.lessons[0]) ||
+        left.group.localeCompare(right.group),
+    )
+    .slice(0, limit);
+  const quota = Math.max(1, Math.floor(limit / orderedGroups.length));
+  const selected = new Map<string, LessonReadModel>();
+  for (const group of orderedGroups) {
+    for (const candidate of group.lessons.slice(0, quota)) {
+      if (selected.size >= limit) break;
+      selected.set(candidate.id, candidate);
+    }
+  }
+  if (selected.size < limit) {
+    const remaining = orderedGroups
+      .flatMap((group) => group.lessons)
+      .filter((candidate) => !selected.has(candidate.id))
+      .sort(compare);
+    for (const candidate of remaining) {
+      selected.set(candidate.id, candidate);
+      if (selected.size >= limit) break;
+    }
+  }
+  return [...selected.values()];
 }
 
 export function compactRetrievedLesson(

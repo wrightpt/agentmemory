@@ -118,8 +118,12 @@ Compact smart search resolves current and related repository aliases from the
 same explicit relationship records, then performs one bounded lesson-recall
 pass across the admitted project identities. Lesson results use the same
 current-repo (1.18), related-repo (1.08), and global (0.98) multipliers rather
-than concatenating per-project searches. With no repository context, lesson
-recall preserves its prior unscoped behavior.
+than concatenating per-project searches. When the admitted lesson set exceeds
+the semantic budget, deterministic project-stratified preselection gives each
+represented project a share and fills remaining capacity by lexical relevance,
+confidence, and stable ID; it does not fall back wholesale to lexical-only
+retrieval. With no repository context, lesson recall preserves its prior
+unscoped behavior.
 
 ## Explicit project relationships
 
@@ -158,6 +162,11 @@ policy, so read-time retrieval removes only low-value, vector-only routine hits
 before optional reranking. A lexical or graph match remains eligible, preserving
 exact-symbol BM25 behavior and graph evidence. Git and source search remain
 authoritative for exact current code.
+
+Low-value rows that have only lexical evidence remain in the result pool but do
+not enter the natural-language reranker, preventing routine command/status text
+from receiving a semantic score near 1. Exact single-identifier queries and
+graph-supported rows retain the reranker path.
 
 ## Cross-agent access
 
