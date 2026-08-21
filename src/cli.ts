@@ -2506,6 +2506,25 @@ async function signalAndWait(
   return !pidAlive(pid);
 }
 
+const DEFAULT_WORKER_STOP_GRACE_MS = 120_000;
+const MIN_WORKER_STOP_GRACE_MS = 15_000;
+const MAX_WORKER_STOP_GRACE_MS = 15 * 60_000;
+
+function workerStopGraceMs(): number {
+  const raw = process.env["AGENTMEMORY_WORKER_STOP_GRACE_MS"];
+  if (!raw) return DEFAULT_WORKER_STOP_GRACE_MS;
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+    p.log.warn(
+      `Ignoring invalid AGENTMEMORY_WORKER_STOP_GRACE_MS=${raw}; using ${DEFAULT_WORKER_STOP_GRACE_MS}.`,
+    );
+    return DEFAULT_WORKER_STOP_GRACE_MS;
+  }
+
+  return Math.min(MAX_WORKER_STOP_GRACE_MS, Math.max(MIN_WORKER_STOP_GRACE_MS, parsed));
+}
+
 function findEnginePidsByPort(port: number): number[] {
   if (IS_WINDOWS) return [];
   const lsof = whichBinary("lsof");
@@ -2665,15 +2684,17 @@ async function runStop(): Promise<void> {
   // to flush BM25/vector snapshots + audit rows. Killing iii first
   // leaves those writes with no engine to land on, and the index +
   // observations end up as in-memory state the iii process never
-  // persists. Worker SIGTERM grace bumped 3s -> 5s to give a large
-  // index a real chance to commit before the engine goes away. Large sharded
-  // indexes can take longer than the old 5s bound even when writes are
-  // single-flight, so retain a bounded 15s grace for one copy-on-write
-  // generation.
+  // persists. A large sharded index can take materially longer than the
+  // historical 15s bound to commit one copy-on-write generation. Keep the
+  // engine reachable while the worker flushes, with a bounded override for
+  // operators whose corpus is known to need a larger shutdown window.
+  const workerGraceMs = workerStopGraceMs();
   for (const pid of workerCandidates) {
     const s = p.spinner();
-    s.start(`Stopping agentmemory worker (pid ${pid})... [flushing state]`);
-    const ok = await signalAndWait(pid, "SIGTERM", 15000);
+    s.start(
+      `Stopping agentmemory worker (pid ${pid})... [flushing state; grace ${workerGraceMs}ms]`,
+    );
+    const ok = await signalAndWait(pid, "SIGTERM", workerGraceMs);
     s.stop(ok ? `Stopped worker pid ${pid}` : `Failed to stop worker pid ${pid}`);
     if (!ok) allStopped = false;
   }

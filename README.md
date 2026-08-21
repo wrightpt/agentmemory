@@ -1384,6 +1384,10 @@ taskkill /F /PID <pid>
 
 `agentmemory stop` reaps both the worker and the engine pidfile cleanly on graceful shutdown. The manual cleanup above is only for the post-crash case where neither pidfile is left behind.
 
+Large sharded indexes receive a 120-second worker flush window before stop
+escalates to `SIGKILL`. Set `AGENTMEMORY_WORKER_STOP_GRACE_MS` to tune that
+window for a known corpus; the CLI bounds it between 15 seconds and 15 minutes.
+
 ### Config File
 
 Put agentmemory runtime configuration in `~/.agentmemory/.env` instead of exporting variables in every shell. If the viewer shows a setup hint like `export ANTHROPIC_API_KEY=...`, copy it into this file as `ANTHROPIC_API_KEY=...` without the `export` prefix, then restart agentmemory.

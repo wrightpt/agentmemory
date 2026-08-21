@@ -28,6 +28,17 @@ describe("stop reaps the worker process (#640, #474)", () => {
     // and signaled alongside the engine pids.
     expect(source).toMatch(/workerCandidates/);
     expect(source).toMatch(/Stopping agentmemory worker/);
+    expect(source).toMatch(/AGENTMEMORY_WORKER_STOP_GRACE_MS/);
+    expect(source).toMatch(/signalAndWait\(pid, "SIGTERM", workerGraceMs\)/);
+  });
+
+  it("gives large sharded indexes a bounded graceful shutdown window", () => {
+    const source = readFileSync("src/cli.ts", "utf-8");
+    expect(source).toMatch(/DEFAULT_WORKER_STOP_GRACE_MS = 120_000/);
+    expect(source).toMatch(/MIN_WORKER_STOP_GRACE_MS = 15_000/);
+    expect(source).toMatch(/MAX_WORKER_STOP_GRACE_MS = 15 \* 60_000/);
+    expect(source).toMatch(/Math\.min\(MAX_WORKER_STOP_GRACE_MS/);
+    expect(source).toMatch(/Math\.max\(MIN_WORKER_STOP_GRACE_MS/);
   });
 
   it("both files agree on the pidfile path: ~/.agentmemory/worker.pid", () => {
