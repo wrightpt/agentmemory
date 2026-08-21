@@ -34,7 +34,10 @@ import type {
   GraphNode,
   RetrievalProvenance,
 } from "../src/types.js";
-import type { VectorSearchResult } from "../src/state/vector-store.js";
+import type {
+  VectorSearchResult,
+  VectorStore,
+} from "../src/state/vector-store.js";
 import { pXX } from "./lib/percentiles.js";
 import {
   calibrationFixture,
@@ -118,7 +121,7 @@ interface ChannelResult {
 
 interface SearchRuntime {
   bm25: SearchIndex;
-  vector: VectorIndex;
+  vector: VectorStore;
   graph: GraphRetrieval;
   provenance: Map<string, BenchmarkProvenance>;
 }
@@ -513,7 +516,7 @@ function summarizeLatencies(
 }
 
 async function vectorSearch(
-  vector: VectorIndex,
+  vector: VectorStore,
   query: Float32Array,
   limit: number,
 ): Promise<VectorSearchResult[]> {
@@ -924,9 +927,10 @@ function fixtureDigest(fixture: QualityFixture): string {
 async function buildQualityRuntime(
   fixture: QualityFixture,
   seed: number,
+  vectorStore?: VectorStore,
 ): Promise<SearchRuntime> {
   const bm25 = new SearchIndex();
-  const vector = new VectorIndex();
+  const vector = vectorStore ?? new VectorIndex();
   const kv = new InMemoryKV();
   const provenance = new Map<string, BenchmarkProvenance>();
   for (const document of fixture.documents) {
@@ -1104,8 +1108,9 @@ async function evaluateQualityMode(
 export async function evaluateQualityFixture(
   fixture: QualityFixture,
   seed = DEFAULT_SEED,
+  vectorStore?: VectorStore,
 ): Promise<QualityReport> {
-  const runtime = await buildQualityRuntime(fixture, seed);
+  const runtime = await buildQualityRuntime(fixture, seed, vectorStore);
   const modes = {} as Record<SearchMode, QualityMetrics>;
   for (const mode of ["bm25", "vector", "dual", "triple"] as const) {
     modes[mode] = await evaluateQualityMode(fixture, runtime, mode, seed);

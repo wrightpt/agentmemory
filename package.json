@@ -31,6 +31,7 @@
     "skills:check": "tsx scripts/skills/generate.ts --check && tsx scripts/skills/check.ts",
     "bench:load": "node --import tsx benchmark/load-100k.ts",
     "bench:institutional-memory": "node --expose-gc --import tsx benchmark/cross-repo-institutional-memory.ts",
+    "bench:qdrant-vector-evaluation": "node --expose-gc --import tsx benchmark/qdrant-vector-evaluation.ts",
     "eval:longmemeval": "tsx eval/runner/longmemeval.ts",
     "eval:coding-life": "tsx eval/runner/coding-life.ts"
   },
