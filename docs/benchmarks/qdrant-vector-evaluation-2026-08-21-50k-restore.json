@@ -1,0 +1,133 @@
+{
+  "schema_version": 1,
+  "benchmark": "agentmemory-qdrant-vector-evaluation",
+  "started_at": "2026-08-21T19:25:19.205Z",
+  "completed_at": "2026-08-21T19:25:34.518Z",
+  "qdrant": {
+    "title": "qdrant - vector search engine",
+    "version": "1.19.0",
+    "commit": "74f3e85b9473c62560006c043e13737ce6b48412"
+  },
+  "config": {
+    "endpoint": "http://127.0.0.1:6333",
+    "collection": "agentmemory_eval_50000",
+    "corpus_size": 50000,
+    "dimensions": 384,
+    "distance": "Cosine",
+    "batch_size": 256,
+    "query_candidate_limit": 100,
+    "queries_per_latency_cell": 1000,
+    "concurrency": [
+      1,
+      4,
+      8,
+      16
+    ],
+    "seed": 1592639710,
+    "reuse_after_restart": true,
+    "payload_indexes": [
+      "canonicalRepoId",
+      "missionId",
+      "agentId"
+    ]
+  },
+  "setup": {
+    "reuse": true
+  },
+  "attached_point_count": 50000,
+  "latency": {
+    "vector_c1": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 7246.197,
+      "throughput_per_sec": 138.003,
+      "min_ms": 3.548,
+      "p50_ms": 6.703,
+      "p95_ms": 11.434,
+      "p99_ms": 16.73,
+      "max_ms": 30.542
+    },
+    "vector_c4": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 1299.427,
+      "throughput_per_sec": 769.57,
+      "min_ms": 2.339,
+      "p50_ms": 4.329,
+      "p95_ms": 9.438,
+      "p99_ms": 16.192,
+      "max_ms": 29.494
+    },
+    "vector_c8": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 898.655,
+      "throughput_per_sec": 1112.773,
+      "min_ms": 3.681,
+      "p50_ms": 6.781,
+      "p95_ms": 10.134,
+      "p99_ms": 11.662,
+      "max_ms": 13.495
+    },
+    "vector_c16": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 892.66,
+      "throughput_per_sec": 1120.247,
+      "min_ms": 7.125,
+      "p50_ms": 13.274,
+      "p95_ms": 22.798,
+      "p99_ms": 27.206,
+      "max_ms": 34.408
+    },
+    "filtered_current_repo_c1": {
+      "samples": 250,
+      "errors": 0,
+      "wall_ms": 823.454,
+      "throughput_per_sec": 303.599,
+      "min_ms": 1.873,
+      "p50_ms": 3.138,
+      "p95_ms": 3.871,
+      "p99_ms": 7.071,
+      "max_ms": 7.938
+    }
+  },
+  "exact_recall": {
+    "queries": 16,
+    "recall_at_10": 1,
+    "exact_match_queries": 15,
+    "qdrant_rank_digest_sha256": "e889d5dc3f00f65701b9891314445c0e5832aef36ed242e73c76bb1a9d2d90aa"
+  },
+  "deterministic_ranking": {
+    "queries": 20,
+    "identical_rankings": 20
+  },
+  "heldout_quality": null,
+  "metrics": {
+    "collections_total": 1,
+    "collection_vectors": 50000,
+    "collection_indexed_only_excluded_points": 0,
+    "collection_running_optimizations": 0,
+    "collection_points": 50000,
+    "snapshot_creation_running": 0,
+    "snapshot_recovery_running": 0,
+    "snapshot_created_total": 0,
+    "collection_shard_transfer_incoming": 0,
+    "collection_shard_transfer_outgoing": 0,
+    "collection_update_queue_length": 0,
+    "collection_update_queue_deferred_points": 0,
+    "collection_hardware_metric_cpu": 16863273984,
+    "collection_hardware_metric_payload_io_read": 63867573,
+    "collection_hardware_metric_payload_index_io_read": 0,
+    "collection_hardware_metric_payload_index_io_write": 0,
+    "collection_hardware_metric_payload_io_write": 0,
+    "collection_hardware_metric_vector_io_read": 0,
+    "collection_hardware_metric_vector_io_write": 0,
+    "memory_active_bytes": 89583616,
+    "memory_allocated_bytes": 69328760,
+    "memory_metadata_bytes": 14933360,
+    "memory_resident_bytes": 137695232,
+    "memory_retained_bytes": 69427200,
+    "process_open_fds": 91
+  }
+}

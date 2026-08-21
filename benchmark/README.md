@@ -179,6 +179,50 @@ for p99. Repeat the full run in three fresh processes if a result is close to a
 decision threshold; a single in-process pass is a diagnostic, not a release
 claim.
 
+## Isolated Qdrant decision gate
+
+`qdrant-vector-evaluation.ts` exercises the same `VectorStore` seam against a
+caller-managed Qdrant instance. It is an evaluation adapter only: AgentMemory
+does not import it, production configuration cannot select it, and the harness
+refuses non-loopback endpoints and non-benchmark collection names by default.
+
+Create a disposable loopback-only Qdrant instance, then run:
+
+```bash
+QDRANT_URL=http://127.0.0.1:6333 \
+QDRANT_COLLECTION=agentmemory_eval_100000 \
+BENCH_N=100000 \
+BENCH_OUT=/tmp/agentmemory-qdrant-100k-fresh.json \
+  npm run bench:qdrant-vector-evaluation
+```
+
+After restarting the same instance with its benchmark storage retained, probe
+restore behavior without repopulating it:
+
+```bash
+QDRANT_URL=http://127.0.0.1:6333 \
+QDRANT_COLLECTION=agentmemory_eval_100000 \
+BENCH_N=100000 BENCH_REUSE=1 \
+BENCH_OUT=/tmp/agentmemory-qdrant-100k-restore.json \
+  npm run bench:qdrant-vector-evaluation
+```
+
+The harness records population-to-optimizer-ready time, vector p50/p95/p99 at
+concurrency 1/4/8/16, indexed repository filtering, exact-local recall@10,
+same-process rank repeatability, the frozen held-out BM25/vector/graph quality
+fixture, and Qdrant process metrics. Container readiness, cgroup memory, and
+physical storage are lifecycle-level measurements and must be recorded by the
+caller. Use a fresh collection and storage directory for every corpus size.
+
+Safety controls:
+
+- `QDRANT_URL` must be loopback unless `QDRANT_ALLOW_REMOTE=1` is explicit;
+- `QDRANT_COLLECTION` must match `agentmemory_eval_[A-Za-z0-9_-]+` unless
+  explicitly overridden;
+- output is create-only unless `BENCH_OVERWRITE=1` is explicit;
+- collection cleanup occurs only with `BENCH_CLEANUP=1`;
+- no AgentMemory daemon, production state, or default backend is changed.
+
 ### Retrieval-quality methodology
 
 The same runner evaluates two different hand-authored fixtures:

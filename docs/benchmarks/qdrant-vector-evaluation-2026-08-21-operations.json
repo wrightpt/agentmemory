@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "benchmark": "agentmemory-qdrant-vector-evaluation-operations",
+  "date": "2026-08-21",
+  "host": {
+    "cpu": "AMD Ryzen 5 5600X",
+    "physical_cores": 6,
+    "logical_cpus": 12,
+    "memory_gib": 121
+  },
+  "qdrant": {
+    "version": "1.19.0",
+    "commit": "74f3e85b9473c62560006c043e13737ce6b48412",
+    "image": "qdrant/qdrant:v1.19.0",
+    "image_digest": "sha256:057ee3a8da769fe7310dd3537b4dc7583bf87a95ce8ac43c0af5a46bc580d1fc",
+    "endpoint": "http://127.0.0.1:6333",
+    "production_wiring": false
+  },
+  "method": {
+    "restart_ready": "docker start to first successful GET /readyz",
+    "physical_storage": "du -sh of the dedicated bind mount after the fresh run",
+    "container_memory": "docker stats --no-stream after the restore workload",
+    "client_peak_rss": "GNU time maximum resident set size for the Node generator/client process"
+  },
+  "runs": [
+    {
+      "corpus_size": 10000,
+      "restart_ready_ms": 403.567,
+      "physical_storage_mib_rounded": 40,
+      "storage_apparent_bytes": 615474312,
+      "qdrant_process_resident_bytes_after_restore": 126431232,
+      "container_memory_after_restore_mib": 358.0,
+      "client_peak_rss_kib_fresh": 285656,
+      "client_peak_rss_kib_restore": 286464
+    },
+    {
+      "corpus_size": 50000,
+      "restart_ready_ms": 668.816,
+      "physical_storage_mib_rounded": 132,
+      "storage_apparent_bytes": 480594337,
+      "qdrant_process_resident_bytes_after_restore": 137695232,
+      "container_memory_after_restore_mib": 145.4,
+      "client_peak_rss_kib_fresh": 518604,
+      "client_peak_rss_kib_restore": 493408
+    },
+    {
+      "corpus_size": 100000,
+      "restart_ready_ms": 730.589,
+      "physical_storage_mib_rounded": 231,
+      "storage_apparent_bytes": 561086023,
+      "qdrant_process_resident_bytes_after_restore": 145924096,
+      "container_memory_after_restore_mib": 153.0,
+      "client_peak_rss_kib_fresh": 808360,
+      "client_peak_rss_kib_restore": 677232
+    },
+    {
+      "corpus_size": 250000,
+      "restart_ready_ms": 676.406,
+      "physical_storage_mib_rounded": 531,
+      "storage_apparent_bytes": 823519159,
+      "qdrant_process_resident_bytes_after_restore": 176652288,
+      "container_memory_after_restore_mib": 180.3,
+      "client_peak_rss_kib_fresh": 1292844,
+      "client_peak_rss_kib_restore": 1199732
+    }
+  ],
+  "cleanup": {
+    "container_removed": true,
+    "benchmark_storage_removed": true,
+    "ports_6333_6334_listening_after_cleanup": false,
+    "production_external_vector_store_deployed": false
+  }
+}

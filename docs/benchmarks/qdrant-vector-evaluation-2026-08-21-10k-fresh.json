@@ -1,0 +1,747 @@
+{
+  "schema_version": 1,
+  "benchmark": "agentmemory-qdrant-vector-evaluation",
+  "started_at": "2026-08-21T19:22:07.437Z",
+  "completed_at": "2026-08-21T19:22:31.562Z",
+  "qdrant": {
+    "title": "qdrant - vector search engine",
+    "version": "1.19.0",
+    "commit": "74f3e85b9473c62560006c043e13737ce6b48412"
+  },
+  "config": {
+    "endpoint": "http://127.0.0.1:6333",
+    "collection": "agentmemory_eval_10000",
+    "corpus_size": 10000,
+    "dimensions": 384,
+    "distance": "Cosine",
+    "batch_size": 256,
+    "query_candidate_limit": 100,
+    "queries_per_latency_cell": 1000,
+    "concurrency": [
+      1,
+      4,
+      8,
+      16
+    ],
+    "seed": 1592639710,
+    "reuse_after_restart": false,
+    "payload_indexes": [
+      "canonicalRepoId",
+      "missionId",
+      "agentId"
+    ]
+  },
+  "setup": {
+    "reuse": false,
+    "create_ms": 132.418,
+    "payload_index_ms": 650.67,
+    "corpus_generation_ms": 402.569,
+    "upsert_applied_ms": 2881.568,
+    "optimizer_ready_wait_ms": 4.308,
+    "population_to_ready_ms": 2885.876,
+    "collection_info": {
+      "status": "green",
+      "optimizer_status": "ok",
+      "indexed_vectors_count": 0,
+      "points_count": 10000,
+      "segments_count": 6,
+      "config": {
+        "params": {
+          "vectors": {
+            "size": 384,
+            "distance": "Cosine"
+          },
+          "shard_number": 1,
+          "replication_factor": 1,
+          "write_consistency_factor": 1,
+          "on_disk_payload": true
+        },
+        "hnsw_config": {
+          "m": 16,
+          "ef_construct": 100,
+          "full_scan_threshold": 10000,
+          "max_indexing_threads": 0,
+          "on_disk": false
+        },
+        "optimizer_config": {
+          "deleted_threshold": 0.2,
+          "vacuum_min_vector_number": 1000,
+          "default_segment_number": 0,
+          "max_segment_size": null,
+          "memmap_threshold": null,
+          "indexing_threshold": 10000,
+          "flush_interval_sec": 5,
+          "max_optimization_threads": null,
+          "prevent_unoptimized": null
+        },
+        "wal_config": {
+          "wal_capacity_mb": 32,
+          "wal_segments_ahead": 0,
+          "wal_retain_closed": 1
+        },
+        "quantization_config": null
+      },
+      "payload_schema": {
+        "missionId": {
+          "data_type": "keyword",
+          "points": 10000
+        },
+        "agentId": {
+          "data_type": "keyword",
+          "points": 10000
+        },
+        "canonicalRepoId": {
+          "data_type": "keyword",
+          "points": 10000
+        }
+      },
+      "update_queue": {
+        "length": 0
+      }
+    }
+  },
+  "attached_point_count": 10000,
+  "latency": {
+    "vector_c1": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 8325.818,
+      "throughput_per_sec": 120.108,
+      "min_ms": 4.249,
+      "p50_ms": 7.631,
+      "p95_ms": 13.453,
+      "p99_ms": 18.123,
+      "max_ms": 38.772
+    },
+    "vector_c4": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 2996.246,
+      "throughput_per_sec": 333.751,
+      "min_ms": 5.536,
+      "p50_ms": 10.806,
+      "p95_ms": 20.087,
+      "p99_ms": 27.158,
+      "max_ms": 39.883
+    },
+    "vector_c8": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 2573.764,
+      "throughput_per_sec": 388.536,
+      "min_ms": 6.539,
+      "p50_ms": 19.06,
+      "p95_ms": 33.219,
+      "p99_ms": 45.62,
+      "max_ms": 76.911
+    },
+    "vector_c16": {
+      "samples": 1000,
+      "errors": 0,
+      "wall_ms": 1744.759,
+      "throughput_per_sec": 573.145,
+      "min_ms": 10.426,
+      "p50_ms": 26.912,
+      "p95_ms": 41.805,
+      "p99_ms": 52.101,
+      "max_ms": 63.535
+    },
+    "filtered_current_repo_c1": {
+      "samples": 250,
+      "errors": 0,
+      "wall_ms": 1363.502,
+      "throughput_per_sec": 183.351,
+      "min_ms": 3.146,
+      "p50_ms": 5.145,
+      "p95_ms": 7.608,
+      "p99_ms": 9.793,
+      "max_ms": 15.641
+    }
+  },
+  "exact_recall": {
+    "queries": 16,
+    "recall_at_10": 1,
+    "exact_match_queries": 16,
+    "qdrant_rank_digest_sha256": "7ae6822be3b2f884dc26b010c8e47c54925d8e0e2457c962d271db26ddc16ae4"
+  },
+  "deterministic_ranking": {
+    "queries": 20,
+    "identical_rankings": 20
+  },
+  "heldout_quality": {
+    "name": "heldout-v1",
+    "fixture_digest_sha256": "85081d9187b112d9ea2b92c0e6f9a2b2ac235d4077d42c6a65868fe8b1116e5c",
+    "documents": 18,
+    "queries": 6,
+    "modes": {
+      "bm25": {
+        "queries": 6,
+        "ndcg_at_5": 0.833,
+        "ndcg_at_10": 0.833,
+        "mrr": 0.833,
+        "recall_at_5": 0.833,
+        "recall_at_10": 0.833,
+        "exact_symbol_top_1": 1,
+        "current_repo_top_1": 1,
+        "related_repo_recall_at_5": 0.75,
+        "unrelated_intrusion_at_5": 0.409,
+        "stale_intrusion_at_5": 0,
+        "provenance_completeness": 1,
+        "rank_digest_sha256": "de6da3f0d278b0d57b31ccdb83eee167986446bc985ec9d1e1425650ce6b4ddd",
+        "per_query": [
+          {
+            "query_id": "hold_q_exact",
+            "category": "exact_symbol",
+            "top_ids": [
+              "hold_exact_target"
+            ],
+            "qrels": {
+              "hold_exact_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_semantic",
+            "category": "semantic_paraphrase",
+            "top_ids": [
+              "hold_semantic_target",
+              "hold_semantic_local_noise",
+              "hold_related_local_noise",
+              "hold_semantic_noise",
+              "hold_related_noise"
+            ],
+            "qrels": {
+              "hold_semantic_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_architecture",
+            "category": "cross_repo_architecture",
+            "top_ids": [
+              "hold_arch_noise",
+              "hold_local_noise"
+            ],
+            "qrels": {
+              "hold_arch_target": 3,
+              "hold_arch_global": 1
+            },
+            "ndcg_at_5": 0,
+            "ndcg_at_10": 0,
+            "reciprocal_rank": 0,
+            "recall_at_5": 0,
+            "recall_at_10": 0
+          },
+          {
+            "query_id": "hold_q_bug",
+            "category": "historical_bug",
+            "top_ids": [
+              "hold_bug_target",
+              "hold_related_local_noise",
+              "hold_semantic_target",
+              "hold_bug_noise"
+            ],
+            "qrels": {
+              "hold_bug_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_local",
+            "category": "current_repo_preference",
+            "top_ids": [
+              "hold_local_target",
+              "hold_local_global",
+              "hold_local_noise",
+              "hold_arch_noise",
+              "hold_arch_target"
+            ],
+            "qrels": {
+              "hold_local_target": 3,
+              "hold_local_global": 1
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_related",
+            "category": "related_dependency",
+            "top_ids": [
+              "hold_related_target",
+              "hold_related_local_noise",
+              "hold_exact_target",
+              "hold_semantic_local_noise",
+              "hold_related_noise"
+            ],
+            "qrels": {
+              "hold_related_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          }
+        ]
+      },
+      "vector": {
+        "queries": 6,
+        "ndcg_at_5": 0.82,
+        "ndcg_at_10": 0.82,
+        "mrr": 0.833,
+        "recall_at_5": 0.75,
+        "recall_at_10": 0.75,
+        "exact_symbol_top_1": 1,
+        "current_repo_top_1": 1,
+        "related_repo_recall_at_5": 0.75,
+        "unrelated_intrusion_at_5": 0.714,
+        "stale_intrusion_at_5": 0,
+        "provenance_completeness": 1,
+        "rank_digest_sha256": "f1da4c0d659190714fd4f57b56389df357aef4cb430e7a6e66e92e89c642a1dd",
+        "per_query": [
+          {
+            "query_id": "hold_q_exact",
+            "category": "exact_symbol",
+            "top_ids": [
+              "hold_exact_target",
+              "hold_bug_target",
+              "hold_exact_noise",
+              "hold_arch_noise"
+            ],
+            "qrels": {
+              "hold_exact_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_semantic",
+            "category": "semantic_paraphrase",
+            "top_ids": [
+              "hold_semantic_target",
+              "hold_local_global",
+              "hold_local_noise",
+              "hold_semantic_noise",
+              "hold_local_target"
+            ],
+            "qrels": {
+              "hold_semantic_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_architecture",
+            "category": "cross_repo_architecture",
+            "top_ids": [
+              "hold_arch_noise",
+              "hold_exact_noise",
+              "hold_local_noise",
+              "hold_exact_target",
+              "hold_semantic_noise"
+            ],
+            "qrels": {
+              "hold_arch_target": 3,
+              "hold_arch_global": 1
+            },
+            "ndcg_at_5": 0,
+            "ndcg_at_10": 0,
+            "reciprocal_rank": 0,
+            "recall_at_5": 0,
+            "recall_at_10": 0
+          },
+          {
+            "query_id": "hold_q_bug",
+            "category": "historical_bug",
+            "top_ids": [
+              "hold_bug_target",
+              "hold_bug_noise",
+              "hold_exact_noise",
+              "hold_arch_target"
+            ],
+            "qrels": {
+              "hold_bug_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_local",
+            "category": "current_repo_preference",
+            "top_ids": [
+              "hold_local_target",
+              "hold_local_noise",
+              "hold_semantic_noise",
+              "hold_related_target",
+              "hold_semantic_target"
+            ],
+            "qrels": {
+              "hold_local_target": 3,
+              "hold_local_global": 1
+            },
+            "ndcg_at_5": 0.917,
+            "ndcg_at_10": 0.917,
+            "reciprocal_rank": 1,
+            "recall_at_5": 0.5,
+            "recall_at_10": 0.5
+          },
+          {
+            "query_id": "hold_q_related",
+            "category": "related_dependency",
+            "top_ids": [
+              "hold_related_target",
+              "hold_local_global",
+              "hold_related_noise",
+              "hold_arch_target",
+              "hold_local_target"
+            ],
+            "qrels": {
+              "hold_related_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          }
+        ]
+      },
+      "dual": {
+        "queries": 6,
+        "ndcg_at_5": 0.82,
+        "ndcg_at_10": 0.827,
+        "mrr": 0.833,
+        "recall_at_5": 0.75,
+        "recall_at_10": 0.833,
+        "exact_symbol_top_1": 1,
+        "current_repo_top_1": 1,
+        "related_repo_recall_at_5": 0.75,
+        "unrelated_intrusion_at_5": 0.621,
+        "stale_intrusion_at_5": 0,
+        "provenance_completeness": 1,
+        "rank_digest_sha256": "8d9b7c4700de6b7bf9bada1efbf53b665a454958042d3c41cda05299fdaf92c2",
+        "per_query": [
+          {
+            "query_id": "hold_q_exact",
+            "category": "exact_symbol",
+            "top_ids": [
+              "hold_exact_target",
+              "hold_bug_target",
+              "hold_exact_noise",
+              "hold_arch_noise"
+            ],
+            "qrels": {
+              "hold_exact_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_semantic",
+            "category": "semantic_paraphrase",
+            "top_ids": [
+              "hold_semantic_target",
+              "hold_semantic_noise",
+              "hold_local_global",
+              "hold_local_noise",
+              "hold_semantic_local_noise",
+              "hold_local_target",
+              "hold_related_local_noise",
+              "hold_related_noise"
+            ],
+            "qrels": {
+              "hold_semantic_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_architecture",
+            "category": "cross_repo_architecture",
+            "top_ids": [
+              "hold_arch_noise",
+              "hold_local_noise",
+              "hold_exact_noise",
+              "hold_exact_target",
+              "hold_semantic_noise"
+            ],
+            "qrels": {
+              "hold_arch_target": 3,
+              "hold_arch_global": 1
+            },
+            "ndcg_at_5": 0,
+            "ndcg_at_10": 0,
+            "reciprocal_rank": 0,
+            "recall_at_5": 0,
+            "recall_at_10": 0
+          },
+          {
+            "query_id": "hold_q_bug",
+            "category": "historical_bug",
+            "top_ids": [
+              "hold_bug_target",
+              "hold_bug_noise",
+              "hold_exact_noise",
+              "hold_arch_target",
+              "hold_related_local_noise",
+              "hold_semantic_target"
+            ],
+            "qrels": {
+              "hold_bug_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_local",
+            "category": "current_repo_preference",
+            "top_ids": [
+              "hold_local_target",
+              "hold_local_noise",
+              "hold_semantic_noise",
+              "hold_related_target",
+              "hold_semantic_target",
+              "hold_local_global",
+              "hold_arch_noise",
+              "hold_arch_target"
+            ],
+            "qrels": {
+              "hold_local_target": 3,
+              "hold_local_global": 1
+            },
+            "ndcg_at_5": 0.917,
+            "ndcg_at_10": 0.964,
+            "reciprocal_rank": 1,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_related",
+            "category": "related_dependency",
+            "top_ids": [
+              "hold_related_target",
+              "hold_related_noise",
+              "hold_local_global",
+              "hold_related_local_noise",
+              "hold_arch_target",
+              "hold_local_target",
+              "hold_exact_target",
+              "hold_semantic_local_noise"
+            ],
+            "qrels": {
+              "hold_related_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          }
+        ]
+      },
+      "triple": {
+        "queries": 6,
+        "ndcg_at_5": 0.82,
+        "ndcg_at_10": 0.882,
+        "mrr": 0.861,
+        "recall_at_5": 0.75,
+        "recall_at_10": 0.917,
+        "exact_symbol_top_1": 1,
+        "current_repo_top_1": 1,
+        "related_repo_recall_at_5": 0.75,
+        "unrelated_intrusion_at_5": 0.621,
+        "stale_intrusion_at_5": 0,
+        "provenance_completeness": 1,
+        "rank_digest_sha256": "b6b137af3032764a3ac7242766d34b764f4ad3b46aaa6b1cd95ce2a79c722f53",
+        "per_query": [
+          {
+            "query_id": "hold_q_exact",
+            "category": "exact_symbol",
+            "top_ids": [
+              "hold_exact_target",
+              "hold_bug_target",
+              "hold_exact_noise",
+              "hold_arch_noise"
+            ],
+            "qrels": {
+              "hold_exact_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_semantic",
+            "category": "semantic_paraphrase",
+            "top_ids": [
+              "hold_semantic_target",
+              "hold_semantic_noise",
+              "hold_local_global",
+              "hold_local_noise",
+              "hold_semantic_local_noise",
+              "hold_local_target",
+              "hold_related_local_noise",
+              "hold_related_noise"
+            ],
+            "qrels": {
+              "hold_semantic_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_architecture",
+            "category": "cross_repo_architecture",
+            "top_ids": [
+              "hold_arch_noise",
+              "hold_local_noise",
+              "hold_exact_noise",
+              "hold_exact_target",
+              "hold_semantic_noise",
+              "hold_arch_target"
+            ],
+            "qrels": {
+              "hold_arch_target": 3,
+              "hold_arch_global": 1
+            },
+            "ndcg_at_5": 0,
+            "ndcg_at_10": 0.327,
+            "reciprocal_rank": 0.167,
+            "recall_at_5": 0,
+            "recall_at_10": 0.5
+          },
+          {
+            "query_id": "hold_q_bug",
+            "category": "historical_bug",
+            "top_ids": [
+              "hold_bug_target",
+              "hold_bug_noise",
+              "hold_exact_noise",
+              "hold_arch_target",
+              "hold_related_local_noise",
+              "hold_semantic_target"
+            ],
+            "qrels": {
+              "hold_bug_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_local",
+            "category": "current_repo_preference",
+            "top_ids": [
+              "hold_local_target",
+              "hold_local_noise",
+              "hold_semantic_noise",
+              "hold_related_target",
+              "hold_semantic_target",
+              "hold_local_global",
+              "hold_arch_noise",
+              "hold_arch_target"
+            ],
+            "qrels": {
+              "hold_local_target": 3,
+              "hold_local_global": 1
+            },
+            "ndcg_at_5": 0.917,
+            "ndcg_at_10": 0.964,
+            "reciprocal_rank": 1,
+            "recall_at_5": 0.5,
+            "recall_at_10": 1
+          },
+          {
+            "query_id": "hold_q_related",
+            "category": "related_dependency",
+            "top_ids": [
+              "hold_related_target",
+              "hold_related_noise",
+              "hold_local_global",
+              "hold_related_local_noise",
+              "hold_arch_target",
+              "hold_local_target",
+              "hold_exact_target",
+              "hold_semantic_local_noise"
+            ],
+            "qrels": {
+              "hold_related_target": 3
+            },
+            "ndcg_at_5": 1,
+            "ndcg_at_10": 1,
+            "reciprocal_rank": 1,
+            "recall_at_5": 1,
+            "recall_at_10": 1
+          }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "collections_total": 2,
+    "collection_vectors": 18,
+    "collection_indexed_only_excluded_points": 0,
+    "collection_running_optimizations": 0,
+    "collection_points": 18,
+    "snapshot_creation_running": 0,
+    "snapshot_recovery_running": 0,
+    "snapshot_created_total": 0,
+    "collection_shard_transfer_incoming": 0,
+    "collection_shard_transfer_outgoing": 0,
+    "collection_update_queue_length": 0,
+    "collection_update_queue_deferred_points": 0,
+    "collection_hardware_metric_cpu": 497664,
+    "collection_hardware_metric_payload_io_read": 8574,
+    "collection_hardware_metric_payload_index_io_read": 0,
+    "collection_hardware_metric_payload_index_io_write": 498,
+    "collection_hardware_metric_payload_io_write": 1729,
+    "collection_hardware_metric_vector_io_read": 0,
+    "collection_hardware_metric_vector_io_write": 27648,
+    "memory_active_bytes": 86740992,
+    "memory_allocated_bytes": 66913600,
+    "memory_metadata_bytes": 17133424,
+    "memory_resident_bytes": 130027520,
+    "memory_retained_bytes": 121573376,
+    "process_open_fds": 78
+  }
+}
