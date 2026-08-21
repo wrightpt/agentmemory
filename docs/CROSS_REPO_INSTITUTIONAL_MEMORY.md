@@ -114,6 +114,13 @@ existing hybrid order while still labeling the provenance ring accurately.
 Related and wider repository recall are explicit so ordinary repo-local recall
 does not collapse into a noisy global search.
 
+Compact smart search resolves current and related repository aliases from the
+same explicit relationship records, then performs one bounded lesson-recall
+pass across the admitted project identities. Lesson results use the same
+current-repo (1.18), related-repo (1.08), and global (0.98) multipliers rather
+than concatenating per-project searches. With no repository context, lesson
+recall preserves its prior unscoped behavior.
+
 ## Explicit project relationships
 
 Project relationships are directional records identified deterministically by
@@ -146,8 +153,11 @@ The four states are intentionally distinct:
 Routine file reads, searches, status notifications, command chatter, and
 ordinary conversations remain stored and may remain lexical, but are not
 embedded unless their importance crosses a high threshold. Existing stored
-observations are not deleted. Git and source search remain authoritative for
-exact current code.
+observations are not deleted. Restored legacy vector snapshots can predate this
+policy, so read-time retrieval removes only low-value, vector-only routine hits
+before optional reranking. A lexical or graph match remains eligible, preserving
+exact-symbol BM25 behavior and graph evidence. Git and source search remain
+authoritative for exact current code.
 
 ## Cross-agent access
 

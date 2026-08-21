@@ -199,6 +199,46 @@ describe("causal lesson retrieval", () => {
       success: false,
       error: expect.stringContaining("at most 50"),
     });
+    expect(
+      parseLessonRecallInput({
+        query: "valid",
+        projects: Array.from({ length: 33 }, (_, index) => `repo-${index}`),
+      }),
+    ).toMatchObject({
+      success: false,
+      error: expect.stringContaining("at most 32"),
+    });
+  });
+
+  it("filters one bounded candidate set across project aliases", () => {
+    const parsed = parseLessonRecallInput({
+      query: "launch authority",
+      project: "trading-system",
+      projects: ["workstation-shell", "global", "workstation-shell"],
+    });
+    expect(parsed).toMatchObject({
+      success: true,
+      value: {
+        project: "trading-system",
+        projects: ["workstation-shell", "global"],
+      },
+    });
+    if (!parsed.success) throw new Error(parsed.error);
+
+    const selected = selectLessonRecallCandidates(
+      [
+        lesson("current", { project: "trading-system" }),
+        lesson("related", { project: "workstation-shell" }),
+        lesson("global", { project: "global" }),
+        lesson("unrelated", { project: "same-name-distractor" }),
+      ],
+      parsed.value,
+    );
+    expect(selected.map((item) => item.id)).toEqual([
+      "lsn_current",
+      "lsn_related",
+      "lsn_global",
+    ]);
   });
 
   it("preserves the prior lexical confidence and recency scorer without embedding", async () => {

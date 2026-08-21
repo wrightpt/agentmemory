@@ -479,6 +479,48 @@ export async function relatedRepositoryIds(
   return [...related].sort();
 }
 
+/**
+ * Return every explicit identity for repositories related to `repoId`.
+ * Canonical IDs remain authoritative, while stored aliases let retrieval
+ * classify legacy project labels without rewriting or merging old memories.
+ */
+export async function relatedRepositoryIdentities(
+  kv: StateKV,
+  repoId: string,
+): Promise<string[]> {
+  return (await repositoryRelationshipIdentityScope(kv, repoId)).related;
+}
+
+export async function repositoryRelationshipIdentityScope(
+  kv: StateKV,
+  repoId: string,
+): Promise<{ current: string[]; related: string[] }> {
+  const normalized = validateRepositoryIdentity(repoId, "repoId");
+  const relationships = await listProjectRelationships(kv, {
+    repoId: normalized,
+    direction: "both",
+  });
+  const related = new Set<string>();
+  const current = new Set<string>([normalized]);
+  for (const relationship of relationships) {
+    const source = identitySet(relationship, "source");
+    const target = identitySet(relationship, "target");
+    if (source.has(normalized)) {
+      for (const identity of source) current.add(identity);
+      for (const identity of target) related.add(identity);
+    }
+    if (target.has(normalized)) {
+      for (const identity of target) current.add(identity);
+      for (const identity of source) related.add(identity);
+    }
+  }
+  for (const identity of current) related.delete(identity);
+  return {
+    current: [...current].sort(),
+    related: [...related].sort(),
+  };
+}
+
 export function registerProjectRelationshipsFunction(
   sdk: ISdk,
   kv: StateKV,

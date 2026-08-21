@@ -22,6 +22,7 @@ import {
   type RetrievalPolicyContext,
 } from "./retrieval-policy.js";
 import { resolveRetrievalProvenance } from "./provenance.js";
+import { shouldSemanticallyIndexObservation } from "./indexing-policy.js";
 
 const RRF_K = 60;
 const AUTHORIZATION_BATCH_SIZE = 32;
@@ -317,19 +318,20 @@ export class HybridSearch {
       authorizationCache,
     );
     const authorized = this.filterAgentAuthorized(enriched, context);
+    const qualityFiltered = this.filterLegacySemanticOnlyNoise(authorized);
 
-    if (this.rerankEnabled && authorized.length > 1) {
+    if (this.rerankEnabled && qualityFiltered.length > 1) {
       try {
-        const head = authorized.slice(0, rerankWindow);
-        const tail = authorized.slice(rerankWindow);
+        const head = qualityFiltered.slice(0, rerankWindow);
+        const tail = qualityFiltered.slice(rerankWindow);
         const reranked = await rerank(query, head, rerankWindow);
         return this.applyPolicy(reranked.concat(tail), context, limit);
       } catch {
-        return this.applyPolicy(authorized, context, limit);
+        return this.applyPolicy(qualityFiltered, context, limit);
       }
     }
 
-    return this.applyPolicy(authorized, context, limit);
+    return this.applyPolicy(qualityFiltered, context, limit);
   }
 
   private async authorizedCandidateIds(
@@ -414,6 +416,28 @@ export class HybridSearch {
     return results.filter(
       (result) => result.provenance?.agentId === context.filterAgentId,
     );
+  }
+
+  /**
+   * Old persisted vector indexes can contain routine observations written
+   * before the memory-quality policy existed. Keep those rows stored and keep
+   * exact lexical/graph retrieval intact, but do not let a vector-only legacy
+   * hit consume the reranker window. Newly indexed rows already obey this
+   * policy; applying it at read time makes restored legacy indexes consistent.
+   */
+  private filterLegacySemanticOnlyNoise(
+    results: HybridSearchResult[],
+  ): HybridSearchResult[] {
+    return results.filter((result) => {
+      const semanticOnly =
+        result.vectorScore > 0 &&
+        result.bm25Score <= 0 &&
+        result.graphScore <= 0;
+      return (
+        !semanticOnly ||
+        shouldSemanticallyIndexObservation(result.observation)
+      );
+    });
   }
 
   private applyPolicy(

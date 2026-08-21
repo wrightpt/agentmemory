@@ -5,6 +5,7 @@ import type {
   CompressedObservation,
   HybridSearchResult,
   Memory,
+  RetrievalScope,
   Session,
 } from "../types.js";
 import { KV } from "../state/schema.js";
@@ -21,7 +22,10 @@ import { getCounters } from "../telemetry/setup.js";
 import type { LessonAccessContext } from "./lesson-access.js";
 import type { CompactRetrievedLesson } from "./lesson-retrieval.js";
 import type { RetrievalPolicyContext } from "../state/retrieval-policy.js";
-import { applyRetrievalPolicy } from "../state/retrieval-policy.js";
+import {
+  applyRetrievalPolicy,
+  retrievalScopeMultiplier,
+} from "../state/retrieval-policy.js";
 import {
   compactRetrievalProvenance,
   publicRetrievalObservation,
@@ -30,7 +34,7 @@ import {
 import { memoryToObservation } from "../state/memory-utils.js";
 import {
   normalizeRepositoryIdentity,
-  relatedRepositoryIds,
+  repositoryRelationshipIdentityScope,
 } from "./project-relationships.js";
 
 // #771: smart-search followup-rate diagnostic. Stored per session as
@@ -249,7 +253,7 @@ export function registerSmartSearchFunction(
               sdk,
               data.query,
               lessonLimit,
-              data.project ?? retrievalContext.currentProject,
+              lessonProjectScope(retrievalContext),
               data.accessContext,
             )
           : Promise.resolve([]),
@@ -358,16 +362,23 @@ async function recallLessons(
   sdk: ISdk,
   query: string,
   limit: number,
-  project?: string,
+  projectScope: LessonProjectScope,
   accessContext?: LessonAccessContext,
 ): Promise<CompactLessonResult[]> {
   try {
+    const projects = projectScope.filters;
+    const projectPayload =
+      projects.length <= 1
+        ? { project: projects[0] }
+        : { projects };
+    const recallLimit =
+      projects.length > 1 ? Math.min(MAX_LESSON_RECALL_LIMIT, limit * 3) : limit;
     const result = (await sdk.trigger({
       function_id: "mem::lesson-recall",
       payload: {
         query,
-        limit,
-        project,
+        limit: recallLimit,
+        ...projectPayload,
         retrievalMode: "hybrid",
         compact: true,
         accessContext,
@@ -389,6 +400,10 @@ async function recallLessons(
             : evidenceVerdict === "mixed"
               ? "mixed evidence"
               : "unverified evidence";
+      const scoped = classifyLessonScope(lesson.project, projectScope);
+      const adjustedScore =
+        lesson.score *
+        (scoped ? retrievalScopeMultiplier(scoped.scope) : 1);
       return {
         lessonId: lesson.lessonId,
         content: lesson.content,
@@ -397,18 +412,108 @@ async function recallLessons(
         evidenceLabel,
         contradicted,
         confidence: lesson.confidence,
-        score: lesson.score,
+        score: roundLessonScore(adjustedScore),
         createdAt: lesson.createdAt,
         project: lesson.project,
         tags: lesson.tags ?? [],
+        ...(scoped
+          ? { scope: scoped.scope, scopeReason: scoped.scopeReason }
+          : {}),
       };
-    });
+    }).sort(
+      (left, right) =>
+        right.score - left.score || left.lessonId.localeCompare(right.lessonId),
+    ).slice(0, limit);
   } catch (err) {
     logger.warn("Smart search: mem::lesson-recall failed; returning empty lesson list", {
       error: err instanceof Error ? err.message : String(err),
     });
     return [];
   }
+}
+
+const MAX_LESSON_RECALL_LIMIT = 50;
+const MAX_LESSON_PROJECT_FILTERS = 32;
+
+interface LessonProjectScope {
+  filters: string[];
+  current: Set<string>;
+  related: Set<string>;
+  hasLocalContext: boolean;
+}
+
+function lessonProjectScope(
+  context: RetrievalPolicyContext,
+): LessonProjectScope {
+  const currentFilters = new Set<string>();
+  const relatedFilters = new Set<string>();
+  const current = new Set<string>();
+  const related = new Set<string>();
+  const add = (
+    identities: Set<string>,
+    filters: Set<string>,
+    value: string | undefined,
+  ): void => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+    identities.add(trimmed.toLowerCase());
+    filters.add(trimmed);
+  };
+  const hasLocalContext = Boolean(
+    context.currentProject || context.currentRepoId,
+  );
+  if (!hasLocalContext) {
+    return { filters: [], current, related, hasLocalContext: false };
+  }
+  add(current, currentFilters, context.currentProject);
+  for (const alias of context.currentProjectAliases ?? []) {
+    add(current, currentFilters, alias);
+  }
+  add(current, currentFilters, context.currentRepoId);
+  if (context.includeRelatedProjects === true) {
+    for (const repoId of context.relatedRepoIds ?? []) {
+      add(related, relatedFilters, repoId);
+    }
+  }
+  const filters = [
+    ...[...currentFilters].sort(),
+    ...[...relatedFilters].sort(),
+    ...(context.includeGlobal !== false ? ["global"] : []),
+  ].slice(0, MAX_LESSON_PROJECT_FILTERS);
+  return {
+    filters: [...filters].sort(),
+    current,
+    related,
+    hasLocalContext: true,
+  };
+}
+
+function classifyLessonScope(
+  project: string | undefined,
+  context: LessonProjectScope,
+): { scope: RetrievalScope; scopeReason: string } | undefined {
+  if (!context.hasLocalContext) return undefined;
+  const identity = project?.trim().toLowerCase();
+  if (identity && context.current.has(identity)) {
+    return {
+      scope: "current_repo",
+      scopeReason: "same project identity or canonical repository",
+    };
+  }
+  if (identity && context.related.has(identity)) {
+    return {
+      scope: "related_repo",
+      scopeReason: "explicit repository relationship",
+    };
+  }
+  if (identity === "global") {
+    return { scope: "global", scopeReason: "explicit global lesson" };
+  }
+  return undefined;
+}
+
+function roundLessonScore(score: number): number {
+  return Math.round(score * 1_000_000) / 1_000_000;
 }
 
 async function detectFollowup(
@@ -487,10 +592,17 @@ async function resolveRetrievalContext(
     const normalized = normalizeRepositoryIdentity(repoId);
     if (normalized) related.add(normalized);
   }
-  if (data.includeRelatedProjects === true && currentRepoId) {
+  if (currentRepoId) {
     try {
-      for (const repoId of await relatedRepositoryIds(kv, currentRepoId)) {
-        related.add(repoId);
+      const relationshipScope = await repositoryRelationshipIdentityScope(
+        kv,
+        currentRepoId,
+      );
+      for (const identity of relationshipScope.current) {
+        if (identity !== currentRepoId) currentProjectAliases.add(identity);
+      }
+      if (data.includeRelatedProjects === true) {
+        for (const repoId of relationshipScope.related) related.add(repoId);
       }
     } catch (error) {
       logger.warn("Smart search: related repository lookup failed", {

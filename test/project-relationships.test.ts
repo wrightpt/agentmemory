@@ -10,7 +10,9 @@ import {
   normalizeRepositoryIdentity,
   parseImportedProjectRelationship,
   projectRelationshipId,
+  relatedRepositoryIdentities,
   relatedRepositoryIds,
+  repositoryRelationshipIdentityScope,
   upsertProjectRelationship,
 } from "../src/functions/project-relationships.js";
 
@@ -134,6 +136,16 @@ describe("project relationships", () => {
     expect(await relatedRepositoryIds(kv as never, "memory")).toEqual([
       "wrightpt/workstation-shell",
     ]);
+    expect(await relatedRepositoryIdentities(kv as never, "memory")).toEqual([
+      "shell",
+      "wrightpt/workstation-shell",
+    ]);
+    expect(
+      await repositoryRelationshipIdentityScope(kv as never, "memory"),
+    ).toEqual({
+      current: ["memory", "wrightpt/agentmemory"],
+      related: ["shell", "wrightpt/workstation-shell"],
+    });
   });
 
   it("keeps unrelated same-basename repositories separate", async () => {
