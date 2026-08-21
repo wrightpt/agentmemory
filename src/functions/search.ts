@@ -324,7 +324,6 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
     return count
   }
 
-  const obsPerSession: CompressedObservation[][] = []
   const failedSessions: string[] = []
   for (let batch = 0; batch < sessions.length; batch += 10) {
     const chunk = sessions.slice(batch, batch + 10)
@@ -338,26 +337,30 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
         }
       })
     )
-    obsPerSession.push(...results)
+    // Process each bounded session batch before requesting the next one.
+    // Keeping every session's observations in obsPerSession doubled the live
+    // corpus during a missing-snapshot rebuild and drove large installations
+    // into V8 GC pressure. The search indexes remain cumulative; only the raw
+    // observation hydration is now released batch by batch.
+    for (const observations of results) {
+      for (const obs of observations) {
+        if (obs.title && obs.narrative) {
+          idx.add(obs)
+          if (shouldSemanticallyIndexObservation(obs)) {
+            await enqueue({
+              id: obs.id,
+              sessionId: obs.sessionId,
+              text: obs.title + ' ' + obs.narrative,
+              context: { kind: "observation", logId: obs.id },
+            })
+          }
+          count++
+        }
+      }
+    }
   }
   if (failedSessions.length > 0) {
     logger.warn('rebuildIndex: failed to load observations for sessions', { failedSessions })
-  }
-  for (const observations of obsPerSession) {
-    for (const obs of observations) {
-      if (obs.title && obs.narrative) {
-        idx.add(obs)
-        if (shouldSemanticallyIndexObservation(obs)) {
-          await enqueue({
-            id: obs.id,
-            sessionId: obs.sessionId,
-            text: obs.title + ' ' + obs.narrative,
-            context: { kind: "observation", logId: obs.id },
-          })
-        }
-        count++
-      }
-    }
   }
 
   // Drain the last partial batch.

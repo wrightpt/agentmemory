@@ -70,6 +70,8 @@ function isValidShardDescriptor(
 
 export class IndexPersistence {
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private saveInFlight: Promise<void> | null = null;
+  private saveRequested = false;
   private lastFailureLogAt = 0;
 
   constructor(
@@ -80,13 +82,36 @@ export class IndexPersistence {
   ) {}
 
   scheduleSave(): void {
-    if (this.timer) clearTimeout(this.timer);
+    this.saveRequested = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    // A write that arrives while a snapshot is already being persisted is
+    // intentionally coalesced. The active generation owns the state adapter
+    // until it settles; a new debounce window is armed afterwards for the
+    // latest in-memory index. This prevents two copy-on-write generations
+    // from publishing and cleaning up each other's shards.
+    if (this.saveInFlight) {
+      this.timer = null;
+      return;
+    }
+    this.armScheduledSave();
+  }
+
+  private armScheduledSave(): void {
+    if (this.timer || this.saveInFlight || !this.saveRequested) return;
     // setTimeout discards the returned promise, so any rejection inside
     // save() would surface as unhandledRejection and crash the process
     // under sustained iii-engine write timeouts (issue #204). Funnel
     // rejections through logFailure() instead.
-    this.timer = setTimeout(() => {
-      this.save().catch((err) => this.logFailure(err));
+    this.timer = setTimeout(async () => {
+      this.timer = null;
+      try {
+        await this.runScheduledSave();
+      } catch (err) {
+        this.logFailure(err);
+      }
     }, DEBOUNCE_MS);
   }
 
@@ -95,6 +120,46 @@ export class IndexPersistence {
       clearTimeout(this.timer);
       this.timer = null;
     }
+    // Explicit flushes (delete durability and graceful shutdown) must include
+    // the state visible at the call boundary. If another snapshot is active,
+    // join it and then persist at most one coalesced follow-up generation.
+    this.saveRequested = true;
+    while (this.saveRequested || this.saveInFlight) {
+      if (this.saveInFlight) {
+        await this.saveInFlight;
+        continue;
+      }
+      await this.runOneSave();
+    }
+  }
+
+  private async runScheduledSave(): Promise<void> {
+    if (this.saveInFlight) {
+      await this.saveInFlight;
+    }
+    if (this.saveRequested) {
+      await this.runOneSave();
+    }
+    if (this.saveRequested) this.armScheduledSave();
+  }
+
+  private async runOneSave(): Promise<void> {
+    if (this.saveInFlight) {
+      await this.saveInFlight;
+      return;
+    }
+    if (!this.saveRequested) return;
+    this.saveRequested = false;
+    const operation = this.persistCurrentIndexes();
+    this.saveInFlight = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.saveInFlight === operation) this.saveInFlight = null;
+    }
+  }
+
+  private async persistCurrentIndexes(): Promise<void> {
     try {
       await this.saveBm25Index(this.bm25.serialize());
       if (this.vector) {

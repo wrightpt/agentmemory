@@ -703,6 +703,57 @@ describe("IndexPersistence", () => {
     expect(saved).not.toBeNull();
   });
 
+  it("serializes overlapping explicit saves and coalesces a follow-up generation", async () => {
+    const baseKv = mockKV();
+    let releaseFirst!: () => void;
+    let markFirstStarted!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    let firstShardBlocked = false;
+    const guardedKv = {
+      ...baseKv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (scope.includes(":bm25:gen_1:") && !firstShardBlocked) {
+          firstShardBlocked = true;
+          markFirstStarted();
+          await firstBlocked;
+        }
+        return baseKv.set(scope, key, data);
+      }),
+    };
+    const generations: string[] = [];
+    const persistence = new IndexPersistence(
+      guardedKv as never,
+      makeBm25("obs_serial", "single flight snapshot"),
+      null,
+      {
+        createGeneration: () => {
+          const generation = `gen_${generations.length + 1}`;
+          generations.push(generation);
+          return generation;
+        },
+      },
+    );
+
+    const first = persistence.save();
+    await firstStarted;
+    const second = persistence.save();
+    await Promise.resolve();
+
+    expect(generations).toEqual(["gen_1"]);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(generations).toEqual(["gen_1", "gen_2"]);
+    const loaded = await persistence.load();
+    expect(loaded.bm25?.size).toBe(1);
+  });
+
   it("stop clears the pending timer", async () => {
     const bm25 = new SearchIndex();
     bm25.add(makeObs({ id: "obs_1", title: "auth handler" }));

@@ -2666,11 +2666,14 @@ async function runStop(): Promise<void> {
   // leaves those writes with no engine to land on, and the index +
   // observations end up as in-memory state the iii process never
   // persists. Worker SIGTERM grace bumped 3s -> 5s to give a large
-  // index a real chance to commit before the engine goes away.
+  // index a real chance to commit before the engine goes away. Large sharded
+  // indexes can take longer than the old 5s bound even when writes are
+  // single-flight, so retain a bounded 15s grace for one copy-on-write
+  // generation.
   for (const pid of workerCandidates) {
     const s = p.spinner();
     s.start(`Stopping agentmemory worker (pid ${pid})... [flushing state]`);
-    const ok = await signalAndWait(pid, "SIGTERM", 5000);
+    const ok = await signalAndWait(pid, "SIGTERM", 15000);
     s.stop(ok ? `Stopped worker pid ${pid}` : `Failed to stop worker pid ${pid}`);
     if (!ok) allStopped = false;
   }
