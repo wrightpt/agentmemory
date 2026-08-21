@@ -81,6 +81,15 @@ function compactSession(session: Session): SessionPage["sessions"][number] {
     worktree: session.worktree,
     branch: session.branch,
     taskSlug: session.taskSlug,
+    projectAliases: session.projectAliases,
+    canonicalRepoId: session.canonicalRepoId,
+    repoRemote: session.repoRemote,
+    terminalSession: session.terminalSession,
+    missionId: session.missionId,
+    missionTitle: session.missionTitle,
+    missionRole: session.missionRole,
+    parentSession: session.parentSession,
+    commitSha: session.commitSha,
     ...(issues.length > 0 ? { issues } : {}),
   };
 }

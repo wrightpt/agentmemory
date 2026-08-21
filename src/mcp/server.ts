@@ -227,6 +227,7 @@ export function registerMcpEndpoints(
               typeof args.project === "string" && args.project.trim().length > 0
                 ? args.project.trim()
                 : undefined;
+            const sessionId = asNonEmptyString(args.sessionId);
 
             const result = await sdk.trigger({ function_id: "mem::remember", payload: {
               content: args.content,
@@ -234,6 +235,7 @@ export function registerMcpEndpoints(
               concepts,
               files,
               ...(project !== undefined && { project }),
+              ...(sessionId !== undefined && { sessionId }),
             } });
             return {
               status_code: 200,
@@ -324,6 +326,109 @@ export function registerMcpEndpoints(
             };
           }
 
+          case "memory_project_relationships": {
+            const operation = asNonEmptyString(args.operation)?.toLowerCase();
+            if (operation !== "list" && operation !== "upsert") {
+              return {
+                status_code: 400,
+                body: { error: "operation must be list or upsert" },
+              };
+            }
+            let result: unknown;
+            if (operation === "list") {
+              const direction = asNonEmptyString(args.direction) ?? "both";
+              if (!["incoming", "outgoing", "both"].includes(direction)) {
+                return {
+                  status_code: 400,
+                  body: { error: "direction must be incoming, outgoing, or both" },
+                };
+              }
+              result = await sdk.trigger({
+                function_id: "mem::project-relationship-list",
+                payload: {
+                  ...(asNonEmptyString(args.repoId)
+                    ? { repoId: asNonEmptyString(args.repoId) }
+                    : {}),
+                  direction,
+                  ...(asNonEmptyString(args.relationType)
+                    ? { relationType: asNonEmptyString(args.relationType) }
+                    : {}),
+                },
+              });
+            } else {
+              const sourceRepoId = asNonEmptyString(args.sourceRepoId);
+              const targetRepoId = asNonEmptyString(args.targetRepoId);
+              const relationType = asNonEmptyString(args.relationType);
+              const provenanceKind = asNonEmptyString(args.provenanceKind);
+              const provenanceSource = asNonEmptyString(args.provenanceSource);
+              if (
+                !sourceRepoId ||
+                !targetRepoId ||
+                !relationType ||
+                !provenanceKind ||
+                !provenanceSource
+              ) {
+                return {
+                  status_code: 400,
+                  body: {
+                    error:
+                      "sourceRepoId, targetRepoId, relationType, provenanceKind, and provenanceSource are required for upsert",
+                  },
+                };
+              }
+              const expectedRevision =
+                args.expectedRevision === undefined
+                  ? undefined
+                  : asNumber(args.expectedRevision);
+              if (
+                expectedRevision !== undefined &&
+                (!Number.isInteger(expectedRevision) || expectedRevision < 0)
+              ) {
+                return {
+                  status_code: 400,
+                  body: { error: "expectedRevision must be a non-negative integer" },
+                };
+              }
+              result = await sdk.trigger({
+                function_id: "mem::project-relationship-upsert",
+                payload: {
+                  sourceRepoId,
+                  targetRepoId,
+                  relationType,
+                  sourceAliases: parseCsvList(args.sourceAliases),
+                  targetAliases: parseCsvList(args.targetAliases),
+                  provenance: {
+                    kind: provenanceKind,
+                    source: provenanceSource,
+                    ...(asNonEmptyString(args.recordedBy)
+                      ? { recordedBy: asNonEmptyString(args.recordedBy) }
+                      : {}),
+                    ...(asNonEmptyString(args.sessionId)
+                      ? { sessionId: asNonEmptyString(args.sessionId) }
+                      : {}),
+                    ...(asNonEmptyString(args.commitSha)
+                      ? { commitSha: asNonEmptyString(args.commitSha) }
+                      : {}),
+                  },
+                  ...(asNonEmptyString(args.reason)
+                    ? { reason: asNonEmptyString(args.reason) }
+                    : {}),
+                  ...(expectedRevision !== undefined
+                    ? { expectedRevision }
+                    : {}),
+                },
+              });
+            }
+            return {
+              status_code: 200,
+              body: {
+                content: [
+                  { type: "text", text: JSON.stringify(result, null, 2) },
+                ],
+              },
+            };
+          }
+
           case "memory_patterns": {
             const result = await sdk.trigger({ function_id: "mem::patterns", payload: {
               project: args.project as string,
@@ -361,13 +466,16 @@ export function registerMcpEndpoints(
           }
 
           case "memory_smart_search": {
-            if (typeof args.query !== "string" || !args.query.trim()) {
+            const query = asNonEmptyString(args.query);
+            const expandIds = parseCsvList(args.expandIds).slice(0, 20);
+            if (!query && expandIds.length === 0) {
               return {
                 status_code: 400,
-                body: { error: "query is required for memory_smart_search" },
+                body: {
+                  error: "query or expandIds is required for memory_smart_search",
+                },
               };
             }
-            const expandIds = parseCsvList(args.expandIds).slice(0, 20);
             const access =
               expandIds.length === 0
                 ? resolveLessonRequestAccess(req)
@@ -377,9 +485,39 @@ export function registerMcpEndpoints(
             const result = await sdk.trigger({
               function_id: "mem::smart-search",
               payload: {
-                query: args.query,
+                ...(query ? { query } : {}),
                 expandIds,
                 limit,
+                ...(asNonEmptyString(args.project)
+                  ? { project: asNonEmptyString(args.project) }
+                  : {}),
+                ...(asNonEmptyString(args.currentProject)
+                  ? { currentProject: asNonEmptyString(args.currentProject) }
+                  : {}),
+                ...(asNonEmptyString(args.currentRepo)
+                  ? { currentRepo: asNonEmptyString(args.currentRepo) }
+                  : {}),
+                ...(asNonEmptyString(args.missionId)
+                  ? { missionId: asNonEmptyString(args.missionId) }
+                  : {}),
+                ...(asNonEmptyString(args.sessionId)
+                  ? { sessionId: asNonEmptyString(args.sessionId) }
+                  : {}),
+                includeRelatedProjects:
+                  args.includeRelatedProjects === true ||
+                  args.includeRelatedProjects === "true",
+                relatedProjects: parseCsvList(args.relatedProjects),
+                includeGlobal:
+                  args.includeGlobal === undefined ||
+                  args.includeGlobal === true ||
+                  args.includeGlobal === "true",
+                includeCrossRepo:
+                  args.includeCrossRepo === true ||
+                  args.includeCrossRepo === "true",
+                currentFiles: parseCsvList(args.currentFiles),
+                ...(asNonEmptyString(args.agentId)
+                  ? { agentId: asNonEmptyString(args.agentId) }
+                  : {}),
                 ...(access?.success
                   ? { accessContext: access.context }
                   : {}),

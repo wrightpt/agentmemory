@@ -9,6 +9,7 @@ import type {
   CompressedObservation,
   HybridSearchResult,
   CompactSearchResult,
+  Memory,
   Session,
 } from "../src/types.js";
 
@@ -137,6 +138,84 @@ describe("Smart Search Function", () => {
     expect(result.mode).toBe("expanded");
     expect(result.results.length).toBe(1);
     expect(result.results[0].observation.title).toBe("Auth handler");
+  });
+
+  it("does not expose a composite memory's first-session index locator", async () => {
+    const memory: Memory = {
+      id: "mem_composite",
+      createdAt: "2026-02-03T00:00:00Z",
+      updatedAt: "2026-02-03T00:00:00Z",
+      type: "architecture",
+      title: "Composite memory",
+      content: "A conclusion synthesized from two sessions.",
+      concepts: ["composite"],
+      files: [],
+      sessionIds: ["ses_2", "ses_1"],
+      strength: 9,
+      version: 1,
+      isLatest: true,
+      attribution: { project: "my-project" },
+    };
+    await kv.set("mem:memories", memory.id, memory);
+    searchResults = [
+      {
+        observation: {
+          id: memory.id,
+          sessionId: memory.sessionIds[0],
+          timestamp: memory.createdAt,
+          type: "decision",
+          title: memory.title,
+          facts: [memory.content],
+          narrative: memory.content,
+          concepts: memory.concepts,
+          files: memory.files,
+          importance: memory.strength,
+          attribution: memory.attribution,
+        },
+        bm25Score: 0.9,
+        vectorScore: 0.8,
+        graphScore: 0,
+        combinedScore: 0.85,
+        sessionId: memory.sessionIds[0],
+        provenance: {
+          project: "my-project",
+          sessionIds: ["ses_1", "ses_2"],
+          files: [],
+          timestamp: memory.createdAt,
+          observationId: memory.id,
+          memoryId: memory.id,
+          memoryType: memory.type,
+          importance: memory.strength,
+          isLatest: true,
+          attributed: true,
+        },
+      },
+    ];
+
+    const compact = (await sdk.trigger("mem::smart-search", {
+      query: "composite",
+    })) as { results: CompactSearchResult[] };
+    expect(compact.results[0]).not.toHaveProperty("sessionId");
+    expect(compact.results[0].provenance).toMatchObject({
+      sessionIds: ["ses_1", "ses_2"],
+    });
+    expect(compact.results[0].provenance).not.toHaveProperty("sessionId");
+
+    const expanded = (await sdk.trigger("mem::smart-search", {
+      expandIds: [memory.id],
+    })) as {
+      results: Array<{
+        sessionId?: string;
+        observation: CompressedObservation;
+        provenance: Record<string, unknown>;
+      }>;
+    };
+    expect(expanded.results[0]).not.toHaveProperty("sessionId");
+    expect(expanded.results[0].observation.sessionId).toBe("memory");
+    expect(expanded.results[0].provenance).toMatchObject({
+      sessionIds: ["ses_1", "ses_2"],
+    });
+    expect(expanded.results[0].provenance).not.toHaveProperty("sessionId");
   });
 
   it("returns error when query is missing and no expandIds", async () => {

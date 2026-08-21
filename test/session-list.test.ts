@@ -28,6 +28,16 @@ describe("bounded session listing", () => {
     session("ses_3", "beta", "active", "2026-07-02T00:00:00Z"),
   ];
   sessions[2].projectAliases = ["beta-legacy"];
+  Object.assign(sessions[1], {
+    canonicalRepoId: "wrightpt/alpha",
+    repoRemote: "https://github.com/wrightpt/alpha",
+    terminalSession: "shared-alpha-codex",
+    missionId: "mission-alpha",
+    missionTitle: "Alpha mission",
+    missionRole: "worker",
+    parentSession: "shared-alpha-lead",
+    commitSha: "a".repeat(40),
+  });
 
   it("sorts newest first and returns an opaque next cursor", () => {
     const first = selectSessionPage(sessions, { limit: 2 });
@@ -57,6 +67,16 @@ describe("bounded session listing", () => {
     const compact = selectSessionPage(sessions, { limit: 1, format: "compact" }).sessions[0];
     expect(compact).not.toHaveProperty("firstPrompt");
     expect(compact).not.toHaveProperty("summary");
+    expect(compact).toMatchObject({
+      canonicalRepoId: "wrightpt/alpha",
+      repoRemote: "https://github.com/wrightpt/alpha",
+      terminalSession: "shared-alpha-codex",
+      missionId: "mission-alpha",
+      missionTitle: "Alpha mission",
+      missionRole: "worker",
+      parentSession: "shared-alpha-lead",
+      commitSha: "a".repeat(40),
+    });
 
     const full = selectSessionPage(sessions, { limit: 1, format: "full" }).sessions[0];
     expect(full).not.toHaveProperty("firstPrompt");

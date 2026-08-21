@@ -98,3 +98,113 @@ from JSON payload jitter.
 The release flow appends a `## Performance` section to `CHANGELOG.md`
 referencing the JSON in `benchmark/results/` for that release's git
 sha. p99 is the headline number; the JSON is the receipt.
+
+## Cross-repository institutional memory
+
+`cross-repo-institutional-memory.ts` is the decision-gate benchmark for the
+default exact-cosine vector store and the BM25 + vector + graph retrieval
+architecture. It is deliberately separate from `load-100k.ts`: it never talks
+to a daemon, never opens a socket, and cannot write to a live AgentMemory
+store. The output path is mandatory and an existing file is not overwritten
+unless `BENCH_OVERWRITE=1` is explicitly set.
+
+### Decision run
+
+```bash
+BENCH_OUT=/tmp/agentmemory-institutional-memory.json \
+  npm run bench:institutional-memory
+```
+
+The default matrix uses exact corpus sizes 10k, 50k, 100k, and 250k, 1,000
+measured queries per latency cell, and burst concurrency 1, 4, 8, and 16. Run
+one corpus size at a time on memory-constrained machines:
+
+```bash
+BENCH_N=250000 BENCH_OUT=/tmp/agentmemory-250k.json \
+  npm run bench:institutional-memory
+```
+
+Before a decision run, use the bounded smoke profile:
+
+```bash
+BENCH_N=1000 BENCH_QUERIES=12 BENCH_CONCURRENCY=1,4 \
+BENCH_OUT=/tmp/agentmemory-institutional-memory-smoke.json \
+  npm run bench:institutional-memory
+```
+
+Environment controls:
+
+- `BENCH_N`: comma-separated positive corpus sizes;
+- `BENCH_QUERIES`: measured queries per latency/concurrency cell;
+- `BENCH_CONCURRENCY`: comma-separated burst widths;
+- `BENCH_SEED`: unsigned 32-bit seed;
+- `BENCH_OUT`: required raw JSON path;
+- `BENCH_OVERWRITE=1`: explicitly allow replacing that one output file.
+
+### Performance methodology
+
+The corpus generator uses fixed timestamps, a fixed seeded PRNG, and
+precomputed 384-dimensional unit vectors. Every observation retains distinct
+project, canonical repository, session, agent, mission, worktree, branch,
+commit, file, timestamp, type, confidence, and importance metadata. Graph size
+grows deterministically at one auxiliary node per 250 observations, with 64
+topic nodes shared across sizes.
+
+Each size runs in this order:
+
+1. generate the corpus and vectors;
+2. populate BM25, local exact-cosine vector, in-memory KV, and graph indexes;
+3. serialize BM25 and vector indexes;
+4. deserialize each successful snapshot, replace the live index, and force GC
+   when `--expose-gc` is available;
+5. measure BM25, true vector-only, BM25+vector, and BM25+vector+graph;
+6. measure burst-concurrent triple-stream search.
+
+The JSON contains component and total population time, serialized bytes,
+component restore time, index sizes after restore, RSS/heap/external/array
+buffer memory, process high-water RSS, errors, throughput, and nearest-rank
+p50/p95/p99. A burst's timer starts before it enters the event-loop queue, so
+tail latency includes queueing behind synchronous exact-cosine scans. Reranking
+and embedding-provider latency are disabled; those are separate concerns from
+the vector-store decision gate.
+
+Serialization or restore failure is a measured result, not a reason to discard
+the corpus cell. The JSON records the error and a null byte/restore total, then
+continues retrieval measurements against the still-valid in-memory index. This
+distinguishes search scalability from persistence/startup viability.
+
+For publishable measurements, run with no unrelated CPU/memory load and record
+the git SHA through `GITHUB_SHA` or `CI_COMMIT_SHA`. Use at least 1,000 samples
+for p99. Repeat the full run in three fresh processes if a result is close to a
+decision threshold; a single in-process pass is a diagnostic, not a release
+claim.
+
+### Retrieval-quality methodology
+
+The same runner evaluates two different hand-authored fixtures:
+
+- `calibration-v1` is the only fixture on which policy weights may be changed;
+- `heldout-v1` uses different repositories, symbols, vocabulary, graph nodes,
+  missions, and semantic keys and is evaluated only after weights are frozen.
+
+Both fixtures cover exact-symbol lookup, semantic paraphrase, cross-repository
+architecture, historical bugs, current-repository preference, related-project
+dependencies, same-basename unrelated repositories, semantic distractors,
+graph-only targets, and stale/superseded rows. Qrels are explicit constants in
+`cross-repo-quality-fixtures.ts`; they are not generated from concepts,
+embeddings, graph edges, or search output.
+
+The four ablations use the same scope/provenance policy: BM25 only, true vector
+only, BM25+vector, and BM25+vector+graph. The report includes nDCG@5/10, MRR,
+Recall@5/10, exact-symbol top-1, current-repo top-1, related-repo recall,
+unrelated and stale intrusion rates, provenance completeness, per-query top
+IDs, and a SHA-256 rank digest. Do not tune on `heldout-v1`; changing policy
+after seeing its result requires a new policy version and a new holdout.
+
+### External vector-store gate
+
+These raw measurements inform, but do not mechanically make, the decision.
+Keep the local store unless the 100k/250k receipts demonstrate unacceptable
+latency, memory, restore, or concurrent-agent behavior under a stated target.
+Any external-store recommendation must also account for filtering needs,
+operational complexity, availability, backup/restore, and failure modes.

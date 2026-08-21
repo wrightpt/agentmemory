@@ -26,6 +26,7 @@ import type {
   Insight,
   ExportPagination,
   AccessLogExport,
+  ProjectRelationship,
 } from "../types.js";
 import { normalizeAccessLog } from "./access-tracker.js";
 import { KV } from "../state/schema.js";
@@ -61,6 +62,7 @@ import {
   lessonAccessContextFromPayload,
   type LessonAccessContext,
 } from "./lesson-access.js";
+import { parseImportedProjectRelationship } from "./project-relationships.js";
 
 interface ImportedLessonCandidate {
   lesson: Lesson;
@@ -75,6 +77,64 @@ interface LessonLifecycleTransition {
 }
 
 const MAX_LESSON_STATE_DIAGNOSTIC_DETAIL_LENGTH = 256;
+const MAX_IMPORT_STATE_DIAGNOSTIC_DETAIL_LENGTH = 256;
+
+function projectRelationshipMergeConflict(
+  existing: ProjectRelationship,
+  incoming: ProjectRelationship,
+): string | undefined {
+  if (incoming.revision < existing.revision) {
+    return `incoming revision ${incoming.revision} is older than existing revision ${existing.revision}`;
+  }
+  if (incoming.revision === existing.revision) {
+    return isDeepStrictEqual(incoming, existing)
+      ? undefined
+      : `revision ${incoming.revision} has divergent snapshot content`;
+  }
+  if (incoming.createdAt !== existing.createdAt) {
+    return "a forward revision cannot change createdAt";
+  }
+  if (Date.parse(incoming.updatedAt) < Date.parse(existing.updatedAt)) {
+    return "a forward revision cannot move updatedAt backward";
+  }
+  const incomingSourceAliases = new Set(incoming.sourceAliases);
+  for (const alias of existing.sourceAliases) {
+    if (!incomingSourceAliases.has(alias)) {
+      return `a forward revision cannot remove source alias ${alias}`;
+    }
+  }
+  const incomingTargetAliases = new Set(incoming.targetAliases);
+  for (const alias of existing.targetAliases) {
+    if (!incomingTargetAliases.has(alias)) {
+      return `a forward revision cannot remove target alias ${alias}`;
+    }
+  }
+  for (const attribution of existing.provenance) {
+    if (
+      !incoming.provenance.some((candidate) =>
+        isDeepStrictEqual(candidate, attribution),
+      )
+    ) {
+      return "a forward revision cannot remove or rewrite existing provenance";
+    }
+  }
+  // Online upserts preserve an existing reason when the update omits one.
+  // Treat an imported forward snapshot the same way; a different non-empty
+  // reason remains an explicit, revisioned update.
+  if (existing.reason !== undefined && incoming.reason === undefined) {
+    return "a forward revision cannot remove existing reason";
+  }
+  return undefined;
+}
+
+function boundedImportDiagnosticDetail(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error);
+  const normalized = raw.replace(/\s+/g, " ").trim() || "unknown error";
+  if (normalized.length <= MAX_IMPORT_STATE_DIAGNOSTIC_DETAIL_LENGTH) {
+    return normalized;
+  }
+  return `${normalized.slice(0, MAX_IMPORT_STATE_DIAGNOSTIC_DETAIL_LENGTH - 3)}...`;
+}
 
 function isRecordWithNonEmptyString(
   value: unknown,
@@ -165,6 +225,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         signals,
         checkpoints,
         accessLogs,
+        projectRelationships,
       ] = await Promise.all([
         kv.list<GraphNode>(KV.graphNodes).catch(() => []),
         kv.list<GraphEdge>(KV.graphEdges).catch(() => []),
@@ -185,6 +246,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         kv.list<Signal>(KV.signals).catch(() => []),
         kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
         kv.list<AccessLogExport>(KV.accessLog).catch(() => []),
+        kv.list<ProjectRelationship>(KV.projectRelationships).catch(() => []),
       ]);
       const lessonIndex = buildLessonAccessIndex(lessons);
       const crystalIndex = buildCrystalAccessIndex(crystals);
@@ -213,6 +275,8 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         profiles: profiles.length > 0 ? profiles : undefined,
         graphNodes: graphNodes.length > 0 ? graphNodes : undefined,
         graphEdges: graphEdges.length > 0 ? graphEdges : undefined,
+        projectRelationships:
+          projectRelationships.length > 0 ? projectRelationships : undefined,
         semanticMemories:
           semanticMemories.length > 0 ? semanticMemories : undefined,
         proceduralMemories:
@@ -338,6 +402,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       const MAX_ACTION_EDGES = 250_000;
       const MAX_ACTION_EVENTS = 500_000;
       const MAX_LESSONS = 100_000;
+      const MAX_PROJECT_RELATIONSHIPS = 50_000;
 
       if (!Array.isArray(importData.sessions)) {
         return { success: false, error: "sessions must be an array" };
@@ -374,6 +439,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         { field: "profiles", key: "project" },
         { field: "graphNodes", key: "id" },
         { field: "graphEdges", key: "id" },
+        { field: "projectRelationships", key: "id" },
         { field: "semanticMemories", key: "id" },
         { field: "proceduralMemories", key: "id" },
         { field: "actions", key: "id" },
@@ -427,6 +493,105 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           success: false,
           error: `Too many summaries (max ${MAX_SUMMARIES})`,
         };
+      }
+      if (
+        (importData.projectRelationships?.length ?? 0) >
+        MAX_PROJECT_RELATIONSHIPS
+      ) {
+        return {
+          success: false,
+          error: `Too many project relationships (max ${MAX_PROJECT_RELATIONSHIPS})`,
+        };
+      }
+      const normalizedImportedProjectRelationships: ProjectRelationship[] = [];
+      const importedProjectRelationshipIds = new Set<string>();
+      let existingProjectRelationshipsForReplace: ProjectRelationship[] = [];
+      for (const rawRelationship of importData.projectRelationships ?? []) {
+        const parsed = parseImportedProjectRelationship(rawRelationship);
+        if (!parsed.success) {
+          return {
+            success: false,
+            error: `Invalid project relationship: ${parsed.error}`,
+          };
+        }
+        if (importedProjectRelationshipIds.has(parsed.relationship.id)) {
+          return {
+            success: false,
+            error: `Duplicate project relationship: ${parsed.relationship.id}`,
+          };
+        }
+        importedProjectRelationshipIds.add(parsed.relationship.id);
+        normalizedImportedProjectRelationships.push(parsed.relationship);
+      }
+      if (strategy === "replace") {
+        try {
+          existingProjectRelationshipsForReplace =
+            await kv.list<ProjectRelationship>(KV.projectRelationships);
+        } catch (error) {
+          return {
+            success: false,
+            error: `Project relationship replace failed closed: authoritative state read failed (${boundedImportDiagnosticDetail(error)})`,
+          };
+        }
+        if (
+          !existingProjectRelationshipsForReplace.every((relationship) =>
+            isRecordWithNonEmptyString(relationship, "id"),
+          )
+        ) {
+          return {
+            success: false,
+            error: "Project relationship replace failed closed: existing state contains an invalid record",
+          };
+        }
+      }
+      if (
+        normalizedImportedProjectRelationships.length > 0 &&
+        strategy !== "replace"
+      ) {
+        let existingProjectRelationships: ProjectRelationship[];
+        try {
+          existingProjectRelationships = await kv.list<ProjectRelationship>(
+            KV.projectRelationships,
+          );
+        } catch (error) {
+          return {
+            success: false,
+            error: `Project relationship import failed closed: authoritative state read failed (${boundedImportDiagnosticDetail(error)})`,
+          };
+        }
+        const existingById = new Map<string, ProjectRelationship>();
+        for (const rawExisting of existingProjectRelationships) {
+          const parsed = parseImportedProjectRelationship(rawExisting);
+          if (!parsed.success) {
+            return {
+              success: false,
+              error: `Invalid existing project relationship: ${parsed.error}`,
+            };
+          }
+          if (existingById.has(parsed.relationship.id)) {
+            return {
+              success: false,
+              error: `Duplicate existing project relationship: ${parsed.relationship.id}`,
+            };
+          }
+          existingById.set(parsed.relationship.id, parsed.relationship);
+        }
+        if (strategy === "merge") {
+          for (const incoming of normalizedImportedProjectRelationships) {
+            const existing = existingById.get(incoming.id);
+            if (!existing) continue;
+            const conflict = projectRelationshipMergeConflict(
+              existing,
+              incoming,
+            );
+            if (conflict) {
+              return {
+                success: false,
+                error: `Project relationship merge conflict ${incoming.id}: ${conflict}`,
+              };
+            }
+          }
+        }
       }
       const MAX_OBS_BUCKETS = 10_000;
       const obsBuckets = Object.keys(importData.observations);
@@ -682,6 +847,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         actionEdges: 0,
         actionEvents: 0,
         lessons: 0,
+        projectRelationships: 0,
         skipped: 0,
       };
 
@@ -751,6 +917,9 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         }
         for (const e of await kv.list<{ id: string }>(KV.graphEdges).catch(() => [])) {
           await kv.delete(KV.graphEdges, e.id);
+        }
+        for (const relationship of existingProjectRelationshipsForReplace) {
+          await kv.delete(KV.projectRelationships, relationship.id);
         }
         for (const s of await kv.list<{ id: string }>(KV.semantic).catch(() => [])) {
           await kv.delete(KV.semantic, s.id);
@@ -844,6 +1013,21 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
             if (existing) { stats.skipped++; continue; }
           }
           await kv.set(KV.graphEdges, edge.id, edge);
+        }
+      }
+      if (normalizedImportedProjectRelationships.length > 0) {
+        for (const relationship of normalizedImportedProjectRelationships) {
+          if (strategy === "skip") {
+            const existing = await kv
+              .get(KV.projectRelationships, relationship.id)
+              .catch(() => null);
+            if (existing) {
+              stats.skipped++;
+              continue;
+            }
+          }
+          await kv.set(KV.projectRelationships, relationship.id, relationship);
+          stats.projectRelationships++;
         }
       }
       if (importData.semanticMemories) {

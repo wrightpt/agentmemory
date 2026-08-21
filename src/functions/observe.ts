@@ -7,22 +7,24 @@ import { DedupMap } from "./dedup.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { isAutoCompressEnabled } from "../config.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
-import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
+import {
+  getSearchIndex,
+  scheduleIndexSave,
+  vectorIndexAddGuarded,
+} from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
 import { safeAudit } from "./audit.js";
 import { triggerDetached } from "../utils/trigger-detached.js";
+import { shouldSemanticallyIndexObservation } from "../state/indexing-policy.js";
+import {
+  normalizeSessionContextValues,
+  SESSION_CONTEXT_STRING_FIELDS,
+} from "./session-context-values.js";
+import { captureRetrievalAttribution } from "../state/provenance.js";
 
-const SESSION_CONTEXT_FIELDS = [
-  "project",
-  "cwd",
-  "repoRoot",
-  "scopeType",
-  "worktree",
-  "branch",
-  "taskSlug",
-] as const;
+const SESSION_CONTEXT_FIELDS = ["project", "cwd", ...SESSION_CONTEXT_STRING_FIELDS] as const;
 
 export function extractImage(d: unknown): string | undefined {
   if (!d) return undefined;
@@ -100,6 +102,10 @@ export function registerObserveFunction(
       } catch {
         sanitizedRaw = stripPrivateData(String(payload.data));
       }
+
+      const normalizedContext = normalizeSessionContextValues(
+        payload as unknown as Record<string, unknown>,
+      );
 
       const raw: RawObservation = {
         id: obsId,
@@ -192,6 +198,26 @@ export function registerObserveFunction(
         if (inheritedAgentId) {
           raw.agentId = inheritedAgentId;
         }
+        if (!raw.attribution) {
+          const project =
+            typeof payload.project === "string" && payload.project.trim()
+              ? payload.project.trim()
+              : existingSession?.project;
+          const aliases = new Set([
+            ...(existingSession?.projectAliases ?? []),
+            ...(normalizedContext.projectAliases ?? []),
+          ]);
+          if (existingSession?.project && existingSession.project !== project) {
+            aliases.add(existingSession.project);
+          }
+          aliases.delete(project ?? "");
+          raw.attribution = captureRetrievalAttribution({
+            ...(existingSession ?? {}),
+            ...normalizedContext,
+            ...(project ? { project } : {}),
+            ...(aliases.size > 0 ? { projectAliases: [...aliases] } : {}),
+          });
+        }
 
         if (
           !existingObservation &&
@@ -272,6 +298,11 @@ export function registerObserveFunction(
           });
         }
 
+        const contextValues = {
+          ...normalizedContext,
+          project: payload.project,
+          cwd: payload.cwd,
+        };
         const session = existingSession;
         if (session) {
           const updatedAt = new Date().toISOString();
@@ -287,22 +318,33 @@ export function registerObserveFunction(
             },
           ];
           for (const field of SESSION_CONTEXT_FIELDS) {
-            const value = payload[field];
+            const value = contextValues[field];
             if (typeof value !== "string" || !value.trim()) continue;
             const normalized = value.trim();
             if (session[field] === normalized) continue;
             updates.push({ type: "set", path: field, value: normalized });
             changedContext.push(field);
           }
-          if (changedContext.includes("project") && session.project) {
+          if (changedContext.includes("project") || normalizedContext.projectAliases) {
             const aliases = new Set(session.projectAliases ?? []);
-            aliases.add(session.project);
-            aliases.delete(payload.project.trim());
-            updates.push({
-              type: "set",
-              path: "projectAliases",
-              value: [...aliases].sort(),
-            });
+            if (changedContext.includes("project") && session.project) {
+              aliases.add(session.project);
+            }
+            for (const alias of normalizedContext.projectAliases ?? []) aliases.add(alias);
+            aliases.delete(
+              typeof contextValues.project === "string" && contextValues.project.trim()
+                ? contextValues.project.trim()
+                : session.project,
+            );
+            const nextAliases = [...aliases].sort();
+            if (JSON.stringify(nextAliases) !== JSON.stringify(session.projectAliases ?? [])) {
+              updates.push({
+                type: "set",
+                path: "projectAliases",
+                value: nextAliases,
+              });
+              changedContext.push("projectAliases");
+            }
           }
           if (!session.firstPrompt && typeof raw.userPrompt === "string") {
             const trimmed = raw.userPrompt.replace(/\s+/g, " ").trim();
@@ -347,11 +389,7 @@ export function registerObserveFunction(
             id: payload.sessionId,
             project: payload.project,
             cwd: payload.cwd,
-            ...(payload.repoRoot ? { repoRoot: payload.repoRoot } : {}),
-            ...(payload.scopeType ? { scopeType: payload.scopeType } : {}),
-            ...(payload.worktree ? { worktree: payload.worktree } : {}),
-            ...(payload.branch ? { branch: payload.branch } : {}),
-            ...(payload.taskSlug ? { taskSlug: payload.taskSlug } : {}),
+            ...normalizedContext,
             startedAt: payload.timestamp ?? ts,
             updatedAt: ts,
             status: "active",
@@ -388,12 +426,15 @@ export function registerObserveFunction(
             synthetic,
           );
           getSearchIndex().add(synthetic);
-          await vectorIndexAddGuarded(
-            synthetic.id,
-            synthetic.sessionId,
-            synthetic.title + " " + (synthetic.narrative || ""),
-            { kind: "synthetic", logId: synthetic.id },
-          );
+          scheduleIndexSave();
+          if (shouldSemanticallyIndexObservation(synthetic)) {
+            await vectorIndexAddGuarded(
+              synthetic.id,
+              synthetic.sessionId,
+              synthetic.title + " " + (synthetic.narrative || ""),
+              { kind: "synthetic", logId: synthetic.id },
+            );
+          }
           await sdk.trigger({
             function_id: "stream::set",
             payload: {

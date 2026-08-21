@@ -126,6 +126,38 @@ describe("@agentmemory/mcp standalone — server proxy (issue #159)", () => {
     expect(body.results[0].id).toBe("m1");
   });
 
+  it("proxies scope context and expansion-only smart search", async () => {
+    let searchBody: Record<string, unknown> | undefined;
+    installFetch((url, init) => {
+      if (url.endsWith("/agentmemory/livez")) {
+        return new Response("ok", { status: 200 });
+      }
+      if (url.endsWith("/agentmemory/smart-search")) {
+        searchBody = JSON.parse((init?.body as string) || "{}");
+        return new Response(
+          JSON.stringify({ mode: "expanded", results: [] }),
+          { status: 200 },
+        );
+      }
+      return new Response("", { status: 404 });
+    });
+    await handleToolCall("memory_smart_search", {
+      expandIds: "obs_1",
+      currentRepo: "wrightpt/trading-system",
+      missionId: "mission_1",
+      includeRelatedProjects: true,
+      relatedProjects: "wrightpt/workstation-shell",
+    });
+    expect(searchBody).toMatchObject({
+      expandIds: ["obs_1"],
+      currentRepo: "wrightpt/trading-system",
+      missionId: "mission_1",
+      includeRelatedProjects: true,
+      relatedProjects: ["wrightpt/workstation-shell"],
+    });
+    expect(searchBody).not.toHaveProperty("query");
+  });
+
   it("preserves memory_save project scope through the proxy", async () => {
     let rememberBody: Record<string, unknown> | undefined;
     installFetch((url, init) => {

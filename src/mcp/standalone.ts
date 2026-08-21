@@ -3,11 +3,27 @@
 import { InMemoryKV } from "./in-memory-kv.js";
 import { createStdioTransport } from "./transport.js";
 import { getAllTools } from "./tools-registry.js";
-import { getStandalonePersistPath } from "../config.js";
+import {
+  getAgentId,
+  getStandalonePersistPath,
+  isAgentScopeIsolated,
+} from "../config.js";
 import { VERSION } from "../version.js";
 import { generateId } from "../state/schema.js";
 import { selectSessionPage } from "../functions/session-list.js";
-import type { Session } from "../types.js";
+import type { Memory, Session } from "../types.js";
+import type { StateKV } from "../state/kv.js";
+import { memoryToObservation } from "../state/memory-utils.js";
+import {
+  applyRetrievalPolicy,
+  type RetrievalPolicyContext,
+} from "../state/retrieval-policy.js";
+import {
+  captureRetrievalAttribution,
+  compactRetrievalProvenance,
+  resolveRetrievalProvenance,
+} from "../state/provenance.js";
+import { normalizeRepositoryIdentity } from "../functions/project-relationships.js";
 import {
   resolveHandle,
   invalidateHandle,
@@ -95,6 +111,199 @@ function textResponse(payload: unknown, pretty = false): {
   };
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  return normalized || undefined;
+}
+
+function localAgentFilter(v: Validated): string | undefined {
+  const explicitAgentId = nonEmptyString(v.agentId);
+  const wildcardAgent = explicitAgentId === "*";
+  // isAgentScopeIsolated() intentionally returns false when AGENT_ID is
+  // absent. Check the raw mode too so reduced fallback does not turn an
+  // incomplete isolated configuration into an unscoped read.
+  const isolated =
+    process.env["AGENTMEMORY_AGENT_SCOPE"]?.trim().toLowerCase() ===
+      "isolated" || isAgentScopeIsolated();
+  const envAgentId = getAgentId();
+  if (isolated && !wildcardAgent && !explicitAgentId && !envAgentId) {
+    throw new Error(
+      "memory_smart_search local fallback: " +
+        "AGENTMEMORY_AGENT_SCOPE=isolated is set but no agent id is " +
+        "available (env AGENT_ID unset and no explicit agentId in the " +
+        "call). Refusing to read cross-agent rows. Pass agentId: \"*\" " +
+        "to opt in to a wildcard read.",
+    );
+  }
+  return wildcardAgent
+    ? undefined
+    : explicitAgentId ?? (isolated ? envAgentId : undefined);
+}
+
+function normalizeLocalMemory(row: Record<string, unknown>): Memory | null {
+  const id = nonEmptyString(row["id"]);
+  if (!id) return null;
+  const createdAt =
+    nonEmptyString(row["createdAt"]) ??
+    nonEmptyString(row["updatedAt"]) ??
+    "1970-01-01T00:00:00.000Z";
+  const rawType = nonEmptyString(row["type"]);
+  const validTypes = new Set<Memory["type"]>([
+    "pattern",
+    "preference",
+    "architecture",
+    "bug",
+    "workflow",
+    "fact",
+  ]);
+  const type = validTypes.has(rawType as Memory["type"])
+    ? (rawType as Memory["type"])
+    : "fact";
+  const stringList = (value: unknown): string[] =>
+    Array.isArray(value)
+      ? value
+          .filter((item): item is string => typeof item === "string")
+          .map((item) => item.trim())
+          .filter(Boolean)
+      : [];
+
+  return {
+    id,
+    createdAt,
+    updatedAt: nonEmptyString(row["updatedAt"]) ?? createdAt,
+    type,
+    title: nonEmptyString(row["title"]) ?? "",
+    content: typeof row["content"] === "string" ? row["content"] : "",
+    concepts: stringList(row["concepts"]),
+    files: stringList(row["files"]),
+    sessionIds: stringList(row["sessionIds"]),
+    strength:
+      typeof row["strength"] === "number" && Number.isFinite(row["strength"])
+        ? row["strength"]
+        : 0,
+    version:
+      typeof row["version"] === "number" && Number.isFinite(row["version"])
+        ? row["version"]
+        : 1,
+    isLatest: row["isLatest"] !== false,
+    ...(nonEmptyString(row["agentId"])
+      ? { agentId: nonEmptyString(row["agentId"]) }
+      : {}),
+    ...(nonEmptyString(row["project"])
+      ? { project: nonEmptyString(row["project"]) }
+      : {}),
+    ...(row["attribution"] && typeof row["attribution"] === "object"
+      ? { attribution: row["attribution"] as Memory["attribution"] }
+      : {}),
+    ...(nonEmptyString(row["forgetAfter"])
+      ? { forgetAfter: nonEmptyString(row["forgetAfter"]) }
+      : {}),
+    ...(stringList(row["supersedes"]).length
+      ? { supersedes: stringList(row["supersedes"]) }
+      : {}),
+  };
+}
+
+function isLocallySearchable(
+  row: Record<string, unknown>,
+  memory: Memory,
+): boolean {
+  if (memory.isLatest === false || row["stale"] === true) return false;
+  const forgetAfter = memory.forgetAfter
+    ? Date.parse(memory.forgetAfter)
+    : Number.NaN;
+  return !Number.isFinite(forgetAfter) || forgetAfter > Date.now();
+}
+
+async function localRetrievalContext(
+  v: Validated,
+  kvInstance: InMemoryKV,
+  filterAgentId: string | undefined,
+): Promise<RetrievalPolicyContext> {
+  const session = v.sessionId
+    ? await kvInstance.get<Session>("mem:sessions", v.sessionId)
+    : null;
+  const currentProject =
+    nonEmptyString(v.currentProject) ??
+    nonEmptyString(v.project) ??
+    nonEmptyString(session?.project);
+  const currentProjectAliases = new Set(session?.projectAliases ?? []);
+  if (session?.project && session.project !== currentProject) {
+    currentProjectAliases.add(session.project);
+  }
+  currentProjectAliases.delete(currentProject ?? "");
+  const rawCurrentRepo =
+    nonEmptyString(v.currentRepo) ?? nonEmptyString(session?.canonicalRepoId);
+  const currentRepoId = rawCurrentRepo
+    ? normalizeRepositoryIdentity(rawCurrentRepo)
+    : undefined;
+  const relatedRepoIds = (v.relatedProjects ?? [])
+    .map((repoId) => normalizeRepositoryIdentity(repoId))
+    .filter(Boolean);
+
+  if (v.includeRelatedProjects === true && relatedRepoIds.length === 0) {
+    throw new Error(
+      "memory_smart_search local fallback cannot resolve stored project " +
+        "relationships. Pass explicit relatedProjects or start the full " +
+        "AgentMemory server.",
+    );
+  }
+
+  const currentMissionId =
+    nonEmptyString(v.missionId) ?? nonEmptyString(session?.missionId);
+  return {
+    ...(currentProject ? { currentProject } : {}),
+    ...(currentProjectAliases.size
+      ? { currentProjectAliases: [...currentProjectAliases].sort() }
+      : {}),
+    ...(currentRepoId ? { currentRepoId } : {}),
+    ...(currentMissionId ? { currentMissionId } : {}),
+    ...(relatedRepoIds.length
+      ? { relatedRepoIds: [...new Set(relatedRepoIds)].sort() }
+      : {}),
+    ...(v.currentFiles?.length ? { currentFiles: v.currentFiles } : {}),
+    includeRelatedProjects: v.includeRelatedProjects === true,
+    includeGlobal: v.includeGlobal !== false,
+    includeCrossRepo: v.includeCrossRepo === true,
+    ...(filterAgentId !== undefined ? { filterAgentId } : {}),
+  };
+}
+
+async function localScopedMemories(
+  v: Validated,
+  kvInstance: InMemoryKV,
+  rows: Record<string, unknown>[],
+  baseScore: (row: Record<string, unknown>, index: number) => number,
+) {
+  const filterAgentId = localAgentFilter(v);
+  const context = await localRetrievalContext(v, kvInstance, filterAgentId);
+  const candidates = await Promise.all(
+    rows.map(async (row, index) => {
+      const memory = normalizeLocalMemory(row);
+      if (!memory || !isLocallySearchable(row, memory)) return null;
+      const provenance = await resolveRetrievalProvenance(
+        kvInstance as unknown as StateKV,
+        memoryToObservation(memory),
+        memory,
+      );
+      return {
+        id: memory.id,
+        baseScore: baseScore(row, index),
+        value: { row, memory },
+        provenance,
+      };
+    }),
+  );
+  return applyRetrievalPolicy(
+    candidates.filter(
+      (candidate): candidate is NonNullable<typeof candidate> =>
+        candidate !== null,
+    ),
+    context,
+  );
+}
+
 interface Validated {
   tool: string;
   content?: string;
@@ -109,6 +318,17 @@ interface Validated {
   reason?: string;
   cursor?: string;
   project?: string;
+  sessionId?: string;
+  expandIds?: string[];
+  currentProject?: string;
+  currentRepo?: string;
+  missionId?: string;
+  includeRelatedProjects?: boolean;
+  relatedProjects?: string[];
+  includeGlobal?: boolean;
+  includeCrossRepo?: boolean;
+  currentFiles?: string[];
+  agentId?: string;
   status?: string;
   since?: string;
   includePrompt?: boolean;
@@ -137,10 +357,12 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
         }
         v.project = project.trim();
       }
+      if (typeof args["sessionId"] === "string" && args["sessionId"].trim()) {
+        v.sessionId = args["sessionId"].trim();
+      }
       return v;
     }
-    case "memory_recall":
-    case "memory_smart_search": {
+    case "memory_recall": {
       const query = args["query"];
       if (typeof query !== "string" || !query.trim()) {
         throw new Error("query is required");
@@ -158,6 +380,33 @@ function validate(toolName: string, args: Record<string, unknown>): Validated {
         const n = Number(budget);
         if (Number.isFinite(n) && n > 0) v.tokenBudget = Math.floor(n);
       }
+      return v;
+    }
+    case "memory_smart_search": {
+      const query = args["query"];
+      const expandIds = normalizeList(args["expandIds"]).slice(0, 20);
+      if ((typeof query !== "string" || !query.trim()) && expandIds.length === 0) {
+        throw new Error("query or expandIds is required");
+      }
+      if (typeof query === "string" && query.trim()) v.query = query.trim();
+      v.expandIds = expandIds;
+      v.limit = parseLimit(args["limit"]);
+      for (const field of [
+        "project",
+        "currentProject",
+        "currentRepo",
+        "missionId",
+        "sessionId",
+        "agentId",
+      ] as const) {
+        const value = args[field];
+        if (typeof value === "string" && value.trim()) v[field] = value.trim();
+      }
+      v.includeRelatedProjects = args["includeRelatedProjects"] === true;
+      v.relatedProjects = normalizeList(args["relatedProjects"]);
+      v.includeGlobal = args["includeGlobal"] !== false;
+      v.includeCrossRepo = args["includeCrossRepo"] === true;
+      v.currentFiles = normalizeList(args["currentFiles"]);
       return v;
     }
     case "memory_sessions": {
@@ -203,6 +452,7 @@ async function handleProxy(
           concepts: v.concepts,
           files: v.files,
           ...(v.project ? { project: v.project } : {}),
+          ...(v.sessionId ? { sessionId: v.sessionId } : {}),
         }),
       });
       return textResponse(result);
@@ -221,7 +471,22 @@ async function handleProxy(
       return textResponse(result, true);
     }
     case "memory_smart_search": {
-      const body: Record<string, unknown> = { query: v.query, limit: v.limit };
+      const body: Record<string, unknown> = {
+        ...(v.query ? { query: v.query } : {}),
+        ...(v.expandIds?.length ? { expandIds: v.expandIds } : {}),
+        limit: v.limit,
+        ...(v.project ? { project: v.project } : {}),
+        ...(v.currentProject ? { currentProject: v.currentProject } : {}),
+        ...(v.currentRepo ? { currentRepo: v.currentRepo } : {}),
+        ...(v.missionId ? { missionId: v.missionId } : {}),
+        ...(v.sessionId ? { sessionId: v.sessionId } : {}),
+        includeRelatedProjects: v.includeRelatedProjects === true,
+        relatedProjects: v.relatedProjects ?? [],
+        includeGlobal: v.includeGlobal !== false,
+        includeCrossRepo: v.includeCrossRepo === true,
+        currentFiles: v.currentFiles ?? [],
+        ...(v.agentId ? { agentId: v.agentId } : {}),
+      };
       if (v.format != null) body["format"] = v.format;
       if (v.tokenBudget != null) body["token_budget"] = v.tokenBudget;
       const result = await handle.call("/agentmemory/smart-search", {
@@ -278,6 +543,15 @@ async function handleLocal(
     case "memory_save": {
       const id = generateId("mem");
       const isoNow = new Date().toISOString();
+      const sourceSession = v.sessionId
+        ? await kvInstance.get<Session>("mem:sessions", v.sessionId)
+        : null;
+      const project = v.project ?? sourceSession?.project;
+      const agentId = sourceSession?.agentId ?? getAgentId();
+      const attribution = captureRetrievalAttribution({
+        ...(sourceSession ?? {}),
+        ...(project ? { project } : {}),
+      });
       await kvInstance.set("mem:memories", id, {
         id,
         type: v.type,
@@ -291,7 +565,10 @@ async function handleLocal(
         version: 1,
         isLatest: true,
         sessionIds: [],
-        ...(v.project ? { project: v.project } : {}),
+        ...(v.sessionId ? { sessionIds: [v.sessionId] } : {}),
+        ...(agentId ? { agentId } : {}),
+        ...(project ? { project } : {}),
+        ...(attribution ? { attribution } : {}),
       });
       kvInstance.persist();
       return textResponse({ saved: id });
@@ -299,12 +576,35 @@ async function handleLocal(
 
     case "memory_recall":
     case "memory_smart_search": {
+      if (v.tool === "memory_smart_search" && v.expandIds?.length) {
+        const wanted = new Set(v.expandIds);
+        const all =
+          await kvInstance.list<Record<string, unknown>>("mem:memories");
+        const scoped = await localScopedMemories(
+          v,
+          kvInstance,
+          all.filter((memory) => wanted.has(String(memory["id"]))),
+          (_row, index) => 1 - index * 0.000001,
+        );
+        return textResponse(
+          {
+            mode: "expanded",
+            results: scoped.map((candidate) => ({
+              ...candidate.value.row,
+              provenance: candidate.provenance,
+              scope: candidate.scope,
+              scopeReason: candidate.scopeReason,
+            })),
+            truncated: false,
+          },
+          true,
+        );
+      }
       const query = (v.query || "").toLowerCase();
       const limit = v.limit ?? DEFAULT_LIMIT;
       const all =
         await kvInstance.list<Record<string, unknown>>("mem:memories");
-      const results = all
-        .filter((m) => {
+      const lexicalMatches = all.filter((m) => {
           const text = [
             typeof m["title"] === "string" ? m["title"] : "",
             typeof m["content"] === "string" ? m["content"] : "",
@@ -316,8 +616,19 @@ async function handleLocal(
             .join(" ")
             .toLowerCase();
           return query.split(/\s+/).every((word) => text.includes(word));
-        })
-        .slice(0, limit);
+        });
+      const scoped = await localScopedMemories(
+        v,
+        kvInstance,
+        lexicalMatches,
+        (_row, index) => 1 - index * 0.000001,
+      );
+      const results = scoped.slice(0, limit).map((candidate) => ({
+        ...candidate.value.row,
+        provenance: compactRetrievalProvenance(candidate.provenance),
+        scope: candidate.scope,
+        scopeReason: candidate.scopeReason,
+      }));
       return textResponse({ mode: "compact", results }, true);
     }
 
@@ -382,7 +693,7 @@ async function handleProxyGeneric(
   handle: ProxyHandle,
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   // Forward to the server's full MCP surface so non-Claude clients can
-  // reach all 60 tools (lessons, sentinels, slots, signals, graph, …)
+  // reach all 61 tools (lessons, sentinels, slots, signals, graph, …)
   // instead of being capped at the 7 IMPLEMENTED_TOOLS set baked into
   // this shim. The server validates arguments per tool.
   const result = (await handle.call("/agentmemory/mcp/call", {

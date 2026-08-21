@@ -15,7 +15,11 @@ import {
 } from "../prompts/compression.js";
 import { VISION_DESCRIPTION_PROMPT } from "../prompts/vision.js";
 import { getXmlTag, getXmlChildren } from "../prompts/xml.js";
-import { getSearchIndex, vectorIndexAddGuarded } from "./search.js";
+import {
+  getSearchIndex,
+  scheduleIndexSave,
+  vectorIndexAddGuarded,
+} from "./search.js";
 import { CompressOutputSchema } from "../eval/schemas.js";
 import { validateOutput } from "../eval/validator.js";
 import { scoreCompression } from "../eval/quality.js";
@@ -23,6 +27,7 @@ import { compressWithRetry } from "../eval/self-correct.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { logger } from "../logger.js";
 import { getLlmExecutionState } from "../config.js";
+import { shouldSemanticallyIndexObservation } from "../state/indexing-policy.js";
 
 const VALID_TYPES = new Set<string>([
   "file_read",
@@ -193,6 +198,7 @@ export function registerCompressFunction(
           ...(imageDescription ? { imageDescription } : {}),
           ...(data.raw.imageData ? { imageRef: data.raw.imageData } : {}),
           ...(data.raw.agentId ? { agentId: data.raw.agentId } : {}),
+          ...(data.raw.attribution ? { attribution: data.raw.attribution } : {}),
         };
 
         await kv.set(
@@ -203,6 +209,7 @@ export function registerCompressFunction(
 
         try {
           getSearchIndex().add(compressed);
+          scheduleIndexSave();
         } catch (err) {
           logger.warn("Failed to index compressed observation into BM25", {
             obsId: compressed.id,
@@ -212,12 +219,14 @@ export function registerCompressFunction(
           });
         }
 
-        await vectorIndexAddGuarded(
-          compressed.id,
-          compressed.sessionId,
-          compressed.title + " " + (compressed.narrative || ""),
-          { kind: "observation", logId: compressed.id },
-        );
+        if (shouldSemanticallyIndexObservation(compressed)) {
+          await vectorIndexAddGuarded(
+            compressed.id,
+            compressed.sessionId,
+            compressed.title + " " + (compressed.narrative || ""),
+            { kind: "observation", logId: compressed.id },
+          );
+        }
 
         const streamResults = await Promise.allSettled([
           sdk.trigger({

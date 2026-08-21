@@ -8,6 +8,14 @@ export interface Session {
   branch?: string;
   taskSlug?: string;
   projectAliases?: string[];
+  canonicalRepoId?: string;
+  repoRemote?: string;
+  terminalSession?: string;
+  missionId?: string;
+  missionTitle?: string;
+  missionRole?: string;
+  parentSession?: string;
+  commitSha?: string;
   startedAt: string;
   updatedAt?: string;
   contextUpdatedAt?: string;
@@ -20,6 +28,28 @@ export interface Session {
   summary?: string;
   commitShas?: string[];
   agentId?: string;
+}
+
+/**
+ * Immutable repository/session attribution captured when an observation or
+ * durable memory is written. Session rows remain mutable as an agent changes
+ * branches, commits, or worktrees, so retrieval prefers this snapshot and
+ * uses the current Session only as a legacy-data fallback.
+ */
+export interface RetrievalAttributionSnapshot {
+  project?: string;
+  projectAliases?: string[];
+  canonicalRepoId?: string;
+  repoRemote?: string;
+  repoRoot?: string;
+  worktree?: string;
+  branch?: string;
+  commitSha?: string;
+  terminalSession?: string;
+  parentSession?: string;
+  missionId?: string;
+  missionTitle?: string;
+  missionRole?: string;
 }
 
 export interface CommitLink {
@@ -49,6 +79,7 @@ export interface RawObservation {
   modality?: "text" | "image" | "mixed";
   imageData?: string;
   agentId?: string;
+  attribution?: RetrievalAttributionSnapshot;
 }
 
 export interface CompressedObservation {
@@ -69,6 +100,7 @@ export interface CompressedObservation {
   imageDescription?: string;
   modality?: "text" | "image" | "mixed";
   agentId?: string;
+  attribution?: RetrievalAttributionSnapshot;
 }
 
 export type ObservationType =
@@ -110,6 +142,91 @@ export interface Memory {
   imageData?: string;
   agentId?: string;
   project?: string;
+  attribution?: RetrievalAttributionSnapshot;
+}
+
+export type RetrievalScope =
+  | "current_mission"
+  | "current_repo"
+  | "related_repo"
+  | "global"
+  | "cross_repo"
+  | "legacy_unattributed";
+
+export interface RetrievalProvenance {
+  project?: string;
+  projectAliases?: string[];
+  canonicalRepoId?: string;
+  repoRemote?: string;
+  repoRoot?: string;
+  worktree?: string;
+  branch?: string;
+  commitSha?: string;
+  sessionId?: string;
+  /** Present instead of sessionId when a durable memory has multiple sources. */
+  sessionIds?: string[];
+  terminalSession?: string;
+  parentSession?: string;
+  missionId?: string;
+  missionTitle?: string;
+  missionRole?: string;
+  agentId?: string;
+  files: string[];
+  timestamp: string;
+  observationId: string;
+  memoryId?: string;
+  memoryType?: Memory["type"] | ObservationType;
+  confidence?: number;
+  importance?: number;
+  isLatest?: boolean;
+  supersedes?: string[];
+  attributed: boolean;
+}
+
+export interface CompactRetrievalProvenance {
+  project?: string;
+  canonicalRepoId?: string;
+  sessionId?: string;
+  /** Present instead of sessionId when a durable memory has multiple sources. */
+  sessionIds?: string[];
+  agentId?: string;
+  missionId?: string;
+  branch?: string;
+  commitSha?: string;
+  timestamp: string;
+  memoryType?: RetrievalProvenance["memoryType"];
+  importance?: number;
+  confidence?: number;
+  attributed: boolean;
+}
+
+export type ProjectRelationshipProvenanceKind =
+  | "manifest"
+  | "registry"
+  | "manual"
+  | "import";
+
+export interface ProjectRelationshipProvenance {
+  kind: ProjectRelationshipProvenanceKind;
+  source: string;
+  recordedAt: string;
+  recordedBy?: string;
+  sessionId?: string;
+  commitSha?: string;
+}
+
+export interface ProjectRelationship {
+  id: string;
+  sourceRepoId: string;
+  targetRepoId: string;
+  relationType: string;
+  sourceAliases: string[];
+  targetAliases: string[];
+  provenance: ProjectRelationshipProvenance[];
+  reason?: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
 }
 
 export interface SessionSummary {
@@ -149,6 +266,15 @@ export interface HookPayload {
   worktree?: string;
   branch?: string;
   taskSlug?: string;
+  projectAliases?: string[];
+  canonicalRepoId?: string;
+  repoRemote?: string;
+  terminalSession?: string;
+  missionId?: string;
+  missionTitle?: string;
+  missionRole?: string;
+  parentSession?: string;
+  commitSha?: string;
   timestamp: string;
   data: unknown;
 }
@@ -276,17 +402,29 @@ export interface HybridSearchResult {
   vectorScore: number;
   graphScore: number;
   combinedScore: number;
+  baseCombinedScore?: number;
   sessionId: string;
   graphContext?: string;
+  scope?: RetrievalScope;
+  scopeReason?: string;
+  provenance?: RetrievalProvenance;
 }
 
 export interface CompactSearchResult {
   obsId: string;
-  sessionId: string;
+  /** Omitted for composite memories; inspect provenance.sessionIds instead. */
+  sessionId?: string;
   title: string;
   type: ObservationType;
   score: number;
   timestamp: string;
+  bm25Score?: number;
+  vectorScore?: number;
+  graphScore?: number;
+  scope?: RetrievalScope;
+  scopeReason?: string;
+  provenanceAvailable?: boolean;
+  provenance?: CompactRetrievalProvenance;
 }
 
 export interface CompactLessonResult {
@@ -344,6 +482,7 @@ export interface ExportData {
   profiles?: ProjectProfile[];
   graphNodes?: GraphNode[];
   graphEdges?: GraphEdge[];
+  projectRelationships?: ProjectRelationship[];
   semanticMemories?: SemanticMemory[];
   proceduralMemories?: ProceduralMemory[];
   actions?: Action[];

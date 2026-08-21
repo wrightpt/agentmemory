@@ -17,6 +17,15 @@ vi.mock("../src/mcp/transport.js", () => ({
 
 vi.mock("../src/config.js", () => ({
   getStandalonePersistPath: vi.fn(() => "/tmp/test-standalone.json"),
+  getAgentId: vi.fn(() => {
+    const value = process.env["AGENT_ID"]?.trim();
+    return value || undefined;
+  }),
+  isAgentScopeIsolated: vi.fn(
+    () =>
+      process.env["AGENTMEMORY_AGENT_SCOPE"] === "isolated" &&
+      Boolean(process.env["AGENT_ID"]?.trim()),
+  ),
 }));
 
 import {
@@ -53,7 +62,7 @@ const fetchTrap = vi.fn(async (url: unknown) => {
 describe("Tools Registry", () => {
   it("getAllTools returns all tools with unique names", () => {
     const tools = getAllTools();
-    expect(tools.length).toBeGreaterThanOrEqual(41);
+    expect(tools).toHaveLength(61);
     const names = new Set(tools.map((t) => t.name));
     expect(names.size).toBe(tools.length);
     for (const required of [
@@ -143,6 +152,8 @@ describe("InMemoryKV", () => {
 
 describe("handleToolCall", () => {
   const originalFetch = globalThis.fetch;
+  const originalAgentId = process.env["AGENT_ID"];
+  const originalAgentScope = process.env["AGENTMEMORY_AGENT_SCOPE"];
 
   beforeEach(() => {
     vi.mocked(writeFileSync).mockClear();
@@ -155,11 +166,20 @@ describe("handleToolCall", () => {
     resetHandleForTests();
     setLivezProbe(instantLocalFallbackProbe);
     (globalThis as { fetch: typeof fetch }).fetch = fetchTrap as unknown as typeof fetch;
+    delete process.env["AGENT_ID"];
+    delete process.env["AGENTMEMORY_AGENT_SCOPE"];
   });
 
   afterEach(() => {
     (globalThis as { fetch: typeof fetch }).fetch = originalFetch;
     resetHandleForTests();
+    if (originalAgentId === undefined) delete process.env["AGENT_ID"];
+    else process.env["AGENT_ID"] = originalAgentId;
+    if (originalAgentScope === undefined) {
+      delete process.env["AGENTMEMORY_AGENT_SCOPE"];
+    } else {
+      process.env["AGENTMEMORY_AGENT_SCOPE"] = originalAgentScope;
+    }
   });
 
   it("livez probe stub is invoked instead of the real fetch (issue #449)", async () => {
@@ -257,6 +277,26 @@ describe("handleToolCall", () => {
     expect(mem?.project).toBe("agentmemory");
   });
 
+  it("memory_save attributes local fallback rows to the configured agent", async () => {
+    process.env["AGENT_ID"] = "codex";
+    process.env["AGENTMEMORY_AGENT_SCOPE"] = "shared";
+    const kv = new InMemoryKV();
+    const saved = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          { content: "Attributed local memory" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    const memory = await kv.get<{ agentId?: string }>(
+      "mem:memories",
+      saved.saved,
+    );
+    expect(memory?.agentId).toBe("codex");
+  });
+
   it("memory_save still accepts concepts/files as comma-separated strings (legacy)", async () => {
     const kv = new InMemoryKV();
     const result = await handleToolCall(
@@ -304,13 +344,322 @@ describe("handleToolCall", () => {
     await handleToolCall("memory_save", { content: "anything" }, kv);
     await expect(
       handleToolCall("memory_smart_search", {}, kv),
-    ).rejects.toThrow("query is required");
+    ).rejects.toThrow("query or expandIds is required");
     await expect(
       handleToolCall("memory_smart_search", { query: "" }, kv),
-    ).rejects.toThrow("query is required");
+    ).rejects.toThrow("query or expandIds is required");
     await expect(
       handleToolCall("memory_smart_search", { query: "   " }, kv),
-    ).rejects.toThrow("query is required");
+    ).rejects.toThrow("query or expandIds is required");
+  });
+
+  it("memory_smart_search expands returned memory IDs without another query", async () => {
+    const kv = new InMemoryKV();
+    const saved = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          { content: "architecture provenance" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    const result = await handleToolCall(
+      "memory_smart_search",
+      { expandIds: saved.saved },
+      kv,
+    );
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.mode).toBe("expanded");
+    expect(parsed.results[0].id).toBe(saved.saved);
+  });
+
+  it("applies explicit and isolated agent filters to compact and expanded local results", async () => {
+    const kv = new InMemoryKV();
+    process.env["AGENT_ID"] = "codex";
+    const codex = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          { content: "shared isolation marker" },
+          kv,
+        )
+      ).content[0].text,
+    ).saved;
+    process.env["AGENT_ID"] = "kimi";
+    const kimi = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_save",
+          { content: "shared isolation marker" },
+          kv,
+        )
+      ).content[0].text,
+    ).saved;
+
+    process.env["AGENTMEMORY_AGENT_SCOPE"] = "shared";
+    const explicit = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          { query: "isolation marker", agentId: "codex" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(explicit.results.map((row: { id: string }) => row.id)).toEqual([
+      codex,
+    ]);
+
+    process.env["AGENT_ID"] = "codex";
+    process.env["AGENTMEMORY_AGENT_SCOPE"] = "isolated";
+    const compact = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          { query: "isolation marker" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(compact.results.map((row: { id: string }) => row.id)).toEqual([
+      codex,
+    ]);
+    expect(compact.results[0].provenance.agentId).toBe("codex");
+
+    const expanded = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          { expandIds: [codex, kimi] },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(expanded.results.map((row: { id: string }) => row.id)).toEqual([
+      codex,
+    ]);
+
+    const wildcard = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          { expandIds: [codex, kimi], agentId: "*" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(
+      wildcard.results.map((row: { id: string }) => row.id).sort(),
+    ).toEqual([codex, kimi].sort());
+  });
+
+  it("fails closed in isolated local fallback when no agent identity is available", async () => {
+    process.env["AGENTMEMORY_AGENT_SCOPE"] = "isolated";
+    delete process.env["AGENT_ID"];
+    const kv = new InMemoryKV();
+    await kv.set("mem:memories", "mem_unscoped", {
+      id: "mem_unscoped",
+      content: "private marker",
+      isLatest: true,
+    });
+    await expect(
+      handleToolCall(
+        "memory_smart_search",
+        { query: "private marker" },
+        kv,
+      ),
+    ).rejects.toThrow(/AGENTMEMORY_AGENT_SCOPE=isolated/);
+  });
+
+  it("honors mission, repository, related, global, and cross-repo scope in local fallback", async () => {
+    const kv = new InMemoryKV();
+    const sessions = [
+      {
+        id: "sess_current",
+        project: "agentmemory",
+        projectAliases: ["memory-engine"],
+        canonicalRepoId: "wrightpt/agentmemory",
+        missionId: "mission-fleet-memory",
+        cwd: "/repos/agentmemory",
+        startedAt: "2026-08-21T10:00:00.000Z",
+        status: "active",
+        observationCount: 0,
+      },
+      {
+        id: "sess_related",
+        project: "workstation-shell",
+        canonicalRepoId: "wrightpt/workstation-shell",
+        missionId: "mission-other",
+        cwd: "/repos/workstation-shell",
+        startedAt: "2026-08-21T09:00:00.000Z",
+        status: "completed",
+        observationCount: 0,
+      },
+      {
+        id: "sess_unrelated",
+        project: "distractor",
+        canonicalRepoId: "elsewhere/distractor",
+        missionId: "mission-other",
+        cwd: "/repos/distractor",
+        startedAt: "2026-08-21T08:00:00.000Z",
+        status: "completed",
+        observationCount: 0,
+      },
+    ];
+    for (const session of sessions) {
+      await kv.set("mem:sessions", session.id, session);
+    }
+    const save = async (content: string, args: Record<string, unknown>) =>
+      JSON.parse(
+        (
+          await handleToolCall(
+            "memory_save",
+            { content, ...args },
+            kv,
+          )
+        ).content[0].text,
+      ).saved as string;
+    const current = await save("scope architecture marker current", {
+      sessionId: "sess_current",
+    });
+    const related = await save("scope architecture marker related", {
+      sessionId: "sess_related",
+    });
+    const unrelated = await save("scope architecture marker unrelated", {
+      sessionId: "sess_unrelated",
+    });
+    const global = await save("scope architecture marker global", {
+      project: "global",
+    });
+
+    const localOnly = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          {
+            query: "scope architecture marker",
+            sessionId: "sess_current",
+            includeGlobal: false,
+          },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(localOnly.results.map((row: { id: string }) => row.id)).toEqual([
+      current,
+    ]);
+    expect(localOnly.results[0]).toMatchObject({
+      scope: "current_mission",
+      provenance: {
+        project: "agentmemory",
+        canonicalRepoId: "wrightpt/agentmemory",
+        missionId: "mission-fleet-memory",
+      },
+    });
+
+    const relatedSearch = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          {
+            query: "scope architecture marker",
+            currentRepo: "https://github.com/wrightpt/agentmemory.git",
+            currentProject: "agentmemory",
+            missionId: "mission-fleet-memory",
+            includeRelatedProjects: true,
+            relatedProjects: ["https://github.com/wrightpt/workstation-shell.git"],
+            includeGlobal: true,
+            includeCrossRepo: false,
+          },
+          kv,
+        )
+      ).content[0].text,
+    );
+    const byId = new Map(
+      relatedSearch.results.map((row: { id: string; scope: string }) => [
+        row.id,
+        row.scope,
+      ]),
+    );
+    expect(byId.get(current)).toBe("current_mission");
+    expect(byId.get(related)).toBe("related_repo");
+    expect(byId.get(global)).toBe("global");
+    expect(byId.has(unrelated)).toBe(false);
+
+    const wide = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          {
+            query: "scope architecture marker",
+            currentRepo: "wrightpt/agentmemory",
+            currentProject: "agentmemory",
+            includeCrossRepo: true,
+          },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(wide.results.some((row: { id: string }) => row.id === unrelated)).toBe(
+      true,
+    );
+  });
+
+  it("rejects implicit relationship resolution and suppresses stale rows locally", async () => {
+    const kv = new InMemoryKV();
+    for (const [id, extra] of [
+      ["mem_superseded", { isLatest: false }],
+      ["mem_stale", { stale: true }],
+      ["mem_expired", { forgetAfter: "2020-01-01T00:00:00.000Z" }],
+    ] as const) {
+      await kv.set("mem:memories", id, {
+        id,
+        type: "fact",
+        title: "stale marker",
+        content: "stale marker",
+        concepts: [],
+        files: [],
+        sessionIds: [],
+        createdAt: "2026-08-21T00:00:00.000Z",
+        updatedAt: "2026-08-21T00:00:00.000Z",
+        strength: 7,
+        version: 1,
+        isLatest: true,
+        ...extra,
+      });
+    }
+    const compact = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          { query: "stale marker" },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(compact.results).toEqual([]);
+    const expanded = JSON.parse(
+      (
+        await handleToolCall(
+          "memory_smart_search",
+          { expandIds: ["mem_superseded", "mem_stale", "mem_expired"] },
+          kv,
+        )
+      ).content[0].text,
+    );
+    expect(expanded.results).toEqual([]);
+    await expect(
+      handleToolCall(
+        "memory_smart_search",
+        {
+          query: "stale marker",
+          currentRepo: "wrightpt/agentmemory",
+          includeRelatedProjects: true,
+        },
+        kv,
+      ),
+    ).rejects.toThrow(/pass explicit relatedProjects/i);
   });
 
   it("memory_smart_search searches files and concepts, not just title/content (#139)", async () => {

@@ -4,6 +4,8 @@ import type {
   CompactSearchResult,
   CompressedObservation,
   HybridSearchResult,
+  Memory,
+  Session,
 } from "../types.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
@@ -18,6 +20,18 @@ import { logger } from "../logger.js";
 import { getCounters } from "../telemetry/setup.js";
 import type { LessonAccessContext } from "./lesson-access.js";
 import type { CompactRetrievedLesson } from "./lesson-retrieval.js";
+import type { RetrievalPolicyContext } from "../state/retrieval-policy.js";
+import { applyRetrievalPolicy } from "../state/retrieval-policy.js";
+import {
+  compactRetrievalProvenance,
+  publicRetrievalObservation,
+  resolveRetrievalProvenance,
+} from "../state/provenance.js";
+import { memoryToObservation } from "../state/memory-utils.js";
+import {
+  normalizeRepositoryIdentity,
+  relatedRepositoryIds,
+} from "./project-relationships.js";
 
 // #771: smart-search followup-rate diagnostic. Stored per session as
 // the most recent search payload, used to detect whether the next
@@ -72,7 +86,11 @@ export function resetFollowupStatsForTests(): void {
 export function registerSmartSearchFunction(
   sdk: ISdk,
   kv: StateKV,
-  searchFn: (query: string, limit: number) => Promise<HybridSearchResult[]>,
+  searchFn: (
+    query: string,
+    limit: number,
+    context?: RetrievalPolicyContext,
+  ) => Promise<HybridSearchResult[]>,
 ): void {
   sdk.registerFunction("mem::smart-search",
     async (data: {
@@ -93,6 +111,14 @@ export function registerSmartSearchFunction(
       // ignores them — only agent-initiated re-queries should count.
       source?: string;
       accessContext?: LessonAccessContext;
+      currentProject?: string;
+      currentRepo?: string;
+      missionId?: string;
+      includeRelatedProjects?: boolean;
+      relatedProjects?: string[];
+      includeGlobal?: boolean;
+      includeCrossRepo?: boolean;
+      currentFiles?: string[];
     }) => {
 
       // Compute the agent filter once, up front. Both the expandIds
@@ -127,6 +153,8 @@ export function registerSmartSearchFunction(
         );
       }
 
+      const retrievalContext = await resolveRetrievalContext(kv, data, filterAgentId);
+
       if (data.expandIds && data.expandIds.length > 0) {
         const raw = data.expandIds.slice(0, 20);
         const items = raw.map((entry) => {
@@ -137,26 +165,46 @@ export function registerSmartSearchFunction(
           return null;
         }).filter((item): item is NonNullable<typeof item> => item !== null);
 
-        const expanded: Array<{
-          obsId: string;
-          sessionId: string;
-          observation: CompressedObservation;
-        }> = [];
-
-        const results = await Promise.all(
+        const sources = await Promise.all(
           items.map(({ obsId, sessionId }) =>
-            findObservation(kv, obsId, sessionId).then((obs) =>
-              obs ? { obsId, sessionId: obs.sessionId, observation: obs } : null,
-            ),
+            findRetrievalSource(kv, obsId, sessionId),
           ),
         );
-        for (const r of results) {
-          if (r) expanded.push(r);
-        }
-
-        const scoped = filterAgentId
-          ? expanded.filter((e) => e.observation.agentId === filterAgentId)
-          : expanded;
+        const candidates = await Promise.all(
+          sources.map(async (source, index) => {
+            if (!source) return null;
+            const provenance = await resolveRetrievalProvenance(
+              kv,
+              source.observation,
+              source.memory,
+            );
+            return {
+              id: source.observation.id,
+              baseScore: 1 - index * 0.000001,
+              value: source,
+              provenance,
+            };
+          }),
+        );
+        const expanded = candidates.filter(
+          (candidate): candidate is NonNullable<typeof candidate> =>
+            candidate !== null,
+        );
+        const scoped = applyRetrievalPolicy(expanded, retrievalContext).map(
+          (candidate) => ({
+            obsId: candidate.id,
+            ...(candidate.provenance.sessionId
+              ? { sessionId: candidate.provenance.sessionId }
+              : {}),
+            observation: publicRetrievalObservation(
+              candidate.value.observation,
+              candidate.provenance,
+            ),
+            provenance: candidate.provenance,
+            scope: candidate.scope,
+            scopeReason: candidate.scopeReason,
+          }),
+        );
 
         void recordAccessBatch(
           kv,
@@ -195,13 +243,13 @@ export function registerSmartSearchFunction(
         : limit;
 
       const [hybridResults, lessons] = await Promise.all([
-        searchFn(data.query, overFetchLimit),
+        searchFn(data.query, overFetchLimit, retrievalContext),
         includeLessons
           ? recallLessons(
               sdk,
               data.query,
               lessonLimit,
-              data.project,
+              data.project ?? retrievalContext.currentProject,
               data.accessContext,
             )
           : Promise.resolve([]),
@@ -209,17 +257,32 @@ export function registerSmartSearchFunction(
 
       const filteredHybrid = filterAgentId
         ? hybridResults
-            .filter((r) => r.observation.agentId === filterAgentId)
+            .filter(
+              (r) =>
+                (r.provenance?.agentId ?? r.observation.agentId) ===
+                filterAgentId,
+            )
             .slice(0, limit)
         : hybridResults.slice(0, limit);
 
       const compact: CompactSearchResult[] = filteredHybrid.map((r) => ({
         obsId: r.observation.id,
-        sessionId: r.sessionId,
+        ...(r.provenance?.sessionId
+          ? { sessionId: r.provenance.sessionId }
+          : {}),
         title: r.observation.title,
         type: r.observation.type,
         score: r.combinedScore,
-        timestamp: r.observation.timestamp,
+        timestamp: r.provenance?.timestamp ?? r.observation.timestamp,
+        bm25Score: r.bm25Score,
+        vectorScore: r.vectorScore,
+        graphScore: r.graphScore,
+        ...(r.scope ? { scope: r.scope } : {}),
+        ...(r.scopeReason ? { scopeReason: r.scopeReason } : {}),
+        provenanceAvailable: Boolean(r.provenance),
+        ...(r.provenance
+          ? { provenance: compactRetrievalProvenance(r.provenance) }
+          : {}),
       }));
 
       void recordAccessBatch(
@@ -388,16 +451,99 @@ async function detectFollowup(
   });
 }
 
-async function findObservation(
+async function resolveRetrievalContext(
+  kv: StateKV,
+  data: {
+    project?: string;
+    currentProject?: string;
+    currentRepo?: string;
+    missionId?: string;
+    sessionId?: string;
+    includeRelatedProjects?: boolean;
+    relatedProjects?: string[];
+    includeGlobal?: boolean;
+    includeCrossRepo?: boolean;
+    currentFiles?: string[];
+  },
+  filterAgentId?: string,
+): Promise<RetrievalPolicyContext> {
+  const session = data.sessionId
+    ? await kv.get<Session>(KV.sessions, data.sessionId).catch(() => null)
+    : null;
+  const currentProject =
+    data.currentProject?.trim() || data.project?.trim() || session?.project;
+  const currentProjectAliases = new Set(session?.projectAliases ?? []);
+  if (session?.project && session.project !== currentProject) {
+    currentProjectAliases.add(session.project);
+  }
+  currentProjectAliases.delete(currentProject ?? "");
+  const rawCurrentRepo = data.currentRepo?.trim() || session?.canonicalRepoId;
+  const currentRepoId = rawCurrentRepo
+    ? normalizeRepositoryIdentity(rawCurrentRepo)
+    : undefined;
+  const related = new Set<string>();
+  for (const repoId of data.relatedProjects ?? []) {
+    if (typeof repoId !== "string") continue;
+    const normalized = normalizeRepositoryIdentity(repoId);
+    if (normalized) related.add(normalized);
+  }
+  if (data.includeRelatedProjects === true && currentRepoId) {
+    try {
+      for (const repoId of await relatedRepositoryIds(kv, currentRepoId)) {
+        related.add(repoId);
+      }
+    } catch (error) {
+      logger.warn("Smart search: related repository lookup failed", {
+        currentRepoId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return {
+    ...(currentProject ? { currentProject } : {}),
+    ...(currentProjectAliases.size > 0
+      ? { currentProjectAliases: [...currentProjectAliases].sort() }
+      : {}),
+    ...(currentRepoId ? { currentRepoId } : {}),
+    ...(data.missionId?.trim() || session?.missionId
+      ? { currentMissionId: data.missionId?.trim() || session?.missionId }
+      : {}),
+    ...(related.size > 0 ? { relatedRepoIds: [...related].sort() } : {}),
+    ...(Array.isArray(data.currentFiles)
+      ? {
+          currentFiles: data.currentFiles
+            .filter((file): file is string => typeof file === "string")
+            .map((file) => file.trim())
+            .filter(Boolean)
+            .slice(0, 100),
+        }
+      : {}),
+    includeRelatedProjects: data.includeRelatedProjects === true,
+    includeGlobal: data.includeGlobal !== false,
+    includeCrossRepo: data.includeCrossRepo === true,
+    ...(filterAgentId !== undefined ? { filterAgentId } : {}),
+  };
+}
+
+async function findRetrievalSource(
   kv: StateKV,
   obsId: string,
   sessionIdHint?: string,
-): Promise<CompressedObservation | null> {
+): Promise<{
+  observation: CompressedObservation;
+  memory: Memory | null;
+} | null> {
   if (sessionIdHint) {
     const obs = await kv
       .get<CompressedObservation>(KV.observations(sessionIdHint), obsId)
       .catch(() => null);
-    if (obs) return obs;
+    if (obs && "title" in obs) return { observation: obs, memory: null };
+  }
+
+  const memory = await kv.get<Memory>(KV.memories, obsId).catch(() => null);
+  if (memory) {
+    return { observation: memoryToObservation(memory), memory };
   }
 
   const sessions = await kv.list<{ id: string }>(KV.sessions);
@@ -408,8 +554,8 @@ async function findObservation(
         kv.get<CompressedObservation>(KV.observations(s.id), obsId).catch(() => null),
       ),
     );
-    const found = results.find((r) => r !== null);
-    if (found) return found;
+    const found = results.find((result) => result && "title" in result);
+    if (found) return { observation: found, memory: null };
   }
   return null;
 }

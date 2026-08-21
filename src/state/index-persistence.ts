@@ -1,5 +1,8 @@
 import { SearchIndex } from "./search-index.js";
-import { VectorIndex } from "./vector-index.js";
+import {
+  LocalVectorStore,
+  type PersistableLocalVectorStore,
+} from "./vector-store.js";
 import type { StateKV } from "./kv.js";
 import { KV, generateId } from "./schema.js";
 import { logger } from "../logger.js";
@@ -72,7 +75,7 @@ export class IndexPersistence {
   constructor(
     private kv: StateKV,
     private bm25: SearchIndex,
-    private vector: VectorIndex | null,
+    private vector: PersistableLocalVectorStore | null,
     private options: IndexPersistenceOptions = {},
   ) {}
 
@@ -104,10 +107,10 @@ export class IndexPersistence {
 
   async load(): Promise<{
     bm25: SearchIndex | null;
-    vector: VectorIndex | null;
+    vector: LocalVectorStore | null;
   }> {
     let bm25: SearchIndex | null = null;
-    let vector: VectorIndex | null = null;
+    let vector: LocalVectorStore | null = null;
 
     const bm25Data = await this.loadBm25Data();
     if (bm25Data && typeof bm25Data === "string") {
@@ -116,7 +119,7 @@ export class IndexPersistence {
 
     const vecData = await this.loadVectorData();
     if (vecData && typeof vecData === "string") {
-      vector = VectorIndex.deserialize(vecData);
+      vector = LocalVectorStore.deserialize(vecData);
     }
 
     return { bm25, vector };

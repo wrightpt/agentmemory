@@ -24,6 +24,7 @@ import { selectSessionPage } from "../functions/session-list.js";
 import { triggerDetached } from "../utils/trigger-detached.js";
 import { parseLessonSaveInput } from "../functions/lesson-model.js";
 import { parseLessonRecallInput } from "../functions/lesson-retrieval.js";
+import { normalizeSessionContextValues } from "../functions/session-context-values.js";
 import {
   bindResolvedLessonWriteIdentity,
   resolveLessonBoundaryAccess,
@@ -168,18 +169,7 @@ function pickDefinedFields(
 }
 
 function sessionContextFields(body: Record<string, unknown>): Partial<HookPayload> {
-  const result: Partial<HookPayload> = {};
-  for (const field of [
-    "repoRoot",
-    "scopeType",
-    "worktree",
-    "branch",
-    "taskSlug",
-  ] as const) {
-    const value = asNonEmptyString(body[field]);
-    if (value) result[field] = value.slice(0, 4096);
-  }
-  return result;
+  return normalizeSessionContextValues(body);
 }
 
 function parseObserveRequest(
@@ -753,6 +743,16 @@ export function registerApiTriggers(
         worktree?: string;
         branch?: string;
         taskSlug?: string;
+        projectAliases?: string[];
+        canonicalRepoId?: string;
+        repoRemote?: string;
+        terminalSession?: string;
+        missionId?: string;
+        missionTitle?: string;
+        missionRole?: string;
+        parentSession?: string;
+        commitSha?: string;
+        agentId?: string;
       }>,
     ): Promise<Response> => {
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -966,6 +966,9 @@ export function registerApiTriggers(
           const shaSet = new Set<string>(session.commitShas ?? []);
           shaSet.add(sha);
           session.commitShas = Array.from(shaSet);
+          if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(sha)) {
+            session.commitSha = sha.toLowerCase();
+          }
           await kv.set(KV.sessions, sessionId, session);
         });
       }
@@ -1281,6 +1284,7 @@ export function registerApiTriggers(
         ttlDays?: number;
         sourceObservationIds?: string[];
         project?: string;
+        sessionId?: string;
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1308,6 +1312,9 @@ export function registerApiTriggers(
           ...(req.body.ttlDays !== undefined && { ttlDays: req.body.ttlDays }),
           ...(req.body.sourceObservationIds !== undefined && { sourceObservationIds: req.body.sourceObservationIds }),
           ...(req.body.project !== undefined && { project: req.body.project }),
+          ...(req.body.sessionId !== undefined && {
+            sessionId: req.body.sessionId,
+          }),
         },
       });
       return { status_code: 201, body: result };
@@ -1502,6 +1509,14 @@ export function registerApiTriggers(
         agentId?: string;
         sessionId?: string;
         source?: string;
+        currentProject?: string;
+        currentRepo?: string;
+        missionId?: string;
+        includeRelatedProjects?: boolean;
+        relatedProjects?: string[];
+        includeGlobal?: boolean;
+        includeCrossRepo?: boolean;
+        currentFiles?: string[];
       }>,
     ): Promise<Response> => {
       const authErr = checkAuth(req, secret);
@@ -1541,6 +1556,22 @@ export function registerApiTriggers(
         agentId: req.body?.agentId,
         sessionId: req.body?.sessionId,
         source: req.body?.source ?? sourceFromHeader,
+        currentProject: req.body?.currentProject,
+        currentRepo: req.body?.currentRepo,
+        missionId: req.body?.missionId,
+        includeRelatedProjects: req.body?.includeRelatedProjects === true,
+        relatedProjects: Array.isArray(req.body?.relatedProjects)
+          ? req.body.relatedProjects
+              .filter((repo): repo is string => typeof repo === "string")
+              .slice(0, 100)
+          : [],
+        includeGlobal: req.body?.includeGlobal !== false,
+        includeCrossRepo: req.body?.includeCrossRepo === true,
+        currentFiles: Array.isArray(req.body?.currentFiles)
+          ? req.body.currentFiles
+              .filter((file): file is string => typeof file === "string")
+              .slice(0, 100)
+          : [],
         ...(access?.success ? { accessContext: access.context } : {}),
       };
       const result = await sdk.trigger({ function_id: "mem::smart-search", payload });
@@ -1551,6 +1582,133 @@ export function registerApiTriggers(
     type: "http",
     function_id: "api::smart-search",
     config: { api_path: "/agentmemory/smart-search", http_method: "POST" },
+  });
+
+  sdk.registerFunction("api::project-relationships", async (req: ApiRequest) => {
+    const authErr = checkAuth(req, secret);
+    if (authErr) return authErr;
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const operation = asNonEmptyString(body.operation)?.toLowerCase();
+    if (operation !== "list" && operation !== "upsert") {
+      return {
+        status_code: 400,
+        body: { error: "operation must be list or upsert" },
+      };
+    }
+    if (operation === "list") {
+      const direction = asNonEmptyString(body.direction) ?? "both";
+      if (!["incoming", "outgoing", "both"].includes(direction)) {
+        return {
+          status_code: 400,
+          body: { error: "direction must be incoming, outgoing, or both" },
+        };
+      }
+      const result = await sdk.trigger({
+        function_id: "mem::project-relationship-list",
+        payload: {
+          ...(asNonEmptyString(body.repoId)
+            ? { repoId: asNonEmptyString(body.repoId) }
+            : {}),
+          direction,
+          ...(asNonEmptyString(body.relationType)
+            ? { relationType: asNonEmptyString(body.relationType) }
+            : {}),
+        },
+      });
+      return { status_code: 200, body: result };
+    }
+
+    const sourceRepoId = asNonEmptyString(body.sourceRepoId);
+    const targetRepoId = asNonEmptyString(body.targetRepoId);
+    const relationType = asNonEmptyString(body.relationType);
+    const rawProvenance =
+      body.provenance && typeof body.provenance === "object"
+        ? (body.provenance as Record<string, unknown>)
+        : {};
+    const provenanceKind = asNonEmptyString(rawProvenance.kind);
+    const provenanceSource = asNonEmptyString(rawProvenance.source);
+    if (
+      !sourceRepoId ||
+      !targetRepoId ||
+      !relationType ||
+      !provenanceKind ||
+      !provenanceSource
+    ) {
+      return {
+        status_code: 400,
+        body: {
+          error:
+            "sourceRepoId, targetRepoId, relationType, provenance.kind, and provenance.source are required for upsert",
+        },
+      };
+    }
+    const expectedRevision =
+      body.expectedRevision === undefined
+        ? undefined
+        : Number(body.expectedRevision);
+    if (
+      expectedRevision !== undefined &&
+      (!Number.isInteger(expectedRevision) || expectedRevision < 0)
+    ) {
+      return {
+        status_code: 400,
+        body: { error: "expectedRevision must be a non-negative integer" },
+      };
+    }
+    const result = (await sdk.trigger({
+      function_id: "mem::project-relationship-upsert",
+      payload: {
+        sourceRepoId,
+        targetRepoId,
+        relationType,
+        sourceAliases: Array.isArray(body.sourceAliases)
+          ? body.sourceAliases
+              .filter((alias): alias is string => typeof alias === "string")
+              .slice(0, 128)
+          : [],
+        targetAliases: Array.isArray(body.targetAliases)
+          ? body.targetAliases
+              .filter((alias): alias is string => typeof alias === "string")
+              .slice(0, 128)
+          : [],
+        provenance: {
+          kind: provenanceKind,
+          source: provenanceSource,
+          ...(asNonEmptyString(rawProvenance.recordedAt)
+            ? { recordedAt: asNonEmptyString(rawProvenance.recordedAt) }
+            : {}),
+          ...(asNonEmptyString(rawProvenance.recordedBy)
+            ? { recordedBy: asNonEmptyString(rawProvenance.recordedBy) }
+            : {}),
+          ...(asNonEmptyString(rawProvenance.sessionId)
+            ? { sessionId: asNonEmptyString(rawProvenance.sessionId) }
+            : {}),
+          ...(asNonEmptyString(rawProvenance.commitSha)
+            ? { commitSha: asNonEmptyString(rawProvenance.commitSha) }
+            : {}),
+        },
+        ...(asNonEmptyString(body.reason)
+          ? { reason: asNonEmptyString(body.reason) }
+          : {}),
+        ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      },
+    })) as { success?: boolean; error?: string };
+    const statusCode = result.success
+      ? expectedRevision === undefined || expectedRevision === 0
+        ? 201
+        : 200
+      : result.error === "project_relationship_revision_conflict"
+        ? 409
+        : 400;
+    return { status_code: statusCode, body: result };
+  });
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::project-relationships",
+    config: {
+      api_path: "/agentmemory/project-relationships",
+      http_method: "POST",
+    },
   });
 
   // #771: read-back endpoint for the followup-rate diagnostic. Returns
