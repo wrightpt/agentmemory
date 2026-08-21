@@ -255,6 +255,7 @@ export async function vectorIndexAddBatchGuarded(
 // batches. Set to 1 to fall back to the legacy per-item path.
 const DEFAULT_REBUILD_EMBED_BATCH = 32
 const REBUILD_SOURCE_READ_ATTEMPTS = 3
+const OBSERVATION_SCOPE_PREFIX = 'mem:obs:'
 
 function getRebuildEmbedBatchSize(): number {
   const raw = process.env.REBUILD_EMBED_BATCH_SIZE
@@ -268,10 +269,17 @@ async function listForRebuild<T>(
   scope: string,
   label: string,
 ): Promise<T[]> {
+  return readForRebuild(() => kv.list<T>(scope), label)
+}
+
+async function readForRebuild<T>(
+  read: () => Promise<T>,
+  label: string,
+): Promise<T> {
   let lastError: unknown
   for (let attempt = 1; attempt <= REBUILD_SOURCE_READ_ATTEMPTS; attempt++) {
     try {
-      return await kv.list<T>(scope)
+      return await read()
     } catch (err) {
       lastError = err
       if (attempt < REBUILD_SOURCE_READ_ATTEMPTS) await Promise.resolve()
@@ -281,6 +289,40 @@ async function listForRebuild<T>(
   throw new Error(
     `rebuildIndex: failed to load ${label} after ` +
       `${REBUILD_SOURCE_READ_ATTEMPTS} attempts: ${detail}`,
+  )
+}
+
+async function observationScopesForRebuild(kv: StateKV): Promise<string[]> {
+  // iii state::list returns values only. Some legacy/imported Session values
+  // predate the embedded `id` field, so walking KV.sessions and reading s.id
+  // silently drops their still-authoritative mem:obs:<sessionId> scopes. The
+  // state engine's group catalogue retains those keys independently of row
+  // shape and is therefore the canonical bulk-rebuild source.
+  if (typeof kv.listGroups === 'function') {
+    const groups = await readForRebuild(
+      () => kv.listGroups(),
+      'state groups',
+    )
+    return groups
+      .filter(
+        (scope) =>
+          scope.startsWith(OBSERVATION_SCOPE_PREFIX) &&
+          scope.length > OBSERVATION_SCOPE_PREFIX.length,
+      )
+      .sort()
+  }
+
+  // Compatibility for lightweight/custom StateKV implementations that have
+  // not adopted state::list_groups yet. Rows without an embedded id cannot be
+  // recovered through state::list, but valid modern rows retain old behavior.
+  const sessions = await listForRebuild<Session>(kv, KV.sessions, 'sessions')
+  return Array.from(
+    new Set(
+      sessions
+        .map((session) => session.id)
+        .filter((id): id is string => typeof id === 'string' && id.length > 0)
+        .map((id) => KV.observations(id)),
+    ),
   )
 }
 
@@ -354,20 +396,20 @@ async function performRebuildIndex(kv: StateKV): Promise<number> {
     count++
   }
 
-  const sessions = await listForRebuild<Session>(kv, KV.sessions, "sessions")
-  if (!sessions.length) {
+  const observationScopes = await observationScopesForRebuild(kv)
+  if (!observationScopes.length) {
     await flush()
     return count
   }
 
-  for (let batch = 0; batch < sessions.length; batch += 10) {
-    const chunk = sessions.slice(batch, batch + 10)
+  for (let batch = 0; batch < observationScopes.length; batch += 10) {
+    const chunk = observationScopes.slice(batch, batch + 10)
     const results = await Promise.all(
-      chunk.map((s) =>
+      chunk.map((scope) =>
         listForRebuild<CompressedObservation>(
           kv,
-          KV.observations(s.id),
-          `observations for session ${s.id}`,
+          scope,
+          `observations for session ${scope.slice(OBSERVATION_SCOPE_PREFIX.length)}`,
         ),
       ),
     )
