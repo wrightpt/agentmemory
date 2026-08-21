@@ -15,6 +15,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Surface counts:** 54 → 58 MCP tools and 131 → 133 REST endpoints.
 
+### Fixed
+
+- **Large-index shutdown grace.** `agentmemory stop` now gives the worker 120
+  seconds by default to flush a sharded copy-on-write index before escalating
+  to `SIGKILL`. Operators may set `AGENTMEMORY_WORKER_STOP_GRACE_MS`; values
+  are bounded to 15 seconds through 15 minutes.
+
 ## [0.9.27] — 2026-06-07
 
 Wave release closing several breaking regressions reported against v0.9.26, plus an agent-scope isolation security fix, an iii version-pin audit fix, and a benchmark scorecard correction. No breaking changes; drop-in upgrade.
