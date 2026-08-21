@@ -2,7 +2,11 @@
 
 import { InMemoryKV } from "./in-memory-kv.js";
 import { createStdioTransport } from "./transport.js";
-import { getAllTools } from "./tools-registry.js";
+import {
+  getAllTools,
+  getVisibleTools,
+  LLM_BACKED_TOOLS,
+} from "./tools-registry.js";
 import {
   getAgentId,
   getStandalonePersistPath,
@@ -27,6 +31,7 @@ import { normalizeRepositoryIdentity } from "../functions/project-relationships.
 import {
   resolveHandle,
   invalidateHandle,
+  isForceProxyEnabled,
   type Handle,
   type ProxyHandle,
 } from "./rest-proxy.js";
@@ -49,6 +54,41 @@ const SERVER_INFO = {
 
 const kv = new InMemoryKV(getStandalonePersistPath());
 let modeAnnounced = false;
+
+function visibleToolNames(): Set<string> {
+  const mode = (process.env["AGENTMEMORY_TOOLS"] || "all").trim();
+  if (!["all", "core", "workstation", "workstation-llm"].includes(mode)) {
+    const requested = new Set(
+      mode.split(",").map((name) => name.trim()).filter(Boolean),
+    );
+    const disabled = new Set(
+      (process.env["AGENTMEMORY_DISABLED_TOOLS"] || "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    const noLlm = process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true";
+    return new Set(
+      getAllTools()
+        .filter(
+          (tool) =>
+            requested.has(tool.name) &&
+            !disabled.has(tool.name) &&
+            !(noLlm && LLM_BACKED_TOOLS.has(tool.name)),
+        )
+        .map((tool) => tool.name),
+    );
+  }
+  return new Set(getVisibleTools().map((tool) => tool.name));
+}
+
+function assertToolVisible(toolName: string): void {
+  if (!visibleToolNames().has(toolName)) {
+    throw new Error(
+      `Tool ${toolName} is not permitted by this AgentMemory client's tool allowlist`,
+    );
+  }
+}
 
 function displayAgentmemoryUrl(): string {
   // Match the literal-placeholder guard in rest-proxy.ts so log lines
@@ -713,6 +753,7 @@ export async function handleToolCall(
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   const handle = await resolveHandle();
   announceMode(handle);
+  assertToolVisible(toolName);
 
   // Tools the local InMemoryKV fallback doesn't implement: forward straight
   // to the server. Local validation would otherwise raise "Unknown tool"
@@ -739,10 +780,12 @@ export async function handleToolCall(
     try {
       return await handleProxy(validated, handle);
     } catch (err) {
+      const failClosed = isForceProxyEnabled();
       process.stderr.write(
-        `[@agentmemory/mcp] proxy call failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}; invalidating handle and falling back to local KV\n`,
+        `[@agentmemory/mcp] proxy call failed for ${toolName}: ${err instanceof Error ? err.message : String(err)}; invalidating handle and ${failClosed ? "failing closed because AGENTMEMORY_FORCE_PROXY is set" : "falling back to local KV"}\n`,
       );
       invalidateHandle();
+      if (failClosed) throw err;
     }
   }
   return handleLocal(validated, kvInstance);
@@ -773,24 +816,38 @@ export async function handleToolsList(): Promise<{ tools: unknown[] }> {
         );
       }
       if (remote && Array.isArray(remote.tools)) {
+        const visible = visibleToolNames();
+        const filtered = remote.tools.filter((tool) => {
+          if (!tool || typeof tool !== "object") return false;
+          const name = (tool as { name?: unknown }).name;
+          return typeof name === "string" && visible.has(name);
+        });
         if (debug) {
           process.stderr.write(
-            `[@agentmemory/mcp] tools/list: returning ${remote.tools.length} tools from server\n`,
+            `[@agentmemory/mcp] tools/list: returning ${filtered.length} of ${remote.tools.length} server tools after client allowlist\n`,
           );
         }
-        return { tools: remote.tools };
+        return { tools: filtered };
+      }
+      if (isForceProxyEnabled()) {
+        throw new Error("AgentMemory proxy tools/list returned no tools array");
       }
       process.stderr.write(
         `[@agentmemory/mcp] tools/list: server returned unexpected shape (no .tools array); falling back to local IMPLEMENTED_TOOLS list. Set AGENTMEMORY_DEBUG=1 to inspect response.\n`,
       );
     } catch (err) {
+      const failClosed = isForceProxyEnabled();
       process.stderr.write(
-        `[@agentmemory/mcp] tools/list proxy failed: ${err instanceof Error ? err.message : String(err)}; falling back to local list\n`,
+        `[@agentmemory/mcp] tools/list proxy failed: ${err instanceof Error ? err.message : String(err)}; ${failClosed ? "failing closed because AGENTMEMORY_FORCE_PROXY is set" : "falling back to local list"}\n`,
       );
       invalidateHandle();
+      if (failClosed) throw err;
     }
   }
-  const fallback = getAllTools().filter((t) => IMPLEMENTED_TOOLS.has(t.name));
+  const visible = visibleToolNames();
+  const fallback = getAllTools().filter(
+    (tool) => IMPLEMENTED_TOOLS.has(tool.name) && visible.has(tool.name),
+  );
   if (debug) {
     process.stderr.write(
       `[@agentmemory/mcp] tools/list: returning ${fallback.length} local fallback tools (${fallback.map((t) => t.name).join(",")})\n`,
