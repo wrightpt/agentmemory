@@ -174,6 +174,54 @@ describe("mem::remember — cross-project dedup isolation", () => {
     expect(apiMemory?.isLatest).toBe(true);
   });
 
+  it("keeps unrelated same-basename canonical repositories separate", async () => {
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerRememberFunction(sdk as never, kv as never);
+    for (const [id, canonicalRepoId] of [
+      ["ses_wrightpt", "wrightpt/agentmemory"],
+      ["ses_other", "other/agentmemory"],
+    ] as const) {
+      await kv.set("mem:sessions", id, {
+        id,
+        project: "agentmemory",
+        cwd: `/worktrees/${id}`,
+        canonicalRepoId,
+        startedAt: "2026-08-21T00:00:00.000Z",
+        status: "active",
+        observationCount: 0,
+      });
+    }
+
+    const first = await sdk.trigger({
+      function_id: "mem::remember",
+      payload: {
+        sessionId: "ses_wrightpt",
+        content: "exact cosine remains the default local vector implementation",
+        type: "architecture",
+      },
+    }) as { memory: { id: string; isLatest: boolean } };
+    const second = await sdk.trigger({
+      function_id: "mem::remember",
+      payload: {
+        sessionId: "ses_other",
+        content: "exact cosine remains the default local vector implementation",
+        type: "architecture",
+      },
+    }) as {
+      memory: {
+        supersedes: string[];
+        attribution?: { canonicalRepoId?: string };
+      };
+    };
+
+    expect(second.memory.supersedes).toEqual([]);
+    expect(second.memory.attribution?.canonicalRepoId).toBe("other/agentmemory");
+    expect(
+      await kv.get<{ isLatest: boolean }>("mem:memories", first.memory.id),
+    ).toMatchObject({ isLatest: true });
+  });
+
   it("still supersedes within the same project when content is similar", async () => {
     const sdk = mockSdk();
     const kv = mockKV();

@@ -84,6 +84,26 @@ describe("GraphRetrieval", () => {
     expect(results[0].obsId).toBe("obs_1");
   });
 
+  it("breaks equal graph-score ties deterministically across KV insertion order", async () => {
+    const nodes = [
+      makeNode("n_z", "Shared Architecture", "concept", ["obs_z"]),
+      makeNode("n_a", "Shared Architecture", "concept", ["obs_a"]),
+    ];
+    const forward = new GraphRetrieval(mockKV(nodes, []) as never);
+    const reverse = new GraphRetrieval(mockKV([...nodes].reverse(), []) as never);
+
+    expect(
+      (await forward.searchByEntities(["Shared Architecture"])).map(
+        (row) => row.obsId,
+      ),
+    ).toEqual(["obs_a", "obs_z"]);
+    expect(
+      (await reverse.searchByEntities(["Shared Architecture"])).map(
+        (row) => row.obsId,
+      ),
+    ).toEqual(["obs_a", "obs_z"]);
+  });
+
   it("finds entities by partial name match", async () => {
     const nodes = [makeNode("n1", "auth-middleware", "function", ["obs_1"])];
     const kv = mockKV(nodes, []);

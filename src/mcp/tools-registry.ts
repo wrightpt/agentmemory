@@ -101,6 +101,11 @@ export const CORE_TOOLS: McpToolDef[] = [
             "started. Do not use filesystem paths or ad-hoc display names — those " +
             "change across machines and will silently break project scoping.",
         },
+        sessionId: {
+          type: "string",
+          description:
+            "Optional source session whose repository, mission, branch, commit, and agent provenance should be retained",
+        },
       },
       required: ["content"],
     },
@@ -160,8 +165,45 @@ export const CORE_TOOLS: McpToolDef[] = [
           description: "Comma-separated observation IDs to expand",
         },
         limit: { type: "number", description: "Max results (default 10)" },
+        project: { type: "string", description: "Legacy/current project key" },
+        currentProject: {
+          type: "string",
+          description: "Current stable project key used for scope preference",
+        },
+        currentRepo: {
+          type: "string",
+          description: "Current canonical repository ID (for example wrightpt/agentmemory)",
+        },
+        missionId: { type: "string", description: "Current mission ID" },
+        sessionId: {
+          type: "string",
+          description: "Current session; fills repository/mission context when present",
+        },
+        includeRelatedProjects: {
+          type: "boolean",
+          description: "Include repositories connected by explicit relationship records",
+        },
+        relatedProjects: {
+          type: "string",
+          description: "Comma-separated explicit related canonical repository IDs",
+        },
+        includeGlobal: {
+          type: "boolean",
+          description: "Include explicit global memories (default true)",
+        },
+        includeCrossRepo: {
+          type: "boolean",
+          description: "Include wider unrelated cross-repository candidates (default false)",
+        },
+        currentFiles: {
+          type: "string",
+          description: "Comma-separated current files used as a small ranking signal",
+        },
+        agentId: {
+          type: "string",
+          description: "Explicit agent filter; '*' is the existing opt-in shared read",
+        },
       },
-      required: ["query"],
     },
   },
   {
@@ -1329,6 +1371,59 @@ export const V073_TOOLS: McpToolDef[] = [
 
 export const V0927_WORKSTATION_TOOLS: McpToolDef[] = [
   {
+    name: "memory_project_relationships",
+    description:
+      "List or safely upsert explicit directional relationships between canonical repositories. Material updates require expectedRevision.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        operation: {
+          type: "string",
+          description: "list or upsert",
+        },
+        repoId: {
+          type: "string",
+          description: "Repository or alias filter for list",
+        },
+        direction: {
+          type: "string",
+          description: "incoming, outgoing, or both (default both)",
+        },
+        sourceRepoId: { type: "string", description: "Source canonical repository ID" },
+        targetRepoId: { type: "string", description: "Target canonical repository ID" },
+        relationType: {
+          type: "string",
+          description: "Generic relation type such as uses or governed_by",
+        },
+        sourceAliases: {
+          type: "string",
+          description: "Comma-separated source aliases",
+        },
+        targetAliases: {
+          type: "string",
+          description: "Comma-separated target aliases",
+        },
+        provenanceKind: {
+          type: "string",
+          description: "manifest, registry, manual, or import",
+        },
+        provenanceSource: {
+          type: "string",
+          description: "Human-inspectable source of the relationship",
+        },
+        recordedBy: { type: "string", description: "Optional writer attribution" },
+        sessionId: { type: "string", description: "Optional source session" },
+        commitSha: { type: "string", description: "Optional source commit SHA" },
+        reason: { type: "string", description: "Optional relationship rationale" },
+        expectedRevision: {
+          type: "number",
+          description: "Required current revision for a material update; 0 for create-only",
+        },
+      },
+      required: ["operation"],
+    },
+  },
+  {
     name: "memory_enrich_session",
     description:
       "LLM-enrich qualifying observations in a session and persist enriched chunks. This is a state-changing, paid-provider operation.",
@@ -1482,6 +1577,7 @@ export const WORKSTATION_TOOLS = new Set([
   "memory_signal_send",
   "memory_signal_read",
   "memory_diagnostic_followup",
+  "memory_project_relationships",
 ]);
 
 export const LLM_BACKED_TOOLS = new Set([

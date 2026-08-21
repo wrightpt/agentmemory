@@ -300,6 +300,32 @@ describe("Copilot hook scripts", () => {
     });
   });
 
+  it("session-start captures workstation mission and agent identity", async () => {
+    const result = await runHook(
+      "scripts/session-start.mjs",
+      { session_id: "workstation-session", cwd: "C:\\repo" },
+      {
+        AGENTMEMORY_INJECT_CONTEXT: "true",
+        AGENT_ID: "codex",
+        WSH_SESSION_NAME: "shared-agentmemory-codex",
+        WSH_MISSION_ID: "mission-institutional-memory",
+        WSH_MISSION_TITLE: "Cross-repo institutional memory",
+        WSH_MISSION_ROLE: "worker",
+        WSH_PARENT_SESSION: "shared-agentmemory-lead",
+      },
+    );
+
+    expect(result.requests[0]?.body).toMatchObject({
+      sessionId: "workstation-session",
+      agentId: "codex",
+      terminalSession: "shared-agentmemory-codex",
+      missionId: "mission-institutional-memory",
+      missionTitle: "Cross-repo institutional memory",
+      missionRole: "worker",
+      parentSession: "shared-agentmemory-lead",
+    });
+  });
+
   it("pre-tool-use narrows Copilot sessionId to strings", async () => {
     const result = await runHook(
       "scripts/pre-tool-use.mjs",

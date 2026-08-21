@@ -1,6 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, parse, resolve } from "node:path";
+import { basename, dirname, isAbsolute, parse, resolve } from "node:path";
+import {
+  localGitRepositoryId,
+  normalizeRepositoryRemote,
+} from "../utils/repository-identity.js";
 
 export interface ProjectContext {
   project: string;
@@ -10,6 +14,15 @@ export interface ProjectContext {
   worktree?: string;
   branch?: string;
   taskSlug?: string;
+  projectAliases?: string[];
+  canonicalRepoId?: string;
+  repoRemote?: string;
+  terminalSession?: string;
+  missionId?: string;
+  missionTitle?: string;
+  missionRole?: string;
+  parentSession?: string;
+  commitSha?: string;
 }
 
 interface ProjectFile {
@@ -19,6 +32,9 @@ interface ProjectFile {
   repoRoot?: unknown;
   scope_type?: unknown;
   scopeType?: unknown;
+  aliases?: unknown;
+  project_aliases?: unknown;
+  projectAliases?: unknown;
 }
 
 function git(cwd: string, args: string[]): string {
@@ -68,15 +84,38 @@ function readProjectFile(cwd: string, boundary?: string): { file: string; data: 
   }
 }
 
-function remoteProjectName(remote: string): string {
-  const normalized = remote.trim().replace(/\/$/, "").replace(/\.git$/, "");
-  if (!normalized) return "";
-  const tail = normalized.split(/[/:]/).filter(Boolean).at(-1);
-  return tail || "";
-}
-
 function nonEmpty(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function stringArray(...values: unknown[]): string[] {
+  const result = new Set<string>();
+  for (const value of values) {
+    if (!Array.isArray(value)) continue;
+    for (const candidate of value) {
+      const normalized = nonEmpty(candidate);
+      if (normalized) result.add(normalized);
+    }
+  }
+  return [...result].sort();
+}
+
+function workstationSessionContext(): Pick<
+  ProjectContext,
+  "terminalSession" | "missionId" | "missionTitle" | "missionRole" | "parentSession"
+> {
+  const terminalSession = nonEmpty(process.env["WSH_SESSION_NAME"]);
+  const missionId = nonEmpty(process.env["WSH_MISSION_ID"]);
+  const missionTitle = nonEmpty(process.env["WSH_MISSION_TITLE"]);
+  const missionRole = nonEmpty(process.env["WSH_MISSION_ROLE"]);
+  const parentSession = nonEmpty(process.env["WSH_PARENT_SESSION"]);
+  return {
+    ...(terminalSession ? { terminalSession } : {}),
+    ...(missionId ? { missionId } : {}),
+    ...(missionTitle ? { missionTitle } : {}),
+    ...(missionRole ? { missionRole } : {}),
+    ...(parentSession ? { parentSession } : {}),
+  };
 }
 
 export function resolveProjectContext(cwd?: string): ProjectContext {
@@ -93,12 +132,27 @@ export function resolveProjectContext(cwd?: string): ProjectContext {
       repoRoot: nonEmpty(process.env["AGENTMEMORY_REPO_ROOT"]) || rawDir,
       scopeType: nonEmpty(process.env["AGENTMEMORY_SCOPE_TYPE"]) || "directory",
       ...(taskSlug ? { taskSlug } : {}),
+      ...workstationSessionContext(),
     };
   }
   const dir = resolve(rawDir);
   const gitTop = git(dir, ["rev-parse", "--show-toplevel"]);
   const projectFile = readProjectFile(dir, gitTop || undefined);
-  const remoteName = remoteProjectName(git(dir, ["config", "--get", "remote.origin.url"]));
+  const remoteIdentity = normalizeRepositoryRemote(
+    git(dir, ["config", "--get", "remote.origin.url"]),
+  );
+  const remoteName = remoteIdentity?.canonicalRepoId.split("/").at(-1);
+  const rawGitCommonDir = gitTop ? git(dir, ["rev-parse", "--git-common-dir"]) : "";
+  const gitCommonDir = rawGitCommonDir
+    ? canonicalExistingPath(
+        isAbsolute(rawGitCommonDir)
+          ? rawGitCommonDir
+          : resolve(gitTop || dir, rawGitCommonDir),
+      )
+    : undefined;
+  const canonicalRepoId =
+    remoteIdentity?.canonicalRepoId ??
+    (gitCommonDir ? localGitRepositoryId(gitCommonDir) : undefined);
   const fileProject = projectFile
     ? nonEmpty(projectFile.data.project_id) ?? nonEmpty(projectFile.data.projectId)
     : undefined;
@@ -121,15 +175,33 @@ export function resolveProjectContext(cwd?: string): ProjectContext {
     (gitTop ? "repo" : "directory");
   const taskSlug = nonEmpty(process.env["AGENTMEMORY_TASK_SLUG"]);
   const branch = gitTop ? git(dir, ["branch", "--show-current"]) : "";
+  const commitSha = gitTop ? git(dir, ["rev-parse", "HEAD"]) : "";
+  const project = (explicitProject ?? fileProject ?? remoteName) || basename(gitTop || dir);
+  const aliases = projectFile
+    ? stringArray(
+        projectFile.data.aliases,
+        projectFile.data.project_aliases,
+        projectFile.data.projectAliases,
+      )
+    : [];
+  if (fileProject && fileProject !== project) aliases.push(fileProject);
+  const projectAliases = [...new Set(aliases.filter((alias) => alias !== project))].sort();
 
   return {
-    project: (explicitProject ?? fileProject ?? remoteName) || basename(gitTop || dir),
+    project,
     cwd: dir,
     repoRoot,
     scopeType,
-    ...(gitTop ? { worktree: gitTop } : {}),
+    ...(gitTop ? { worktree: canonicalExistingPath(gitTop) } : {}),
     ...(branch ? { branch } : {}),
     ...(taskSlug ? { taskSlug } : {}),
+    ...(projectAliases.length > 0 ? { projectAliases } : {}),
+    ...(canonicalRepoId ? { canonicalRepoId } : {}),
+    ...(remoteIdentity ? { repoRemote: remoteIdentity.repoRemote } : {}),
+    ...(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(commitSha)
+      ? { commitSha: commitSha.toLowerCase() }
+      : {}),
+    ...workstationSessionContext(),
   };
 }
 

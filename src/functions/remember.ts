@@ -1,14 +1,21 @@
 import type { ISdk } from "iii-sdk";
-import type { Memory } from "../types.js";
+import type { Memory, Session } from "../types.js";
 import { KV, generateId, jaccardSimilarity } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { memoryToObservation } from "../state/memory-utils.js";
 import { deleteAccessLog } from "./access-tracker.js";
 import { recordAudit } from "./audit.js";
-import { getSearchIndex, vectorIndexAddGuarded, vectorIndexRemove, flushIndexSave } from "./search.js";
+import {
+  flushIndexSave,
+  getSearchIndex,
+  scheduleIndexSave,
+  vectorIndexAddGuarded,
+  vectorIndexRemove,
+} from "./search.js";
 import { getAgentId } from "../config.js";
 import { logger } from "../logger.js";
+import { captureRetrievalAttribution } from "../state/provenance.js";
 
 export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction("mem::remember", 
@@ -21,6 +28,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       sourceObservationIds?: string[];
       agentId?: string;
       project?: string;
+      sessionId?: string;
     }) => {
       if (
         !data.content ||
@@ -54,10 +62,21 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
       // Normalize project early so every subsequent comparison and storage
       // operation uses the same cleaned value. Raw data.project must not be
       // referenced below this point.
+      const sessionId =
+        typeof data.sessionId === "string" && data.sessionId.trim().length > 0
+          ? data.sessionId.trim().slice(0, 256)
+          : undefined;
+      const sourceSession = sessionId
+        ? await kv.get<Session>(KV.sessions, sessionId).catch(() => null)
+        : null;
       const project =
         typeof data.project === "string" && data.project.trim().length > 0
           ? data.project.trim()
-          : undefined;
+          : sourceSession?.project;
+      const attribution = captureRetrievalAttribution({
+        ...(sourceSession ?? {}),
+        ...(project ? { project } : {}),
+      });
 
       return withKeyedLock("mem:remember", async () => {
         const existingMemories = await kv.list<Memory>(KV.memories);
@@ -67,18 +86,39 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         const lowerContent = data.content.toLowerCase();
         for (const existing of existingMemories) {
           if (existing.isLatest === false) continue;
-          // Never supersede a memory that belongs to a different project.
-          // Both sides must have an explicit project for the guard to engage;
-          // an unscoped memory (legacy, no project field) is treated as a
-          // wildcard so pre-existing data is not stranded.
-          if (project && existing.project && existing.project !== project) {
-            continue;
-          }
           const similarity = jaccardSimilarity(
             lowerContent,
             existing.content.toLowerCase(),
           );
           if (similarity > 0.7) {
+            let existingRepoId = existing.attribution?.canonicalRepoId;
+            if (!existingRepoId && existing.sessionIds?.length) {
+              for (const existingSessionId of existing.sessionIds) {
+                const existingSession = await kv
+                  .get<Session>(KV.sessions, existingSessionId)
+                  .catch(() => null);
+                if (existingSession?.canonicalRepoId) {
+                  existingRepoId = existingSession.canonicalRepoId;
+                  break;
+                }
+              }
+            }
+            const repoId = attribution?.canonicalRepoId;
+            if (repoId || existingRepoId) {
+              // A canonical identity on only one side is not enough evidence
+              // to mutate the other record. This preserves ambiguous legacy
+              // memories while preventing same-basename repositories from
+              // superseding one another.
+              if (!repoId || !existingRepoId || repoId !== existingRepoId) {
+                continue;
+              }
+            } else if (
+              project &&
+              existing.project &&
+              existing.project !== project
+            ) {
+              continue;
+            }
             supersededId = existing.id;
             supersededVersion = existing.version ?? 1;
             supersededMemory = existing;
@@ -93,7 +133,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         const callAgentId =
           typeof data.agentId === "string" && data.agentId.trim().length > 0
             ? data.agentId.trim().slice(0, 128)
-            : getAgentId();
+            : sourceSession?.agentId ?? getAgentId();
 
         const memory: Memory = {
           id: generateId("mem"),
@@ -104,7 +144,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           content: data.content,
           concepts: data.concepts || [],
           files: data.files || [],
-          sessionIds: [],
+          sessionIds: sessionId ? [sessionId] : [],
           strength: 7,
           version: supersededId ? supersededVersion + 1 : 1,
           parentId: supersededId,
@@ -115,6 +155,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
           isLatest: true,
           ...(callAgentId ? { agentId: callAgentId } : {}),
           ...(project !== undefined && { project }),
+          ...(attribution ? { attribution } : {}),
         };
 
         if (data.ttlDays && typeof data.ttlDays === "number" && data.ttlDays > 0) {
@@ -124,6 +165,8 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         if (supersededMemory) {
           supersededMemory.isLatest = false;
           await kv.set(KV.memories, supersededMemory.id, supersededMemory);
+          getSearchIndex().remove(supersededMemory.id);
+          await vectorIndexRemove(supersededMemory.id);
         }
         await kv.set(KV.memories, memory.id, memory);
 
@@ -134,6 +177,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         // restart-time rebuild will pick the memory up either way.
         try {
           getSearchIndex().add(memoryToObservation(memory));
+          scheduleIndexSave();
         } catch (err) {
           logger.warn("Failed to index saved memory into BM25", {
             memId: memory.id,
@@ -186,7 +230,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
         }
         await deleteAccessLog(kv, data.memoryId);
         getSearchIndex().remove(data.memoryId);
-        vectorIndexRemove(data.memoryId);
+        await vectorIndexRemove(data.memoryId);
         deletedMemoryIds.push(data.memoryId);
         deleted++;
       }
@@ -207,7 +251,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             await decrementImageRef(kv, sdk, obs.imageRef);
           }
           getSearchIndex().remove(obsId);
-          vectorIndexRemove(obsId);
+          await vectorIndexRemove(obsId);
           deletedObservationIds.push(obsId);
           deleted++;
         }
@@ -228,7 +272,7 @@ export function registerRememberFunction(sdk: ISdk, kv: StateKV): void {
             await decrementImageRef(kv, sdk, obs.imageRef);
           }
           getSearchIndex().remove(obs.id);
-          vectorIndexRemove(obs.id);
+          await vectorIndexRemove(obs.id);
           deletedObservationIds.push(obs.id);
           deleted++;
         }

@@ -18,8 +18,11 @@ import type {
   ActionEvent,
   AuditEntry,
   Lesson,
+  ProjectRelationship,
 } from "../src/types.js";
 import { parseImportedLesson } from "../src/functions/lesson-model.js";
+import { projectRelationshipId } from "../src/functions/project-relationships.js";
+import { KV } from "../src/state/schema.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -379,7 +382,33 @@ describe("Export/Import Functions", () => {
   });
 
   it("export then import round-trip preserves data", async () => {
+    const relationship: ProjectRelationship = {
+      id: projectRelationshipId(
+        "wrightpt/trading-system",
+        "orchestrates_through",
+        "wrightpt/workstation-shell",
+      ),
+      sourceRepoId: "wrightpt/trading-system",
+      targetRepoId: "wrightpt/workstation-shell",
+      relationType: "orchestrates_through",
+      sourceAliases: ["trading-system"],
+      targetAliases: ["workstation-shell"],
+      provenance: [
+        {
+          kind: "registry",
+          source: "projects.yaml",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+          recordedBy: "codex",
+        },
+      ],
+      reason: "Workstation-shell owns process launch.",
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T12:00:00.000Z",
+      revision: 1,
+    };
+    await kv.set(KV.projectRelationships, relationship.id, relationship);
     const exported = (await sdk.trigger("mem::export", {})) as ExportData;
+    expect(exported.projectRelationships).toEqual([relationship]);
 
     const freshKv = mockKV();
     const freshSdk = mockSdk();
@@ -393,12 +422,14 @@ describe("Export/Import Functions", () => {
       sessions: number;
       observations: number;
       memories: number;
+      projectRelationships: number;
     };
 
     expect(importResult.success).toBe(true);
     expect(importResult.sessions).toBe(1);
     expect(importResult.observations).toBe(1);
     expect(importResult.memories).toBe(1);
+    expect(importResult.projectRelationships).toBe(1);
 
     const reExported = (await freshSdk.trigger(
       "mem::export",
@@ -406,6 +437,395 @@ describe("Export/Import Functions", () => {
     )) as ExportData;
     expect(reExported.sessions.length).toBe(exported.sessions.length);
     expect(reExported.memories.length).toBe(exported.memories.length);
+    expect(reExported.projectRelationships).toEqual([relationship]);
+  });
+
+  it("validates every relationship before replace deletes existing data", async () => {
+    const existingRelationship: ProjectRelationship = {
+      id: projectRelationshipId(
+        "wrightpt/workstation-shell",
+        "uses",
+        "wrightpt/agentmemory",
+      ),
+      sourceRepoId: "wrightpt/workstation-shell",
+      targetRepoId: "wrightpt/agentmemory",
+      relationType: "uses",
+      sourceAliases: ["workstation-shell"],
+      targetAliases: ["agentmemory"],
+      provenance: [
+        {
+          kind: "registry",
+          source: "projects.yaml",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T12:00:00.000Z",
+      revision: 1,
+    };
+    await kv.set(
+      KV.projectRelationships,
+      existingRelationship.id,
+      existingRelationship,
+    );
+    const invalidRelationship = {
+      ...existingRelationship,
+      id: "prrel_import_can_choose_any_id",
+    };
+    const exportData: ExportData = {
+      version: "0.9.27",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      projectRelationships: [invalidRelationship],
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "replace",
+    })) as { success: boolean; error: string };
+
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining("deterministic relationship ID"),
+    });
+    expect(await kv.get("mem:sessions", testSession.id)).toEqual(testSession);
+    expect(
+      await kv.get(KV.projectRelationships, existingRelationship.id),
+    ).toEqual(existingRelationship);
+  });
+
+  it("fails closed before replace mutation when relationship enumeration fails", async () => {
+    const relationship: ProjectRelationship = {
+      id: projectRelationshipId("wrightpt/shell", "uses", "wrightpt/memory"),
+      sourceRepoId: "wrightpt/shell",
+      targetRepoId: "wrightpt/memory",
+      relationType: "uses",
+      sourceAliases: [],
+      targetAliases: [],
+      provenance: [
+        {
+          kind: "registry",
+          source: "projects.yaml",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T12:00:00.000Z",
+      revision: 1,
+    };
+    await kv.set(KV.projectRelationships, relationship.id, relationship);
+    kv.failNextList(
+      KV.projectRelationships,
+      `injected authoritative relationship read failure ${"x".repeat(4096)}`,
+    );
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData: {
+        version: "0.9.27",
+        exportedAt: new Date().toISOString(),
+        sessions: [],
+        observations: {},
+        memories: [],
+        summaries: [],
+        projectRelationships: [],
+      } satisfies ExportData,
+      strategy: "replace",
+    })) as { success: boolean; error: string };
+
+    expect(result).toMatchObject({
+      success: false,
+      error: expect.stringContaining("replace failed closed"),
+    });
+    expect(result.error.length).toBeLessThan(500);
+    expect(await kv.get(KV.sessions, testSession.id)).toEqual(testSession);
+    expect(await kv.get(KV.projectRelationships, relationship.id)).toEqual(
+      relationship,
+    );
+  });
+
+  it("rejects duplicate canonical relationship identities as one batch", async () => {
+    const canonicalId = projectRelationshipId(
+      "wrightpt/workstation-shell",
+      "uses",
+      "wrightpt/agentmemory",
+    );
+    const relationship: ProjectRelationship = {
+      id: canonicalId,
+      sourceRepoId: "wrightpt/workstation-shell",
+      targetRepoId: "wrightpt/agentmemory",
+      relationType: "uses",
+      sourceAliases: [],
+      targetAliases: [],
+      provenance: [
+        {
+          kind: "import",
+          source: "fixture",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T12:00:00.000Z",
+      revision: 1,
+    };
+    const exportData: ExportData = {
+      version: "0.9.27",
+      exportedAt: new Date().toISOString(),
+      sessions: [],
+      observations: {},
+      memories: [],
+      summaries: [],
+      projectRelationships: [relationship, { ...relationship }],
+    };
+
+    const result = (await sdk.trigger("mem::import", {
+      exportData,
+      strategy: "merge",
+    })) as { success: boolean; error: string };
+
+    expect(result).toEqual({
+      success: false,
+      error: `Duplicate project relationship: ${canonicalId}`,
+    });
+    expect(await kv.list(KV.projectRelationships)).toEqual([]);
+  });
+
+  it("keeps relationship revisions monotonic for merge while preserving skip and replace", async () => {
+    const id = projectRelationshipId(
+      "wrightpt/workstation-shell",
+      "uses",
+      "wrightpt/agentmemory",
+    );
+    const existing: ProjectRelationship = {
+      id,
+      sourceRepoId: "wrightpt/workstation-shell",
+      targetRepoId: "wrightpt/agentmemory",
+      relationType: "uses",
+      sourceAliases: [],
+      targetAliases: [],
+      provenance: [
+        {
+          kind: "registry",
+          source: "projects.yaml",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+        },
+      ],
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T14:00:00.000Z",
+      revision: 3,
+    };
+    await kv.set(KV.projectRelationships, id, existing);
+    const importRelationship = async (
+      relationship: ProjectRelationship,
+      strategy: "merge" | "replace" | "skip",
+    ) =>
+      sdk.trigger("mem::import", {
+        exportData: {
+          version: "0.9.27",
+          exportedAt: new Date().toISOString(),
+          sessions: [],
+          observations: {},
+          memories: [],
+          summaries: [],
+          projectRelationships: [relationship],
+        } satisfies ExportData,
+        strategy,
+      });
+
+    const stale = {
+      ...existing,
+      updatedAt: "2026-08-21T13:00:00.000Z",
+      revision: 2,
+    };
+    expect(await importRelationship(stale, "merge")).toMatchObject({
+      success: false,
+      error: expect.stringContaining("older than existing revision 3"),
+    });
+    expect(await kv.get(KV.projectRelationships, id)).toEqual(existing);
+
+    expect(
+      await importRelationship(
+        { ...existing, reason: "same revision, different snapshot" },
+        "merge",
+      ),
+    ).toMatchObject({
+      success: false,
+      error: expect.stringContaining("divergent snapshot content"),
+    });
+    expect(await kv.get(KV.projectRelationships, id)).toEqual(existing);
+
+    const forward = {
+      ...existing,
+      reason: "new registry evidence",
+      updatedAt: "2026-08-21T15:00:00.000Z",
+      revision: 4,
+    };
+    expect(await importRelationship(forward, "merge")).toMatchObject({
+      success: true,
+      projectRelationships: 1,
+    });
+    expect(await kv.get(KV.projectRelationships, id)).toEqual(forward);
+
+    expect(await importRelationship(stale, "skip")).toMatchObject({
+      success: true,
+      projectRelationships: 0,
+      skipped: expect.any(Number),
+    });
+    expect(await kv.get(KV.projectRelationships, id)).toEqual(forward);
+
+    const restored = {
+      ...existing,
+      updatedAt: existing.createdAt,
+      revision: 1,
+    };
+    expect(await importRelationship(restored, "replace")).toMatchObject({
+      success: true,
+      projectRelationships: 1,
+    });
+    expect(await kv.get(KV.projectRelationships, id)).toEqual(restored);
+  });
+
+  it("rejects regressive relationship snapshots before writing imported lessons", async () => {
+    const id = projectRelationshipId(
+      "wrightpt/workstation-shell",
+      "uses",
+      "wrightpt/agentmemory",
+    );
+    const existing: ProjectRelationship = {
+      id,
+      sourceRepoId: "wrightpt/workstation-shell",
+      targetRepoId: "wrightpt/agentmemory",
+      relationType: "uses",
+      sourceAliases: ["workstation-shell"],
+      targetAliases: ["agentmemory"],
+      provenance: [
+        {
+          kind: "registry",
+          source: "projects.yaml",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+        },
+      ],
+      reason: "The shell consumes the shared memory service.",
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T14:00:00.000Z",
+      revision: 3,
+    };
+    await kv.set(KV.projectRelationships, id, existing);
+
+    const lesson = structuredLesson("relationship-preflight-is-atomic");
+    const forwardBase = {
+      ...existing,
+      updatedAt: "2026-08-21T15:00:00.000Z",
+      revision: 4,
+    };
+    const regressions: Array<{
+      relationship: ProjectRelationship;
+      error: string;
+    }> = [
+      {
+        relationship: { ...forwardBase, sourceAliases: [] },
+        error: "cannot remove source alias",
+      },
+      {
+        relationship: { ...forwardBase, targetAliases: [] },
+        error: "cannot remove target alias",
+      },
+      {
+        relationship: {
+          ...forwardBase,
+          provenance: [
+            {
+              kind: "import",
+              source: "replacement-export.json",
+              recordedAt: "2026-08-21T15:00:00.000Z",
+            },
+          ],
+        },
+        error: "cannot remove or rewrite existing provenance",
+      },
+      {
+        relationship: { ...forwardBase, reason: undefined },
+        error: "cannot remove existing reason",
+      },
+    ];
+
+    for (const regression of regressions) {
+      const result = await sdk.trigger("mem::import", {
+        exportData: {
+          ...emptyExport([lesson]),
+          projectRelationships: [regression.relationship],
+        },
+        strategy: "merge",
+      });
+
+      expect(result).toMatchObject({
+        success: false,
+        error: expect.stringContaining(regression.error),
+      });
+      expect(await kv.get(KV.projectRelationships, id)).toEqual(existing);
+      expect(await kv.get(KV.lessons, lesson.id)).toBeNull();
+    }
+  });
+
+  it("accepts a forward relationship snapshot that retains history and adds evidence", async () => {
+    const id = projectRelationshipId(
+      "wrightpt/workstation-shell",
+      "uses",
+      "wrightpt/agentmemory",
+    );
+    const existing: ProjectRelationship = {
+      id,
+      sourceRepoId: "wrightpt/workstation-shell",
+      targetRepoId: "wrightpt/agentmemory",
+      relationType: "uses",
+      sourceAliases: ["workstation-shell"],
+      targetAliases: ["agentmemory"],
+      provenance: [
+        {
+          kind: "registry",
+          source: "projects.yaml",
+          recordedAt: "2026-08-21T12:00:00.000Z",
+        },
+      ],
+      reason: "The shell consumes the shared memory service.",
+      createdAt: "2026-08-21T12:00:00.000Z",
+      updatedAt: "2026-08-21T14:00:00.000Z",
+      revision: 3,
+    };
+    const forward: ProjectRelationship = {
+      ...existing,
+      sourceAliases: ["shell", "workstation-shell"],
+      targetAliases: ["agentmemory", "memory"],
+      provenance: [
+        ...existing.provenance,
+        {
+          kind: "manual",
+          source: "architecture-review",
+          recordedAt: "2026-08-21T15:00:00.000Z",
+          recordedBy: "codex",
+        },
+      ],
+      reason: "The shell consumes AgentMemory through the shared service.",
+      updatedAt: "2026-08-21T15:00:00.000Z",
+      revision: 4,
+    };
+    await kv.set(KV.projectRelationships, id, existing);
+
+    const result = await sdk.trigger("mem::import", {
+      exportData: {
+        ...emptyExport(),
+        projectRelationships: [forward],
+      },
+      strategy: "merge",
+    });
+
+    expect(result).toMatchObject({
+      success: true,
+      projectRelationships: 1,
+    });
+    expect(await kv.get(KV.projectRelationships, id)).toEqual(forward);
   });
 
   it("exports legacy lessons with normalized defaults without rewriting live state", async () => {

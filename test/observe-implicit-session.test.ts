@@ -71,6 +71,14 @@ describe("observe implicit session create (#638)", () => {
       sessionId: "ses_opencode_abc",
       project: "/home/user/myrepo",
       cwd: "/home/user/myrepo",
+      canonicalRepoId: "owner/myrepo",
+      repoRemote: "git@github.com:Owner/MyRepo.git",
+      terminalSession: "shared-myrepo-codex",
+      missionId: "mission-myrepo",
+      missionTitle: "Ship myrepo",
+      missionRole: "worker",
+      parentSession: "shared-myrepo-lead",
+      commitSha: "B".repeat(40),
       hookType: "prompt_submit",
       timestamp: new Date().toISOString(),
       data: { prompt: "ship the helm chart" },
@@ -88,6 +96,26 @@ describe("observe implicit session create (#638)", () => {
     expect(session.status).toBe("active");
     expect(session.observationCount).toBe(1);
     expect(session.firstPrompt).toBe("ship the helm chart");
+    expect(session.canonicalRepoId).toBe("owner/myrepo");
+    expect(session.repoRemote).toBe("ssh://github.com/owner/myrepo");
+    expect(session.terminalSession).toBe("shared-myrepo-codex");
+    expect(session.missionId).toBe("mission-myrepo");
+    expect(session.missionTitle).toBe("Ship myrepo");
+    expect(session.missionRole).toBe("worker");
+    expect(session.parentSession).toBe("shared-myrepo-lead");
+    expect(session.commitSha).toBe("b".repeat(40));
+
+    const observation = kv.store
+      .get("mem:obs:ses_opencode_abc")!
+      .get(result.observationId) as Record<string, unknown>;
+    expect(observation.attribution).toMatchObject({
+      project: "/home/user/myrepo",
+      canonicalRepoId: "owner/myrepo",
+      repoRemote: "ssh://github.com/owner/myrepo",
+      terminalSession: "shared-myrepo-codex",
+      missionId: "mission-myrepo",
+      commitSha: "b".repeat(40),
+    });
   });
 
   it("does not implicit-create when project+cwd missing (test-payload back-compat)", async () => {
@@ -133,6 +161,15 @@ describe("observe implicit session create (#638)", () => {
       worktree: "/different/worktree",
       branch: "feature/context",
       taskSlug: "context-refresh",
+      projectAliases: ["myrepo-legacy"],
+      canonicalRepoId: "owner/myrepo",
+      repoRemote: "https://github.com/Owner/MyRepo.git",
+      terminalSession: "shared-myrepo-codex",
+      missionId: "mission-myrepo",
+      missionTitle: "Refresh context",
+      missionRole: "worker",
+      parentSession: "shared-myrepo-lead",
+      commitSha: "C".repeat(40),
       hookType: "post_tool_use",
       timestamp: new Date().toISOString(),
       data: { tool_name: "Read" },
@@ -145,7 +182,15 @@ describe("observe implicit session create (#638)", () => {
     expect(session.worktree).toBe("/different/worktree");
     expect(session.branch).toBe("feature/context");
     expect(session.taskSlug).toBe("context-refresh");
-    expect(session.projectAliases).toEqual(["/orig/project"]);
+    expect(session.projectAliases).toEqual(["/orig/project", "myrepo-legacy"]);
+    expect(session.canonicalRepoId).toBe("owner/myrepo");
+    expect(session.repoRemote).toBe("https://github.com/owner/myrepo");
+    expect(session.terminalSession).toBe("shared-myrepo-codex");
+    expect(session.missionId).toBe("mission-myrepo");
+    expect(session.missionTitle).toBe("Refresh context");
+    expect(session.missionRole).toBe("worker");
+    expect(session.parentSession).toBe("shared-myrepo-lead");
+    expect(session.commitSha).toBe("c".repeat(40));
     expect(session.firstPrompt).toBe("original first prompt");
     // Counter bumped, updatedAt refreshed
     expect(session.observationCount).toBe(8);

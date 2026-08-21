@@ -62,7 +62,11 @@ async function main() {
   const init: RequestInit = {
     method: "POST",
     headers: authHeaders(),
-    body: JSON.stringify({ sessionId, ...context }),
+    body: JSON.stringify({
+      sessionId,
+      ...context,
+      ...(AGENT_ID.trim() ? { agentId: AGENT_ID.trim() } : {}),
+    }),
   };
 
   if (!INJECT_CONTEXT) {

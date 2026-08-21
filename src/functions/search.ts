@@ -1,17 +1,36 @@
 import type { ISdk } from 'iii-sdk'
-import type { CompactSearchResult, CompressedObservation, Memory, SearchResult, Session } from '../types.js'
+import type {
+  CompactSearchResult,
+  CompressedObservation,
+  Memory,
+  RetrievalProvenance,
+  SearchResult,
+  Session,
+} from '../types.js'
 import { KV } from '../state/schema.js'
 import { StateKV } from '../state/kv.js'
 import { SearchIndex } from '../state/search-index.js'
-import { VectorIndex } from '../state/vector-index.js'
+import type { VectorStore } from '../state/vector-store.js'
 import type { EmbeddingProvider } from '../types.js'
 import { memoryToObservation } from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
+import { shouldSemanticallyIndexObservation } from "../state/indexing-policy.js";
+import {
+  compactRetrievalProvenance,
+  publicRetrievalObservation,
+  resolveRetrievalProvenance,
+} from "../state/provenance.js";
+
+type SearchResultWithProvenance = Omit<SearchResult, "sessionId"> & {
+  /** Public source session. Omitted for multi-session durable memories. */
+  sessionId?: string;
+  provenance: RetrievalProvenance;
+};
 
 let index: SearchIndex | null = null
-let vectorIndex: VectorIndex | null = null
+let vectorStore: VectorStore | null = null
 let currentEmbeddingProvider: EmbeddingProvider | null = null
 
 export function getSearchIndex(): SearchIndex {
@@ -19,12 +38,22 @@ export function getSearchIndex(): SearchIndex {
   return index
 }
 
-export function setVectorIndex(idx: VectorIndex | null): void {
-  vectorIndex = idx
+export function setVectorStore(store: VectorStore | null): void {
+  vectorStore = store
 }
 
-export function getVectorIndex(): VectorIndex | null {
-  return vectorIndex
+export function getVectorStore(): VectorStore | null {
+  return vectorStore
+}
+
+// Backward-compatible singleton accessors. New callers should use the
+// VectorStore names so they do not couple themselves to the local index class.
+export function setVectorIndex(store: VectorStore | null): void {
+  setVectorStore(store)
+}
+
+export function getVectorIndex(): VectorStore | null {
+  return getVectorStore()
 }
 
 export function setEmbeddingProvider(provider: EmbeddingProvider | null): void {
@@ -35,8 +64,22 @@ export function getEmbeddingProvider(): EmbeddingProvider | null {
   return currentEmbeddingProvider
 }
 
-export function vectorIndexRemove(id: string): void {
-  vectorIndex?.remove(id);
+export async function vectorIndexRemove(id: string): Promise<boolean> {
+  const store = vectorStore;
+  if (!store) return false;
+  try {
+    await store.remove(id);
+    return true;
+  } catch (err) {
+    // The durable KV deletion has already committed at every call site. Keep
+    // that deletion authoritative and allow the BM25 snapshot flush to run;
+    // hydration also filters any stale remote-vector hit whose row is gone.
+    logger.warn("vector-store remove failed", {
+      id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
 }
 
 // Persistence sync hook. Without this, index removals only live in
@@ -97,7 +140,7 @@ export async function vectorIndexAddGuarded(
   text: string,
   context: { kind: "memory" | "observation" | "synthetic"; logId: string },
 ): Promise<boolean> {
-  const vi = vectorIndex
+  const vi = vectorStore
   const ep = currentEmbeddingProvider
   if (!vi || !ep) return false
   try {
@@ -112,7 +155,8 @@ export async function vectorIndexAddGuarded(
       })
       return false
     }
-    vi.add(id, sessionId, embedding)
+    await vi.add(id, sessionId, embedding)
+    scheduleIndexSave()
     return true
   } catch (err) {
     logger.warn("vector-index add: embed failed — skipping", {
@@ -143,7 +187,7 @@ export async function vectorIndexAddBatchGuarded(
     context: { kind: "memory" | "observation" | "synthetic"; logId: string }
   }>,
 ): Promise<{ ok: number; fail: number }> {
-  const vi = vectorIndex
+  const vi = vectorStore
   const ep = currentEmbeddingProvider
   if (!vi || !ep || items.length === 0) return { ok: 0, fail: 0 }
 
@@ -188,7 +232,7 @@ export async function vectorIndexAddBatchGuarded(
       continue
     }
     try {
-      vi.add(item.id, item.sessionId, embedding)
+      await vi.add(item.id, item.sessionId, embedding)
       ok++
     } catch (err) {
       logger.warn("vector-index add batch: index write failed — skipping item", {
@@ -226,7 +270,7 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   // symmetric concern — memories/observations deleted between runs
   // would leave orphan embeddings here forever. Clear both before the
   // repopulation loops run, so BM25 and vector stay in sync.
-  vectorIndex?.clear()
+  await vectorStore?.clear()
 
   const batchSize = getRebuildEmbedBatchSize()
   // Accumulator for the batched embed flush. BM25 add is synchronous and
@@ -303,12 +347,14 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
     for (const obs of observations) {
       if (obs.title && obs.narrative) {
         idx.add(obs)
-        await enqueue({
-          id: obs.id,
-          sessionId: obs.sessionId,
-          text: obs.title + ' ' + obs.narrative,
-          context: { kind: "observation", logId: obs.id },
-        })
+        if (shouldSemanticallyIndexObservation(obs)) {
+          await enqueue({
+            id: obs.id,
+            sessionId: obs.sessionId,
+            text: obs.title + ' ' + obs.narrative,
+            context: { kind: "observation", logId: obs.id },
+          })
+        }
         count++
       }
     }
@@ -487,27 +533,38 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
           const obs = await kv
             .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
             .catch(() => null)
-          if (obs) return obs
+          if (obs) return { observation: obs, sourceMemory: null }
           const mem = await kv
             .get<Memory>(KV.memories, r.obsId)
             .catch(() => null)
-          return mem ? memoryToObservation(mem) : null
+          return mem
+            ? { observation: memoryToObservation(mem), sourceMemory: mem }
+            : null
         })
       )
-      const enriched: SearchResult[] = []
+      const enriched: SearchResultWithProvenance[] = []
       for (let i = 0; i < candidates.length; i++) {
-        const obs = obsResults[i]
-        if (!obs) continue
+        const loaded = obsResults[i]
+        if (!loaded) continue
+        const obs = loaded.observation
         // #817: enforce agent-scope after the observation/memory is
         // loaded. The BM25 index doesn't carry agentId so the filter
         // happens post-lookup. Wildcard ("*") and no-isolation paths
         // resolved filterAgentId=undefined upstream and pass through.
         if (filterAgentId !== undefined && obs.agentId !== filterAgentId) continue
         if (enriched.length >= effectiveLimit) break
+        const provenance = await resolveRetrievalProvenance(
+          kv,
+          obs,
+          loaded.sourceMemory,
+        )
         enriched.push({
-          observation: obs,
+          observation: publicRetrievalObservation(obs, provenance),
           score: candidates[i].score,
-          sessionId: candidates[i].sessionId,
+          ...(provenance.sessionId
+            ? { sessionId: provenance.sessionId }
+            : {}),
+          provenance,
         })
       }
 
@@ -541,11 +598,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       if (format === 'compact') {
         const compactResults: CompactSearchResult[] = enriched.map((r) => ({
           obsId: r.observation.id,
-          sessionId: r.sessionId,
+          ...(r.provenance.sessionId
+            ? { sessionId: r.provenance.sessionId }
+            : {}),
           title: r.observation.title,
           type: r.observation.type,
           score: r.score,
           timestamp: r.observation.timestamp,
+          provenanceAvailable: true,
+          provenance: compactRetrievalProvenance(r.provenance),
         }))
         const packed = applyTokenBudget(compactResults)
         return {
@@ -560,11 +621,15 @@ export function registerSearchFunction(sdk: ISdk, kv: StateKV): void {
       if (format === 'narrative') {
         const narrativeResults = enriched.map((r) => ({
           obsId: r.observation.id,
-          sessionId: r.sessionId,
+          ...(r.provenance.sessionId
+            ? { sessionId: r.provenance.sessionId }
+            : {}),
           title: r.observation.title,
           narrative: r.observation.narrative,
           score: r.score,
           timestamp: r.observation.timestamp,
+          provenanceAvailable: true,
+          provenance: compactRetrievalProvenance(r.provenance),
         }))
         const packed = applyTokenBudget(narrativeResults)
         const text = packed.items

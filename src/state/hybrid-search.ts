@@ -1,11 +1,12 @@
 import { SearchIndex } from "./search-index.js";
-import { VectorIndex } from "./vector-index.js";
+import type { VectorSearchResult, VectorStore } from "./vector-store.js";
 import type {
   EmbeddingProvider,
   HybridSearchResult,
   CompressedObservation,
   Memory,
   QueryExpansion,
+  RetrievalProvenance,
 } from "../types.js";
 import { memoryToObservation } from "./memory-utils.js";
 import type { StateKV } from "./kv.js";
@@ -16,15 +17,36 @@ import {
 } from "../functions/graph-retrieval.js";
 import { extractEntitiesFromQuery } from "../functions/query-expansion.js";
 import { rerank } from "./reranker.js";
+import {
+  applyRetrievalPolicy,
+  type RetrievalPolicyContext,
+} from "./retrieval-policy.js";
+import { resolveRetrievalProvenance } from "./provenance.js";
 
 const RRF_K = 60;
+const AUTHORIZATION_BATCH_SIZE = 32;
+
+type CandidateReference = {
+  obsId: string;
+  sessionId: string;
+};
+
+type ResolvedCandidateSource = {
+  observation: CompressedObservation;
+  provenance: RetrievalProvenance;
+};
+
+type CandidateSourceCache = Map<
+  string,
+  Promise<ResolvedCandidateSource | null>
+>;
 
 export class HybridSearch {
   private graphRetrieval: GraphRetrieval;
 
   constructor(
     private bm25: SearchIndex,
-    private vector: VectorIndex | null,
+    private vector: VectorStore | null,
     private embeddingProvider: EmbeddingProvider | null,
     private kv: StateKV,
     private bm25Weight = 0.4,
@@ -35,14 +57,28 @@ export class HybridSearch {
     this.graphRetrieval = new GraphRetrieval(kv);
   }
 
-  async search(query: string, limit = 20): Promise<HybridSearchResult[]> {
-    return this.tripleStreamSearch(query, limit);
+  async search(
+    query: string,
+    limit = 20,
+    context: RetrievalPolicyContext = {},
+  ): Promise<HybridSearchResult[]> {
+    const sourceCache = context.filterAgentId === undefined
+      ? undefined
+      : new Map<string, Promise<ResolvedCandidateSource | null>>();
+    return this.tripleStreamSearch(
+      query,
+      limit,
+      undefined,
+      context,
+      sourceCache,
+    );
   }
 
   async searchWithExpansion(
     query: string,
     limit: number,
     expansion: QueryExpansion,
+    context: RetrievalPolicyContext = {},
   ): Promise<HybridSearchResult[]> {
     const allQueries = [
       query,
@@ -54,9 +90,14 @@ export class HybridSearch {
       ...expansion.entityExtractions,
       ...extractEntitiesFromQuery(query),
     ];
+    const sourceCache = context.filterAgentId === undefined
+      ? undefined
+      : new Map<string, Promise<ResolvedCandidateSource | null>>();
 
     const resultSets = await Promise.all(
-      allQueries.map((q) => this.tripleStreamSearch(q, limit, allEntities)),
+      allQueries.map((q) =>
+        this.tripleStreamSearch(q, limit, allEntities, context, sourceCache),
+      ),
     );
 
     const merged = new Map<string, HybridSearchResult>();
@@ -70,7 +111,11 @@ export class HybridSearch {
     }
 
     return Array.from(merged.values())
-      .sort((a, b) => b.combinedScore - a.combinedScore)
+      .sort(
+        (a, b) =>
+          b.combinedScore - a.combinedScore ||
+          a.observation.id.localeCompare(b.observation.id),
+      )
       .slice(0, limit);
   }
 
@@ -78,20 +123,32 @@ export class HybridSearch {
     query: string,
     limit: number,
     entityHints?: string[],
+    context: RetrievalPolicyContext = {},
+    sourceCache?: CandidateSourceCache,
   ): Promise<HybridSearchResult[]> {
-    const bm25Results = this.bm25.search(query, limit * 2);
+    const filterAgentId = context.filterAgentId;
+    const requiresAuthorization = filterAgentId !== undefined;
+    const authorizationCache = requiresAuthorization
+      ? sourceCache ?? new Map<string, Promise<ResolvedCandidateSource | null>>()
+      : undefined;
+    const shouldOverFetch = Boolean(
+      context.currentMissionId ||
+        context.currentRepoId ||
+        context.currentProject ||
+        requiresAuthorization,
+    );
+    const candidateLimit = shouldOverFetch
+      ? Math.min(Math.max(limit * 5, 100), 500)
+      : limit;
+    let bm25Results = this.bm25.search(query, candidateLimit * 2);
 
-    let vectorResults: Array<{
-      obsId: string;
-      sessionId: string;
-      score: number;
-    }> = [];
-    let queryEmbedding: Float32Array | null = null;
-
+    let vectorResults: VectorSearchResult[] = [];
     if (this.vector && this.embeddingProvider && this.vector.size > 0) {
       try {
-        queryEmbedding = await this.embeddingProvider.embed(query);
-        vectorResults = this.vector.search(queryEmbedding, limit * 2);
+        const queryEmbedding = await this.embeddingProvider.embed(query);
+        vectorResults = await this.vector.search(queryEmbedding, {
+          limit: candidateLimit * 2,
+        });
       } catch {
         // fall through to BM25-only
       }
@@ -107,18 +164,45 @@ export class HybridSearch {
         graphResults = await this.graphRetrieval.searchByEntities(
           entities,
           2,
-          limit,
+          candidateLimit,
         );
       } catch {
         // graph search is best-effort
       }
     }
 
+    if (filterAgentId !== undefined && authorizationCache) {
+      const authorizedIds = await this.authorizedCandidateIds(
+        [...bm25Results, ...vectorResults, ...graphResults],
+        filterAgentId,
+        authorizationCache,
+      );
+      bm25Results = bm25Results.filter((result) =>
+        authorizedIds.has(result.obsId),
+      );
+      vectorResults = vectorResults.filter((result) =>
+        authorizedIds.has(result.obsId),
+      );
+      graphResults = graphResults.filter((result) =>
+        authorizedIds.has(result.obsId),
+      );
+    }
+
     const topVectorObs = vectorResults.slice(0, 5).map((r) => r.obsId);
     if (topVectorObs.length > 0) {
       try {
-        const expansionResults =
+        let expansionResults =
           await this.graphRetrieval.expandFromChunks(topVectorObs, 1, 5);
+        if (filterAgentId !== undefined && authorizationCache) {
+          const authorizedIds = await this.authorizedCandidateIds(
+            expansionResults,
+            filterAgentId,
+            authorizationCache,
+          );
+          expansionResults = expansionResults.filter((result) =>
+            authorizedIds.has(result.obsId),
+          );
+        }
         graphResults = [...graphResults, ...expansionResults];
       } catch {
         // expansion is best-effort
@@ -161,7 +245,8 @@ export class HybridSearch {
           bm25Rank: Infinity,
           vectorRank: i + 1,
           graphRank: Infinity,
-          sessionId: r.sessionId,
+          sessionId:
+            r.sessionId || this.bm25.getSessionId(r.obsId) || "memory",
           bm25Score: 0,
           vectorScore: r.score,
           graphScore: 0,
@@ -182,7 +267,8 @@ export class HybridSearch {
           bm25Rank: Infinity,
           vectorRank: Infinity,
           graphRank: i + 1,
-          sessionId: r.sessionId,
+          sessionId:
+            r.sessionId || this.bm25.getSessionId(r.obsId) || "memory",
           bm25Score: 0,
           vectorScore: 0,
           graphScore: r.score,
@@ -218,25 +304,140 @@ export class HybridSearch {
         effectiveGraphW * (1 / (RRF_K + s.graphRank)),
     }));
 
-    combined.sort((a, b) => b.combinedScore - a.combinedScore);
+    combined.sort(
+      (a, b) => b.combinedScore - a.combinedScore || a.obsId.localeCompare(b.obsId),
+    );
 
-    const retrievalDepth = Math.max(limit, 20);
+    const retrievalDepth = Math.max(candidateLimit, 20);
     const rerankWindow = 20;
     const diversified = this.diversifyBySession(combined, retrievalDepth);
-    const enriched = await this.enrichResults(diversified, retrievalDepth);
+    const enriched = await this.enrichResults(
+      diversified,
+      retrievalDepth,
+      authorizationCache,
+    );
+    const authorized = this.filterAgentAuthorized(enriched, context);
 
-    if (this.rerankEnabled && enriched.length > 1) {
+    if (this.rerankEnabled && authorized.length > 1) {
       try {
-        const head = enriched.slice(0, rerankWindow);
-        const tail = enriched.slice(rerankWindow);
+        const head = authorized.slice(0, rerankWindow);
+        const tail = authorized.slice(rerankWindow);
         const reranked = await rerank(query, head, rerankWindow);
-        return reranked.concat(tail).slice(0, limit);
+        return this.applyPolicy(reranked.concat(tail), context, limit);
       } catch {
-        return enriched.slice(0, limit);
+        return this.applyPolicy(authorized, context, limit);
       }
     }
 
-    return enriched.slice(0, limit);
+    return this.applyPolicy(authorized, context, limit);
+  }
+
+  private async authorizedCandidateIds(
+    candidates: CandidateReference[],
+    agentId: string,
+    sourceCache: CandidateSourceCache,
+  ): Promise<Set<string>> {
+    const uniqueCandidates = new Map<string, string>();
+    for (const candidate of candidates) {
+      if (uniqueCandidates.has(candidate.obsId)) continue;
+      uniqueCandidates.set(
+        candidate.obsId,
+        candidate.sessionId ||
+          this.bm25.getSessionId(candidate.obsId) ||
+          "memory",
+      );
+    }
+
+    const authorizedIds = new Set<string>();
+    const entries = [...uniqueCandidates.entries()];
+    for (let index = 0; index < entries.length; index += AUTHORIZATION_BATCH_SIZE) {
+      const batch = entries.slice(index, index + AUTHORIZATION_BATCH_SIZE);
+      const resolved = await Promise.all(
+        batch.map(async ([obsId, sessionId]) => ({
+          obsId,
+          source: await this.cachedCandidateSource(
+            obsId,
+            sessionId,
+            sourceCache,
+          ),
+        })),
+      );
+      for (const candidate of resolved) {
+        if (candidate.source?.provenance.agentId === agentId) {
+          authorizedIds.add(candidate.obsId);
+        }
+      }
+    }
+    return authorizedIds;
+  }
+
+  private cachedCandidateSource(
+    obsId: string,
+    sessionId: string,
+    sourceCache: CandidateSourceCache,
+  ): Promise<ResolvedCandidateSource | null> {
+    const existing = sourceCache.get(obsId);
+    if (existing) return existing;
+    const pending = this.resolveCandidateSource(obsId, sessionId).catch(
+      () => null,
+    );
+    sourceCache.set(obsId, pending);
+    return pending;
+  }
+
+  private async resolveCandidateSource(
+    obsId: string,
+    sessionId: string,
+  ): Promise<ResolvedCandidateSource | null> {
+    const observation = await this.kv
+      .get<CompressedObservation>(KV.observations(sessionId), obsId)
+      .catch(() => null);
+    const memory = observation
+      ? null
+      : await this.kv.get<Memory>(KV.memories, obsId).catch(() => null);
+    const resolvedObservation = observation ??
+      (memory ? memoryToObservation(memory) : null);
+    if (!resolvedObservation) return null;
+    const provenance = await resolveRetrievalProvenance(
+      this.kv,
+      resolvedObservation,
+      memory,
+    );
+    return { observation: resolvedObservation, provenance };
+  }
+
+  private filterAgentAuthorized(
+    results: HybridSearchResult[],
+    context: RetrievalPolicyContext,
+  ): HybridSearchResult[] {
+    if (context.filterAgentId === undefined) return results;
+    return results.filter(
+      (result) => result.provenance?.agentId === context.filterAgentId,
+    );
+  }
+
+  private applyPolicy(
+    results: HybridSearchResult[],
+    context: RetrievalPolicyContext,
+    limit: number,
+  ): HybridSearchResult[] {
+    return applyRetrievalPolicy(
+      results.map((result) => ({
+        id: result.observation.id,
+        baseScore: result.combinedScore,
+        value: result,
+        provenance: result.provenance!,
+      })),
+      context,
+    )
+      .map((candidate) => ({
+        ...candidate.value,
+        baseCombinedScore: candidate.baseScore,
+        combinedScore: candidate.adjustedScore,
+        scope: candidate.scope,
+        scopeReason: candidate.scopeReason,
+      }))
+      .slice(0, limit);
   }
 
   private diversifyBySession(
@@ -286,14 +487,42 @@ export class HybridSearch {
       graphContext?: string;
     }>,
     limit: number,
+    sourceCache?: CandidateSourceCache,
   ): Promise<HybridSearchResult[]> {
     const sliced = results.slice(0, limit);
+    if (sourceCache) {
+      const sources = await Promise.all(
+        sliced.map((result) =>
+          this.cachedCandidateSource(
+            result.obsId,
+            result.sessionId,
+            sourceCache,
+          ),
+        ),
+      );
+      return sliced.flatMap((result, index) => {
+        const source = sources[index];
+        if (!source) return [];
+        return [
+          {
+            observation: source.observation,
+            bm25Score: result.bm25Score,
+            vectorScore: result.vectorScore,
+            graphScore: result.graphScore,
+            combinedScore: result.combinedScore,
+            sessionId: result.sessionId,
+            graphContext: result.graphContext,
+            provenance: source.provenance,
+          },
+        ];
+      });
+    }
     const observations = await Promise.all(
       sliced.map(async (r) => {
         const obs = await this.kv
           .get<CompressedObservation>(KV.observations(r.sessionId), r.obsId)
           .catch(() => null);
-        if (obs) return obs;
+        if (obs) return { observation: obs, memory: null as Memory | null };
         // Fallback: indexed entry may originate from mem::remember, which
         // writes to KV.memories with a synthetic sessionId ("memory" or the
         // memory's first associated session). Coerce the Memory record into
@@ -301,21 +530,29 @@ export class HybridSearch {
         const mem = await this.kv
           .get<Memory>(KV.memories, r.obsId)
           .catch(() => null);
-        return mem ? memoryToObservation(mem) : null;
+        return mem
+          ? { observation: memoryToObservation(mem), memory: mem }
+          : null;
       }),
     );
     const enriched: HybridSearchResult[] = [];
     for (let i = 0; i < sliced.length; i++) {
-      const obs = observations[i];
-      if (obs) {
+      const source = observations[i];
+      if (source) {
+        const provenance = await resolveRetrievalProvenance(
+          this.kv,
+          source.observation,
+          source.memory,
+        );
         enriched.push({
-          observation: obs,
+          observation: source.observation,
           bm25Score: sliced[i].bm25Score,
           vectorScore: sliced[i].vectorScore,
           graphScore: sliced[i].graphScore,
           combinedScore: sliced[i].combinedScore,
           sessionId: sliced[i].sessionId,
           graphContext: sliced[i].graphContext,
+          provenance,
         });
       }
     }

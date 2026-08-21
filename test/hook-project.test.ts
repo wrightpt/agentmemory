@@ -102,7 +102,116 @@ describe("resolveProject — hook project basename resolver", () => {
       execFileSync("git", ["init", "-q", dir]);
       execFileSync("git", ["-C", dir, "remote", "add", "origin", "git@github.com:owner/stable-project.git"]);
       expect(resolveProject(dir)).toBe("stable-project");
-      expect(resolveProjectContext(dir).worktree).toBe(realpathSync.native(dir));
+      expect(resolveProjectContext(dir)).toMatchObject({
+        worktree: realpathSync.native(dir),
+        canonicalRepoId: "owner/stable-project",
+        repoRemote: "ssh://github.com/owner/stable-project",
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    {
+      remote: "git@github.com:WrightPT/AgentMemory.git",
+      canonicalRepoId: "wrightpt/agentmemory",
+      repoRemote: "ssh://github.com/wrightpt/agentmemory",
+    },
+    {
+      remote: "https://user:secret@github.com/WrightPT/AgentMemory.git?token=hidden#fragment",
+      canonicalRepoId: "wrightpt/agentmemory",
+      repoRemote: "https://github.com/wrightpt/agentmemory",
+    },
+    {
+      remote: "ssh://git@git.example.com/Platform/AgentMemory.git",
+      canonicalRepoId: "git.example.com/Platform/AgentMemory",
+      repoRemote: "ssh://git.example.com/Platform/AgentMemory",
+    },
+  ])("derives a stable canonical identity and sanitized remote from $remote", ({
+    remote,
+    canonicalRepoId,
+    repoRemote,
+  }) => {
+    const dir = mkdtempSync(join(tmpdir(), "amem-remote-identity-"));
+    try {
+      execFileSync("git", ["init", "-q", dir]);
+      execFileSync("git", ["-C", dir, "remote", "add", "origin", remote]);
+      expect(resolveProjectContext(dir)).toMatchObject({ canonicalRepoId, repoRemote });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps unrelated same-basename remotes separate", () => {
+    const root = mkdtempSync(join(tmpdir(), "amem-same-name-"));
+    const first = join(root, "first", "service");
+    const second = join(root, "second", "service");
+    try {
+      mkdirSync(first, { recursive: true });
+      mkdirSync(second, { recursive: true });
+      execFileSync("git", ["init", "-q", first]);
+      execFileSync("git", ["init", "-q", second]);
+      execFileSync("git", ["-C", first, "remote", "add", "origin", "git@github.com:org-a/service.git"]);
+      execFileSync("git", ["-C", second, "remote", "add", "origin", "git@github.com:org-b/service.git"]);
+
+      expect(resolveProject(first)).toBe("service");
+      expect(resolveProject(second)).toBe("service");
+      expect(resolveProjectContext(first).canonicalRepoId).toBe("org-a/service");
+      expect(resolveProjectContext(second).canonicalRepoId).toBe("org-b/service");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("converges remote-less linked worktrees on an opaque git-common-dir identity", () => {
+    const root = mkdtempSync(join(tmpdir(), "amem-local-worktrees-"));
+    const main = join(root, "main");
+    const linked = join(root, "linked");
+    try {
+      execFileSync("git", ["init", "-q", main]);
+      writeFileSync(join(main, "tracked.txt"), "identity\n");
+      execFileSync("git", ["-C", main, "add", "tracked.txt"]);
+      execFileSync("git", [
+        "-C",
+        main,
+        "-c",
+        "user.name=AgentMemory Test",
+        "-c",
+        "user.email=agentmemory@example.invalid",
+        "commit",
+        "-qm",
+        "identity fixture",
+      ]);
+      execFileSync("git", ["-C", main, "worktree", "add", "-q", "-b", "identity-linked", linked]);
+
+      const mainContext = resolveProjectContext(main);
+      const linkedContext = resolveProjectContext(linked);
+      expect(mainContext.canonicalRepoId).toMatch(/^local-git:[a-f0-9]{64}$/);
+      expect(linkedContext.canonicalRepoId).toBe(mainContext.canonicalRepoId);
+      expect(linkedContext.worktree).not.toBe(mainContext.worktree);
+      expect(linkedContext.commitSha).toBe(mainContext.commitSha);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains explicit manifest aliases without replacing the project ID", () => {
+    const dir = mkdtempSync(join(tmpdir(), "amem-aliases-"));
+    try {
+      mkdirSync(join(dir, ".agentmemory"));
+      writeFileSync(
+        join(dir, ".agentmemory", "project.json"),
+        JSON.stringify({
+          project_id: "agentmemory",
+          aliases: ["memory-engine", " agent-memory ", "agentmemory"],
+          project_aliases: ["legacy-agentmemory"],
+        }),
+      );
+      expect(resolveProjectContext(dir)).toMatchObject({
+        project: "agentmemory",
+        projectAliases: ["agent-memory", "legacy-agentmemory", "memory-engine"],
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

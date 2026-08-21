@@ -51,6 +51,10 @@ export class SearchIndex {
     return this.entries.has(id);
   }
 
+  getSessionId(id: string): string | undefined {
+    return this.entries.get(id)?.sessionId;
+  }
+
   remove(id: string): void {
     const entry = this.entries.get(id);
     if (!entry) return;
@@ -155,7 +159,7 @@ export class SearchIndex {
         const entry = this.entries.get(obsId)!;
         return { obsId, sessionId: entry.sessionId, score };
       })
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => b.score - a.score || a.obsId.localeCompare(b.obsId))
       .slice(0, limit);
   }
 

@@ -89,4 +89,38 @@ describe("session-start event lesson authorization", () => {
 
     expect(result.context).toContain(PRIVATE_LESSON_CONTENT);
   });
+
+  it("captures canonical repository, workstation mission, and agent metadata", async () => {
+    const result = (await sdk.trigger("event::session::started", {
+      sessionId: "identity-event",
+      project: "agentmemory",
+      cwd: "/repo/worktree",
+      repoRoot: "/repo/main",
+      worktree: "/repo/worktree",
+      branch: "feature/identity",
+      projectAliases: ["agent-memory"],
+      canonicalRepoId: "forged/repository",
+      repoRemote: "git@github.com:WrightPT/AgentMemory.git",
+      terminalSession: "shared-agentmemory-codex",
+      missionId: "mission-memory",
+      missionTitle: "Institutional memory",
+      missionRole: "worker",
+      parentSession: "shared-agentmemory-lead",
+      commitSha: "D".repeat(40),
+      agentId: "codex",
+    })) as { session: Record<string, unknown> };
+
+    expect(result.session).toMatchObject({
+      projectAliases: ["agent-memory"],
+      canonicalRepoId: "wrightpt/agentmemory",
+      repoRemote: "ssh://github.com/wrightpt/agentmemory",
+      terminalSession: "shared-agentmemory-codex",
+      missionId: "mission-memory",
+      missionTitle: "Institutional memory",
+      missionRole: "worker",
+      parentSession: "shared-agentmemory-lead",
+      commitSha: "d".repeat(40),
+      agentId: "codex",
+    });
+  });
 });

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { IndexPersistence } from "../src/state/index-persistence.js";
 import { SearchIndex } from "../src/state/search-index.js";
 import { VectorIndex } from "../src/state/vector-index.js";
+import { LocalVectorStore } from "../src/state/vector-store.js";
 import type { CompressedObservation } from "../src/types.js";
 
 const BM25_SCOPE = "mem:index:bm25";
@@ -239,6 +240,23 @@ describe("IndexPersistence", () => {
     const loaded = await persistence.load();
     expect(loaded.vector).not.toBeNull();
     expect(loaded.vector!.size).toBe(1);
+  });
+
+  it("persists the default LocalVectorStore through the existing codec", async () => {
+    const vector = new LocalVectorStore();
+    vector.add("obs_local", "ses_local", new Float32Array([1, 0, 0]));
+    const persistence = new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      vector,
+    );
+
+    await persistence.save();
+    const loaded = await persistence.load();
+
+    expect(loaded.vector).toBeInstanceOf(LocalVectorStore);
+    expect(loaded.vector?.search(new Float32Array([1, 0, 0]), 1)[0].obsId)
+      .toBe("obs_local");
   });
 
   it("saves vector index shards outside the BM25 scope", async () => {

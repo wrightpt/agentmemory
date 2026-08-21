@@ -8,6 +8,7 @@ import { logger } from "../logger.js";
 import { triggerDetached } from "../utils/trigger-detached.js";
 import { lessonAccessContextFromPayload } from "../functions/lesson-access.js";
 import type { LessonAccessContext } from "../functions/lesson-access.js";
+import { normalizeSessionContextValues } from "../functions/session-context-values.js";
 
 export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
   sdk.registerFunction(
@@ -21,23 +22,37 @@ export function registerEventTriggers(sdk: ISdk, kv: StateKV): void {
       worktree?: string;
       branch?: string;
       taskSlug?: string;
+      projectAliases?: string[];
+      canonicalRepoId?: string;
+      repoRemote?: string;
+      terminalSession?: string;
+      missionId?: string;
+      missionTitle?: string;
+      missionRole?: string;
+      parentSession?: string;
+      commitSha?: string;
+      agentId?: string;
       accessContext?: unknown;
     }) => {
       const accessContext = lessonAccessContextFromPayload(data.accessContext);
       const startedAt = new Date().toISOString();
+      const sessionContext = normalizeSessionContextValues(
+        data as unknown as Record<string, unknown>,
+      );
+      const agentId =
+        typeof data.agentId === "string" && data.agentId.trim()
+          ? data.agentId.trim().slice(0, 128)
+          : undefined;
       const session: Session = {
         id: data.sessionId,
         project: data.project,
         cwd: data.cwd,
-        ...(data.repoRoot ? { repoRoot: data.repoRoot } : {}),
-        ...(data.scopeType ? { scopeType: data.scopeType } : {}),
-        ...(data.worktree ? { worktree: data.worktree } : {}),
-        ...(data.branch ? { branch: data.branch } : {}),
-        ...(data.taskSlug ? { taskSlug: data.taskSlug } : {}),
+        ...sessionContext,
         startedAt,
         updatedAt: startedAt,
         status: "active",
         observationCount: 0,
+        ...(agentId ? { agentId } : {}),
       };
       await kv.set(KV.sessions, data.sessionId, session);
       const contextResult = await sdk.trigger<

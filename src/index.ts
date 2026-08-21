@@ -21,7 +21,7 @@ import {
 } from "./providers/index.js";
 import { StateKV } from "./state/kv.js";
 import { KV } from "./state/schema.js";
-import { VectorIndex } from "./state/vector-index.js";
+import { LocalVectorStore } from "./state/vector-store.js";
 import { HybridSearch } from "./state/hybrid-search.js";
 import { IndexPersistence } from "./state/index-persistence.js";
 import { registerPrivacyFunction } from "./functions/privacy.js";
@@ -35,7 +35,7 @@ import {
   registerSearchFunction,
   rebuildIndex,
   getSearchIndex,
-  setVectorIndex,
+  setVectorStore,
   setEmbeddingProvider,
   setIndexPersistence,
 } from "./functions/search.js";
@@ -48,6 +48,7 @@ import { registerPatternsFunction } from "./functions/patterns.js";
 import { registerRememberFunction } from "./functions/remember.js";
 import { registerEvictFunction } from "./functions/evict.js";
 import { registerRelationsFunction } from "./functions/relations.js";
+import { registerProjectRelationshipsFunction } from "./functions/project-relationships.js";
 import { registerTimelineFunction } from "./functions/timeline.js";
 import { registerSmartSearchFunction } from "./functions/smart-search.js";
 import { registerRecentSearchesSweepFunction } from "./functions/recent-searches-sweep.js";
@@ -226,9 +227,9 @@ async function main() {
   const metricsStore = new MetricsStore(kv);
   const dedupMap = new DedupMap();
 
-  const vectorIndex = embeddingProvider ? new VectorIndex() : null;
+  const vectorStore = embeddingProvider ? new LocalVectorStore() : null;
 
-  setVectorIndex(vectorIndex);
+  setVectorStore(vectorStore);
   setEmbeddingProvider(embeddingProvider);
 
   const meterAccessor = hasGetMeter(sdk)
@@ -257,6 +258,7 @@ async function main() {
   registerEvictFunction(sdk, kv);
 
   registerRelationsFunction(sdk, kv);
+  registerProjectRelationshipsFunction(sdk, kv);
   registerTimelineFunction(sdk, kv);
   registerProfileFunction(sdk, kv);
   registerAutoForgetFunction(sdk, kv);
@@ -364,7 +366,7 @@ async function main() {
   const graphWeight = parseFloat(getEnvVar("AGENTMEMORY_GRAPH_WEIGHT") || "0.3");
   const hybridSearch = new HybridSearch(
     bm25Index,
-    vectorIndex,
+    vectorStore,
     embeddingProvider,
     kv,
     embeddingConfig.bm25Weight,
@@ -372,8 +374,8 @@ async function main() {
     graphWeight,
   );
 
-  registerSmartSearchFunction(sdk, kv, (query, limit) =>
-    hybridSearch.search(query, limit),
+  registerSmartSearchFunction(sdk, kv, (query, limit, context) =>
+    hybridSearch.search(query, limit, context),
   );
   registerRecentSearchesSweepFunction(sdk, kv);
 
@@ -383,7 +385,7 @@ async function main() {
 
   const healthMonitor = registerHealthMonitor(sdk, kv);
 
-  const indexPersistence = new IndexPersistence(kv, bm25Index, vectorIndex);
+  const indexPersistence = new IndexPersistence(kv, bm25Index, vectorStore);
   // Wire the persistence hook so delete paths can flush BM25/vector
   // index mutations to disk. Without this, an in-memory remove can be
   // lost across a hard process exit and the persisted snapshot
@@ -400,7 +402,7 @@ async function main() {
       `Loaded persisted BM25 index (${bm25Index.size} docs)`,
     );
   }
-  if (loaded?.vector && vectorIndex && loaded.vector.size > 0) {
+  if (loaded?.vector && vectorStore && loaded.vector.size > 0) {
     // Persisted vectors carry whatever dimension the provider had when
     // they were written. If the active provider declares a different
     // dimension — or if the on-disk index contains a mix of dimensions
@@ -447,9 +449,9 @@ async function main() {
         );
       }
     } else {
-      vectorIndex.restoreFrom(loaded.vector);
+      vectorStore.restoreFrom(loaded.vector);
       bootLog(
-        `Loaded persisted vector index (${vectorIndex.size} vectors)`,
+        `Loaded persisted vector index (${vectorStore.size} vectors)`,
       );
     }
   }
@@ -526,7 +528,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 142 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 143 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,

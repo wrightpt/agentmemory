@@ -4,6 +4,10 @@ import { KV } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { recordAudit } from "./audit.js";
+import {
+  normalizeSessionContextValues,
+  SESSION_CONTEXT_STRING_FIELDS,
+} from "./session-context-values.js";
 
 export interface SessionContextInput {
   sessionId: string;
@@ -14,17 +18,18 @@ export interface SessionContextInput {
   worktree?: string;
   branch?: string;
   taskSlug?: string;
+  projectAliases?: string[];
+  canonicalRepoId?: string;
+  repoRemote?: string;
+  terminalSession?: string;
+  missionId?: string;
+  missionTitle?: string;
+  missionRole?: string;
+  parentSession?: string;
+  commitSha?: string;
 }
 
-const CONTEXT_FIELDS = [
-  "project",
-  "cwd",
-  "repoRoot",
-  "scopeType",
-  "worktree",
-  "branch",
-  "taskSlug",
-] as const;
+const CONTEXT_FIELDS = ["project", "cwd", ...SESSION_CONTEXT_STRING_FIELDS] as const;
 
 function contextView(session: Session) {
   return {
@@ -37,6 +42,14 @@ function contextView(session: Session) {
     branch: session.branch,
     taskSlug: session.taskSlug,
     projectAliases: session.projectAliases,
+    canonicalRepoId: session.canonicalRepoId,
+    repoRemote: session.repoRemote,
+    terminalSession: session.terminalSession,
+    missionId: session.missionId,
+    missionTitle: session.missionTitle,
+    missionRole: session.missionRole,
+    parentSession: session.parentSession,
+    commitSha: session.commitSha,
     updatedAt: session.updatedAt,
     contextUpdatedAt: session.contextUpdatedAt,
   };
@@ -55,8 +68,16 @@ export function registerSessionContextFunction(sdk: ISdk, kv: StateKV): void {
 
       const updates: Array<{ type: "set"; path: string; value: unknown }> = [];
       const changed: string[] = [];
+      const normalizedContext = normalizeSessionContextValues(
+        data as unknown as Record<string, unknown>,
+      );
+      const contextValues = {
+        ...normalizedContext,
+        project: data.project,
+        cwd: data.cwd,
+      };
       for (const field of CONTEXT_FIELDS) {
-        const value = data[field];
+        const value = contextValues[field];
         if (typeof value !== "string" || !value.trim()) continue;
         const normalized = value.trim();
         if (session[field] === normalized) continue;
@@ -64,11 +85,20 @@ export function registerSessionContextFunction(sdk: ISdk, kv: StateKV): void {
         changed.push(field);
       }
 
-      if (changed.includes("project") && session.project) {
+      if (changed.includes("project") || normalizedContext.projectAliases) {
         const aliases = new Set(session.projectAliases ?? []);
-        aliases.add(session.project);
-        aliases.delete(data.project?.trim() ?? "");
-        updates.push({ type: "set", path: "projectAliases", value: [...aliases].sort() });
+        if (changed.includes("project") && session.project) aliases.add(session.project);
+        for (const alias of normalizedContext.projectAliases ?? []) aliases.add(alias);
+        aliases.delete(
+          typeof contextValues.project === "string" && contextValues.project.trim()
+            ? contextValues.project.trim()
+            : session.project,
+        );
+        const nextAliases = [...aliases].sort();
+        if (JSON.stringify(nextAliases) !== JSON.stringify(session.projectAliases ?? [])) {
+          updates.push({ type: "set", path: "projectAliases", value: nextAliases });
+          changed.push("projectAliases");
+        }
       }
       if (updates.length === 0) {
         return { success: true, changed: [], context: contextView(session) };

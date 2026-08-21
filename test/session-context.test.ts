@@ -61,6 +61,15 @@ describe("session context updates", () => {
         worktree: "/repo/worktree",
         branch: "feat/context",
         taskSlug: "context-v1",
+        projectAliases: ["legacy-agentmemory"],
+        canonicalRepoId: "forged/repository",
+        repoRemote: "https://user:secret@github.com/WrightPT/AgentMemory.git",
+        terminalSession: "shared-agentmemory-codex",
+        missionId: "mission-memory",
+        missionTitle: "Institutional memory",
+        missionRole: "worker",
+        parentSession: "shared-memory-lead",
+        commitSha: "A".repeat(40),
       },
     }) as { success: boolean; changed: string[]; context: Record<string, unknown> };
 
@@ -73,7 +82,15 @@ describe("session context updates", () => {
       worktree: "/repo/worktree",
       branch: "feat/context",
       taskSlug: "context-v1",
-      projectAliases: ["/legacy/path"],
+      projectAliases: ["/legacy/path", "legacy-agentmemory"],
+      canonicalRepoId: "wrightpt/agentmemory",
+      repoRemote: "https://github.com/wrightpt/agentmemory",
+      terminalSession: "shared-agentmemory-codex",
+      missionId: "mission-memory",
+      missionTitle: "Institutional memory",
+      missionRole: "worker",
+      parentSession: "shared-memory-lead",
+      commitSha: "a".repeat(40),
       updatedAt: "2026-01-02T00:00:00Z",
     });
     expect(result.context.contextUpdatedAt).toEqual(expect.any(String));

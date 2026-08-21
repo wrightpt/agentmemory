@@ -9,7 +9,12 @@ vi.mock("../src/state/keyed-mutex.js", () => ({
 }));
 
 import { registerRememberFunction } from "../src/functions/remember.js";
-import { setVectorIndex, setEmbeddingProvider, getVectorIndex } from "../src/functions/search.js";
+import {
+  getVectorIndex,
+  setEmbeddingProvider,
+  setIndexPersistence,
+  setVectorIndex,
+} from "../src/functions/search.js";
 import { VectorIndex } from "../src/state/vector-index.js";
 import type { EmbeddingProvider } from "../src/types.js";
 
@@ -68,6 +73,7 @@ describe("vector index population on remember", () => {
   afterEach(() => {
     setVectorIndex(null);
     setEmbeddingProvider(null);
+    setIndexPersistence(null);
   });
 
   it("calls vectorIndex.add() when remember saves a memory", async () => {
@@ -117,5 +123,25 @@ describe("vector index population on remember", () => {
 
     expect((result as { success: boolean }).success).toBe(true);
     expect(getVectorIndex()).toBeNull();
+  });
+
+  it("schedules persistence after a successful live BM25 add", async () => {
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
+    const persistence = {
+      scheduleSave: vi.fn(),
+      save: vi.fn(async () => {}),
+    };
+    setIndexPersistence(persistence);
+    const sdk = mockSdk();
+    const kv = mockKV();
+    registerRememberFunction(sdk as never, kv as never);
+
+    await sdk.trigger({
+      function_id: "mem::remember",
+      payload: { content: "Persist this searchable memory", type: "fact" },
+    });
+
+    expect(persistence.scheduleSave).toHaveBeenCalledTimes(1);
   });
 });

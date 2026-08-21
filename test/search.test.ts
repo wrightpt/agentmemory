@@ -7,7 +7,7 @@ vi.mock("../src/logger.js", () => ({
 import { registerSearchFunction, getSearchIndex, rebuildIndex, setVectorIndex, setEmbeddingProvider, getVectorIndex } from "../src/functions/search.js";
 import { VectorIndex } from "../src/state/vector-index.js";
 import { KV } from "../src/state/schema.js";
-import type { CompressedObservation, Session } from "../src/types.js";
+import type { CompressedObservation, Memory, Session } from "../src/types.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -64,9 +64,21 @@ describe("mem::search", () => {
       id: "ses_1",
       project: "demo",
       cwd: "/tmp/demo",
+      repoRoot: "/tmp/demo",
+      worktree: "/tmp/demo-worktree",
+      branch: "agent/auth-refresh",
+      canonicalRepoId: "wrightpt/demo",
+      repoRemote: "https://github.com/wrightpt/demo",
+      terminalSession: "shared-web-term-42",
+      parentSession: "shared-web-term-1",
+      missionId: "mission-auth",
+      missionTitle: "Harden authentication",
+      missionRole: "worker",
+      commitSha: "0123456789abcdef",
       startedAt: "2026-01-01T00:00:00Z",
       status: "completed",
       observationCount: 2,
+      agentId: "codex",
     };
     await kv.set(KV.sessions, session.id, session);
 
@@ -82,6 +94,8 @@ describe("mem::search", () => {
       concepts: ["auth", "jwt"],
       files: ["src/auth.ts"],
       importance: 8,
+      confidence: 0.9,
+      agentId: "codex",
     };
     const obsB: CompressedObservation = {
       id: "obs_b",
@@ -106,22 +120,99 @@ describe("mem::search", () => {
   it("returns full format by default", async () => {
     const result = (await sdk.trigger("mem::search", {
       query: "auth middleware",
-    })) as { format: string; results: Array<{ observation: CompressedObservation }> };
+    })) as {
+      format: string;
+      results: Array<{
+        observation: CompressedObservation;
+        provenance: Record<string, unknown>;
+      }>;
+    };
 
     expect(result.format).toBe("full");
     expect(result.results).toHaveLength(1);
     expect(result.results[0]?.observation.id).toBe("obs_a");
+    expect(result.results[0]?.provenance).toMatchObject({
+      project: "demo",
+      canonicalRepoId: "wrightpt/demo",
+      repoRoot: "/tmp/demo",
+      worktree: "/tmp/demo-worktree",
+      branch: "agent/auth-refresh",
+      commitSha: "0123456789abcdef",
+      sessionId: "ses_1",
+      terminalSession: "shared-web-term-42",
+      parentSession: "shared-web-term-1",
+      missionId: "mission-auth",
+      missionTitle: "Harden authentication",
+      missionRole: "worker",
+      agentId: "codex",
+      files: ["src/auth.ts"],
+      observationId: "obs_a",
+      memoryType: "decision",
+      confidence: 0.9,
+      importance: 8,
+      attributed: true,
+    });
   });
 
   it("returns compact format when requested", async () => {
     const result = (await sdk.trigger("mem::search", {
       query: "auth",
       format: "compact",
-    })) as { format: string; results: Array<{ obsId: string; title: string }> };
+    })) as {
+      format: string;
+      results: Array<{
+        obsId: string;
+        title: string;
+        provenanceAvailable: boolean;
+        provenance: Record<string, unknown>;
+      }>;
+    };
 
     expect(result.format).toBe("compact");
     expect(result.results[0]?.obsId).toBe("obs_a");
     expect(result.results[0]?.title).toBe("Auth middleware decision");
+    expect(result.results[0]?.provenanceAvailable).toBe(true);
+    expect(result.results[0]?.provenance).toEqual({
+      project: "demo",
+      canonicalRepoId: "wrightpt/demo",
+      sessionId: "ses_1",
+      agentId: "codex",
+      missionId: "mission-auth",
+      branch: "agent/auth-refresh",
+      commitSha: "0123456789abcdef",
+      timestamp: "2026-01-01T00:00:00Z",
+      memoryType: "decision",
+      importance: 8,
+      confidence: 0.9,
+      attributed: true,
+    });
+  });
+
+  it("keeps compact provenance inspectable in narrative result rows", async () => {
+    const result = (await sdk.trigger("mem::search", {
+      query: "auth middleware",
+      format: "narrative",
+    })) as {
+      results: Array<{
+        obsId: string;
+        provenanceAvailable: boolean;
+        provenance: Record<string, unknown>;
+      }>;
+      text: string;
+    };
+
+    expect(result.text).toContain("Auth middleware decision");
+    expect(result.results[0]).toMatchObject({
+      obsId: "obs_a",
+      provenanceAvailable: true,
+      provenance: {
+        canonicalRepoId: "wrightpt/demo",
+        sessionId: "ses_1",
+        agentId: "codex",
+        missionId: "mission-auth",
+        attributed: true,
+      },
+    });
   });
 
   it("returns narrative text and respects token budget", async () => {
@@ -169,6 +260,8 @@ describe("mem::search", () => {
       strength: 7,
       version: 1,
       isLatest: true,
+      project: "demo",
+      agentId: "kimi",
     });
     // Force the rebuild to pick up the new memory (mem::search only
     // rebuilds on first call when idx.size === 0).
@@ -177,11 +270,99 @@ describe("mem::search", () => {
     const result = (await sdk.trigger("mem::search", {
       query: "pineapple pizza",
       format: "compact",
-    })) as { results: Array<{ obsId: string; title: string }> };
+    })) as {
+      results: Array<{
+        obsId: string;
+        title: string;
+        provenance: Record<string, unknown>;
+      }>;
+    };
 
     const hit = result.results.find((r) => r.obsId === "mem_x1");
     expect(hit).toBeDefined();
     expect(hit?.title).toBe("Pineapple belongs on pizza");
+    expect(hit?.provenance).toMatchObject({
+      project: "demo",
+      agentId: "kimi",
+      memoryType: "fact",
+      importance: 7,
+      attributed: true,
+    });
+  });
+
+  it("keeps a composite memory's internal hydration locator out of full and compact results", async () => {
+    const secondSession: Session = {
+      id: "ses_2",
+      project: "demo",
+      cwd: "/tmp/demo-two",
+      startedAt: "2026-01-03T00:00:00Z",
+      status: "completed",
+      observationCount: 0,
+      agentId: "kimi",
+    };
+    await kv.set(KV.sessions, secondSession.id, secondSession);
+    const memory: Memory = {
+      id: "mem_composite_search",
+      createdAt: "2026-02-02T00:00:00Z",
+      updatedAt: "2026-02-02T00:00:00Z",
+      type: "architecture",
+      title: "Composite hydration sentinel",
+      content: "A multi-session architecture conclusion.",
+      concepts: ["composite-hydration-sentinel"],
+      files: [],
+      sessionIds: [secondSession.id, "ses_1"],
+      strength: 9,
+      version: 1,
+      isLatest: true,
+      attribution: {
+        project: "demo",
+        canonicalRepoId: "wrightpt/demo",
+      },
+    };
+    await kv.set(KV.memories, memory.id, memory);
+    await rebuildIndex(kv as never);
+
+    const full = (await sdk.trigger("mem::search", {
+      query: "composite hydration sentinel",
+      format: "full",
+    })) as {
+      results: Array<{
+        observation: CompressedObservation;
+        sessionId?: string;
+        provenance: Record<string, unknown>;
+      }>;
+    };
+    const fullHit = full.results.find(
+      (candidate) => candidate.observation.id === memory.id,
+    );
+    expect(fullHit).toBeDefined();
+    expect(fullHit).not.toHaveProperty("sessionId");
+    expect(fullHit?.observation.sessionId).toBe("memory");
+    expect(fullHit?.provenance).toMatchObject({
+      sessionIds: ["ses_1", secondSession.id],
+      memoryId: memory.id,
+    });
+    expect(fullHit?.provenance).not.toHaveProperty("sessionId");
+
+    const compact = (await sdk.trigger("mem::search", {
+      query: "composite hydration sentinel",
+      format: "compact",
+    })) as {
+      results: Array<{
+        obsId: string;
+        sessionId?: string;
+        provenance: Record<string, unknown>;
+      }>;
+    };
+    const compactHit = compact.results.find(
+      (candidate) => candidate.obsId === memory.id,
+    );
+    expect(compactHit).toBeDefined();
+    expect(compactHit).not.toHaveProperty("sessionId");
+    expect(compactHit?.provenance).toMatchObject({
+      sessionIds: ["ses_1", secondSession.id],
+    });
+    expect(compactHit?.provenance).not.toHaveProperty("sessionId");
   });
 
   it("rebuildIndex populates the vector index", async () => {

@@ -79,5 +79,7 @@ export function memoryToObservation(memory: Memory): CompressedObservation {
     concepts: memory.concepts,
     files: memory.files,
     importance: memory.strength,
+    ...(memory.agentId ? { agentId: memory.agentId } : {}),
+    ...(memory.attribution ? { attribution: memory.attribution } : {}),
   };
 }

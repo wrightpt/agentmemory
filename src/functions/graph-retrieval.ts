@@ -46,8 +46,12 @@ export class GraphRetrieval {
     maxDepth = 2,
     maxResults = 20,
   ): Promise<GraphRetrievalResult[]> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
+    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes))
+      .filter((n) => !n.stale)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges))
+      .filter((e) => !e.stale)
+      .sort((a, b) => a.id.localeCompare(b.id));
 
     const matchingNodes = allNodes.filter((n) => {
       const nameLower = n.name.toLowerCase();
@@ -73,7 +77,7 @@ export class GraphRetrieval {
 
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
-        for (const obsId of lastNode.sourceObservationIds) {
+        for (const obsId of [...lastNode.sourceObservationIds].sort()) {
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
 
@@ -97,7 +101,7 @@ export class GraphRetrieval {
         }
       }
 
-      for (const obsId of startNode.sourceObservationIds) {
+      for (const obsId of [...startNode.sourceObservationIds].sort()) {
         if (visitedObs.has(obsId)) continue;
         visitedObs.add(obsId);
         results.push({
@@ -110,7 +114,9 @@ export class GraphRetrieval {
       }
     }
 
-    results.sort((a, b) => b.score - a.score);
+    results.sort(
+      (a, b) => b.score - a.score || a.obsId.localeCompare(b.obsId),
+    );
     return results.slice(0, maxResults);
   }
 
@@ -119,8 +125,12 @@ export class GraphRetrieval {
     maxDepth = 1,
     maxResults = 10,
   ): Promise<GraphRetrievalResult[]> {
-    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes)).filter((n) => !n.stale);
-    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges)).filter((e) => !e.stale);
+    const allNodes = (await this.kv.list<GraphNode>(KV.graphNodes))
+      .filter((n) => !n.stale)
+      .sort((a, b) => a.id.localeCompare(b.id));
+    const allEdges = (await this.kv.list<GraphEdge>(KV.graphEdges))
+      .filter((e) => !e.stale)
+      .sort((a, b) => a.id.localeCompare(b.id));
 
     const linkedNodes = allNodes.filter((n) =>
       n.sourceObservationIds.some((id) => obsIds.includes(id)),
@@ -133,7 +143,7 @@ export class GraphRetrieval {
       const paths = this.dijkstraTraversal(node, allNodes, allEdges, maxDepth);
       for (const path of paths) {
         const lastNode = path[path.length - 1].node;
-        for (const obsId of lastNode.sourceObservationIds) {
+        for (const obsId of [...lastNode.sourceObservationIds].sort()) {
           if (visitedObs.has(obsId)) continue;
           visitedObs.add(obsId);
 
@@ -151,7 +161,9 @@ export class GraphRetrieval {
       }
     }
 
-    results.sort((a, b) => b.score - a.score);
+    results.sort(
+      (a, b) => b.score - a.score || a.obsId.localeCompare(b.obsId),
+    );
     return results.slice(0, maxResults);
   }
 
@@ -263,7 +275,7 @@ export class GraphRetrieval {
     pathTo.set(startNode.id, [{ node: startNode }]);
 
     const heap = new MinHeap<{ nodeId: string; depth: number; cost: number }>(
-      (a, b) => a.cost - b.cost,
+      (a, b) => a.cost - b.cost || a.nodeId.localeCompare(b.nodeId),
     );
     heap.push({ nodeId: startNode.id, depth: 0, cost: 0 });
 

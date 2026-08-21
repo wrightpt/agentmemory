@@ -1,7 +1,11 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { HybridSearch } from "../src/state/hybrid-search.js";
 import { SearchIndex } from "../src/state/search-index.js";
 import type { CompressedObservation, EmbeddingProvider } from "../src/types.js";
+import type {
+  VectorSearchResult,
+  VectorStore,
+} from "../src/state/vector-store.js";
 
 function makeObs(
   overrides: Partial<CompressedObservation> = {},
@@ -64,6 +68,88 @@ describe("HybridSearch", () => {
     expect(results[0].observation.id).toBe("obs_1");
     expect(results[0].vectorScore).toBe(0);
     expect(results[0].bm25Score).toBeGreaterThan(0);
+  });
+
+  it("awaits an asynchronous VectorStore without depending on local internals", async () => {
+    const obs = makeObs({ id: "obs_vector", sessionId: "ses_vector" });
+    await kv.set("mem:obs:ses_vector", "obs_vector", obs);
+    const search = vi.fn(
+      async (): Promise<VectorSearchResult[]> => [
+        {
+          obsId: "obs_vector",
+          sessionId: "ses_vector",
+          score: 0.91,
+        },
+      ],
+    );
+    const vector: VectorStore = {
+      add: async () => {},
+      remove: async () => {},
+      search,
+      size: 1,
+      clear: async () => {},
+    };
+    const embeddingProvider: EmbeddingProvider = {
+      name: "async-test",
+      dimensions: 3,
+      embed: async () => new Float32Array([1, 0, 0]),
+      embedBatch: async (texts) =>
+        texts.map(() => new Float32Array([1, 0, 0])),
+    };
+
+    const hybrid = new HybridSearch(
+      bm25,
+      vector,
+      embeddingProvider,
+      kv as never,
+    );
+    const results = await hybrid.search("semantic paraphrase", 4);
+
+    expect(search).toHaveBeenCalledWith(new Float32Array([1, 0, 0]), {
+      limit: 8,
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0].observation.id).toBe("obs_vector");
+    expect(results[0].vectorScore).toBe(0.91);
+  });
+
+  it("falls back to BM25 when the embedding service is unavailable", async () => {
+    const obs = makeObs({ id: "obs_fallback", sessionId: "ses_fallback" });
+    bm25.add(obs);
+    await kv.set("mem:obs:ses_fallback", "obs_fallback", obs);
+
+    const vectorSearch = vi.fn(async (): Promise<VectorSearchResult[]> => []);
+    const vector: VectorStore = {
+      add: async () => {},
+      remove: async () => {},
+      search: vectorSearch,
+      size: 1,
+      clear: async () => {},
+    };
+    const embeddingProvider: EmbeddingProvider = {
+      name: "unavailable-test",
+      dimensions: 3,
+      embed: vi.fn(async () => {
+        throw new Error("embedding service unavailable");
+      }),
+      embedBatch: async (texts) =>
+        texts.map(() => new Float32Array([1, 0, 0])),
+    };
+
+    const hybrid = new HybridSearch(
+      bm25,
+      vector,
+      embeddingProvider,
+      kv as never,
+    );
+    const results = await hybrid.search("auth", 5);
+
+    expect(results.map((result) => result.observation.id)).toEqual([
+      "obs_fallback",
+    ]);
+    expect(results[0].bm25Score).toBeGreaterThan(0);
+    expect(results[0].vectorScore).toBe(0);
+    expect(vectorSearch).not.toHaveBeenCalled();
   });
 
   it("returns empty results for no-match query", async () => {
