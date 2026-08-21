@@ -49,4 +49,21 @@ export class StateKV {
       payload: { scope },
     })
   }
+
+  async listGroups(): Promise<string[]> {
+    const result = await this.sdk.trigger<
+      Record<string, never>,
+      { groups?: unknown }
+    >({
+      function_id: 'state::list_groups',
+      payload: {},
+    })
+    if (
+      !Array.isArray(result?.groups) ||
+      result.groups.some((group) => typeof group !== 'string')
+    ) {
+      throw new Error('state::list_groups returned an invalid groups payload')
+    }
+    return result.groups as string[]
+  }
 }

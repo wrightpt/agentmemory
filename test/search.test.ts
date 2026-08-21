@@ -387,6 +387,52 @@ describe("mem::search", () => {
     setEmbeddingProvider(null);
   });
 
+  it("rebuildIndex discovers legacy observation scopes when session rows omit id", async () => {
+    const legacySessionId = "legacy_session_without_embedded_id";
+    const legacyObservation: CompressedObservation = {
+      id: "obs_legacy_scope",
+      sessionId: legacySessionId,
+      timestamp: "2026-01-01T00:00:00Z",
+      type: "discovery",
+      title: "Legacy scope discovery",
+      facts: ["State group names retain the missing session identity"],
+      narrative:
+        "Recovered institutional memory from an observation scope whose session row omitted id.",
+      concepts: ["legacy", "rebuild"],
+      files: [],
+      importance: 8,
+    };
+    await kv.set(KV.sessions, legacySessionId, {
+      status: "completed",
+      observationCount: 1,
+    });
+    await kv.set(
+      KV.observations(legacySessionId),
+      legacyObservation.id,
+      legacyObservation,
+    );
+    const groupAwareKv = {
+      ...kv,
+      listGroups: vi.fn(async () => [
+        KV.sessions,
+        KV.observations(legacySessionId),
+      ]),
+    };
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
+
+    await expect(rebuildIndex(groupAwareKv as never)).resolves.toBe(1);
+    expect(groupAwareKv.listGroups).toHaveBeenCalledTimes(1);
+    expect(
+      getSearchIndex().search("Legacy scope discovery", 5),
+    ).toEqual([
+      expect.objectContaining({
+        obsId: legacyObservation.id,
+        sessionId: legacySessionId,
+      }),
+    ]);
+  });
+
   it("rebuildIndex releases each session batch before loading the next one", async () => {
     const sessions = Array.from({ length: 11 }, (_, index) => ({
       id: `stream_session_${index}`,

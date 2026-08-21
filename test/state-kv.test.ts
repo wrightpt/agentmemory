@@ -41,6 +41,9 @@ function engineLikeTrigger() {
       const entries = store.get(payload.scope);
       return entries ? Array.from(entries.values()) : [];
     }
+    if (function_id === "state::list_groups") {
+      return { groups: Array.from(store.keys()) };
+    }
     throw new Error(`No function: ${function_id}`);
   };
 }
@@ -58,6 +61,27 @@ describe("StateKV engine boundary", () => {
     await expect(kv.get("mem:actions", "act_present")).resolves.toEqual({
       id: "act_present",
     });
+  });
+
+  it("lists state groups without exposing adapter-specific response shape", async () => {
+    const kv = new StateKV({ trigger: engineLikeTrigger() } as never);
+    await kv.set("mem:sessions", "ses_present", { id: "ses_present" });
+    await kv.set("mem:obs:ses_present", "obs_present", {
+      id: "obs_present",
+    });
+    await expect(kv.listGroups()).resolves.toEqual([
+      "mem:sessions",
+      "mem:obs:ses_present",
+    ]);
+  });
+
+  it("rejects malformed state group responses instead of publishing a partial rebuild", async () => {
+    const kv = new StateKV({
+      trigger: async () => ({ groups: ["mem:sessions", null] }),
+    } as never);
+    await expect(kv.listGroups()).rejects.toThrow(
+      "state::list_groups returned an invalid groups payload",
+    );
   });
 
   it("creates an action when the engine reports missing keys as undefined", async () => {
