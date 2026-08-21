@@ -688,7 +688,9 @@ describe("IndexPersistence", () => {
 
   it("scheduleSave debounces multiple calls", async () => {
     const bm25 = new SearchIndex();
-    const persistence = new IndexPersistence(kv as never, bm25, null);
+    const persistence = new IndexPersistence(kv as never, bm25, null, {
+      debounceMs: 5_000,
+    });
 
     persistence.scheduleSave();
     persistence.scheduleSave();
@@ -701,6 +703,21 @@ describe("IndexPersistence", () => {
 
     const saved = await kv.get<string>(BM25_SCOPE, BM25_MANIFEST_KEY);
     expect(saved).not.toBeNull();
+  });
+
+  it("waits for the default quiet period before snapshotting", async () => {
+    const bm25 = makeBm25("obs_quiet", "quiet period snapshot");
+    const persistence = new IndexPersistence(kv as never, bm25, null);
+
+    persistence.scheduleSave();
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    await expect(kv.get(BM25_SCOPE, BM25_MANIFEST_KEY)).resolves.toBeNull();
+
+    await vi.advanceTimersByTimeAsync(55_000);
+    await expect(
+      kv.get(BM25_SCOPE, BM25_MANIFEST_KEY),
+    ).resolves.not.toBeNull();
   });
 
   it("serializes overlapping explicit saves and coalesces a follow-up generation", async () => {
@@ -757,7 +774,9 @@ describe("IndexPersistence", () => {
   it("stop clears the pending timer", async () => {
     const bm25 = new SearchIndex();
     bm25.add(makeObs({ id: "obs_1", title: "auth handler" }));
-    const persistence = new IndexPersistence(kv as never, bm25, null);
+    const persistence = new IndexPersistence(kv as never, bm25, null, {
+      debounceMs: 5_000,
+    });
 
     persistence.scheduleSave();
     persistence.stop();
@@ -790,7 +809,9 @@ describe("IndexPersistence", () => {
     };
     const bm25 = new SearchIndex();
     bm25.add(makeObs({ id: "obs_1", title: "auth handler" }));
-    const persistence = new IndexPersistence(failingKv as never, bm25, null);
+    const persistence = new IndexPersistence(failingKv as never, bm25, null, {
+      debounceMs: 5_000,
+    });
 
     let unhandled = false;
     const onUnhandled = () => {
