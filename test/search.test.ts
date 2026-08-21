@@ -457,4 +457,45 @@ describe("mem::search", () => {
     setVectorIndex(null);
     setEmbeddingProvider(null);
   });
+
+  it("retries transient session observation reads before publishing a rebuild", async () => {
+    let attempts = 0;
+    const flakyKv = {
+      ...kv,
+      list: vi.fn(async <T>(scope: string): Promise<T[]> => {
+        if (scope === KV.observations("ses_1") && ++attempts < 3) {
+          throw new Error("transient observation read failure");
+        }
+        return kv.list<T>(scope);
+      }),
+    };
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
+
+    await expect(rebuildIndex(flakyKv as never)).resolves.toBe(2);
+    expect(attempts).toBe(3);
+    expect(getSearchIndex().size).toBe(2);
+  });
+
+  it("rejects a persistently incomplete rebuild and clears partial indexes", async () => {
+    let attempts = 0;
+    const failingKv = {
+      ...kv,
+      list: vi.fn(async <T>(scope: string): Promise<T[]> => {
+        if (scope === KV.observations("ses_1")) {
+          attempts++;
+          throw new Error("persistent observation read failure");
+        }
+        return kv.list<T>(scope);
+      }),
+    };
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
+
+    await expect(rebuildIndex(failingKv as never)).rejects.toThrow(
+      "failed to load observations for session ses_1 after 3 attempts",
+    );
+    expect(attempts).toBe(3);
+    expect(getSearchIndex().size).toBe(0);
+  });
 });

@@ -8,6 +8,7 @@ import type { CompressedObservation } from "../src/types.js";
 const BM25_SCOPE = "mem:index:bm25";
 const BM25_LEGACY_KEY = "data";
 const BM25_MANIFEST_KEY = "data:manifest";
+const REBUILD_BARRIER_KEY = "rebuild:in-progress";
 const VECTOR_LEGACY_KEY = "vectors";
 const VECTOR_MANIFEST_KEY = "vectors:manifest";
 
@@ -718,6 +719,186 @@ describe("IndexPersistence", () => {
     await expect(
       kv.get(BM25_SCOPE, BM25_MANIFEST_KEY),
     ).resolves.not.toBeNull();
+  });
+
+  it("suppresses snapshots and loads while a rebuild barrier is active", async () => {
+    const previous = makeBm25("obs_previous", "previous complete snapshot");
+    await new IndexPersistence(kv as never, previous, null, {
+      createGeneration: () => "gen_previous",
+      debounceMs: 10,
+    }).save();
+
+    const rebuilding = new IndexPersistence(
+      kv as never,
+      makeBm25("obs_rebuilt", "rebuilt snapshot"),
+      null,
+      { createGeneration: () => "gen_rebuilt", debounceMs: 10 },
+    );
+    await rebuilding.beginRebuild();
+    rebuilding.scheduleSave();
+    await rebuilding.save();
+    await vi.advanceTimersByTimeAsync(20);
+
+    const manifest = await getBm25Manifest(kv);
+    expect(manifest.generation).toBe("gen_previous");
+    await expect(
+      kv.get(BM25_SCOPE, REBUILD_BARRIER_KEY),
+    ).resolves.toMatchObject({ v: 1 });
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded).toEqual({ bm25: null, vector: null });
+  });
+
+  it("fails closed when the rebuild barrier cannot be read", async () => {
+    const previous = makeBm25("obs_previous", "previous complete snapshot");
+    await new IndexPersistence(kv as never, previous, null).save();
+    const guardedKv = {
+      ...kv,
+      get: vi.fn(async <T>(scope: string, key: string): Promise<T | null> => {
+        if (scope === BM25_SCOPE && key === REBUILD_BARRIER_KEY) {
+          throw new Error("barrier backend unavailable");
+        }
+        return kv.get<T>(scope, key);
+      }),
+    };
+
+    const loaded = await new IndexPersistence(
+      guardedKv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded).toEqual({ bm25: null, vector: null });
+    expect(guardedKv.get).not.toHaveBeenCalledWith(
+      BM25_SCOPE,
+      BM25_MANIFEST_KEY,
+    );
+  });
+
+  it("publishes rebuilt indexes before clearing the durable barrier", async () => {
+    const bm25 = makeBm25("obs_rebuilt", "complete rebuilt snapshot");
+    const vector = makeVector("obs_rebuilt");
+    const persistence = new IndexPersistence(kv as never, bm25, vector, {
+      createGeneration: (() => {
+        let generation = 0;
+        return () => `gen_complete_${++generation}`;
+      })(),
+    });
+
+    await persistence.beginRebuild();
+    await expect(persistence.completeRebuild()).resolves.toBe(true);
+    await expect(
+      kv.get(BM25_SCOPE, REBUILD_BARRIER_KEY),
+    ).resolves.toBeNull();
+
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded.bm25?.search("complete")[0]?.obsId).toBe("obs_rebuilt");
+    expect(loaded.vector?.size).toBe(1);
+  });
+
+  it("accepts a rebuild-barrier delete that committed before timing out", async () => {
+    const baseKv = mockKV();
+    const timeoutAfterCommitKv = {
+      ...baseKv,
+      delete: vi.fn(async (scope: string, key: string): Promise<void> => {
+        await baseKv.delete(scope, key);
+        if (scope === BM25_SCOPE && key === REBUILD_BARRIER_KEY) {
+          throw new Error("delete timed out after commit");
+        }
+      }),
+    };
+    const persistence = new IndexPersistence(
+      timeoutAfterCommitKv as never,
+      makeBm25("obs_committed", "delete committed snapshot"),
+      null,
+    );
+
+    await persistence.beginRebuild();
+    await expect(persistence.completeRebuild()).resolves.toBe(true);
+    const loaded = await new IndexPersistence(
+      baseKv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded.bm25?.size).toBe(1);
+  });
+
+  it("leaves the rebuild barrier active when either snapshot fails", async () => {
+    const baseKv = mockKV();
+    const failingKv = {
+      ...baseKv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (scope === BM25_SCOPE && key === VECTOR_MANIFEST_KEY) {
+          throw new Error("vector manifest unavailable");
+        }
+        return baseKv.set(scope, key, data);
+      }),
+    };
+    const persistence = new IndexPersistence(
+      failingKv as never,
+      makeBm25("obs_partial", "must not be restored"),
+      makeVector("obs_partial"),
+      {
+        createGeneration: (() => {
+          let generation = 0;
+          return () => `gen_failed_${++generation}`;
+        })(),
+      },
+    );
+
+    await persistence.beginRebuild();
+    await expect(persistence.completeRebuild()).resolves.toBe(false);
+    await expect(
+      baseKv.get(BM25_SCOPE, REBUILD_BARRIER_KEY),
+    ).resolves.toMatchObject({ v: 1 });
+    const loaded = await new IndexPersistence(
+      baseKv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded).toEqual({ bm25: null, vector: null });
+  });
+
+  it("coalesces writes arriving during rebuild publication into a follow-up", async () => {
+    const baseKv = mockKV();
+    const generations: string[] = [];
+    let queuedFollowUp = false;
+    let persistence!: IndexPersistence;
+    const guardedKv = {
+      ...baseKv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (scope.includes(":bm25:gen_1:") && !queuedFollowUp) {
+          queuedFollowUp = true;
+          persistence.scheduleSave();
+        }
+        return baseKv.set(scope, key, data);
+      }),
+    };
+    persistence = new IndexPersistence(
+      guardedKv as never,
+      makeBm25("obs_followup", "follow-up snapshot"),
+      null,
+      {
+        createGeneration: () => {
+          const generation = `gen_${generations.length + 1}`;
+          generations.push(generation);
+          return generation;
+        },
+        debounceMs: 10,
+      },
+    );
+
+    await persistence.beginRebuild();
+    await expect(persistence.completeRebuild()).resolves.toBe(true);
+    expect(generations).toEqual(["gen_1"]);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(generations).toEqual(["gen_1", "gen_2"]);
   });
 
   it("serializes overlapping explicit saves and coalesces a follow-up generation", async () => {
