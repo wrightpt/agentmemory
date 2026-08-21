@@ -254,6 +254,7 @@ export async function vectorIndexAddBatchGuarded(
 // REBUILD_EMBED_BATCH_SIZE for endpoints that prefer smaller/larger
 // batches. Set to 1 to fall back to the legacy per-item path.
 const DEFAULT_REBUILD_EMBED_BATCH = 32
+const REBUILD_SOURCE_READ_ATTEMPTS = 3
 
 function getRebuildEmbedBatchSize(): number {
   const raw = process.env.REBUILD_EMBED_BATCH_SIZE
@@ -262,7 +263,48 @@ function getRebuildEmbedBatchSize(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_REBUILD_EMBED_BATCH
 }
 
-export async function rebuildIndex(kv: StateKV): Promise<number> {
+async function listForRebuild<T>(
+  kv: StateKV,
+  scope: string,
+  label: string,
+): Promise<T[]> {
+  let lastError: unknown
+  for (let attempt = 1; attempt <= REBUILD_SOURCE_READ_ATTEMPTS; attempt++) {
+    try {
+      return await kv.list<T>(scope)
+    } catch (err) {
+      lastError = err
+      if (attempt < REBUILD_SOURCE_READ_ATTEMPTS) await Promise.resolve()
+    }
+  }
+  const detail = lastError instanceof Error ? lastError.message : String(lastError)
+  throw new Error(
+    `rebuildIndex: failed to load ${label} after ` +
+      `${REBUILD_SOURCE_READ_ATTEMPTS} attempts: ${detail}`,
+  )
+}
+
+let rebuildInFlight: Promise<number> | null = null
+
+export function rebuildIndex(kv: StateKV): Promise<number> {
+  if (rebuildInFlight) return rebuildInFlight
+  const operation = performRebuildIndex(kv)
+    .catch(async (err) => {
+      // Never leave a partial in-memory rebuild serving as if it were
+      // complete. The durable source rows remain authoritative and the boot
+      // barrier will force a clean retry.
+      getSearchIndex().clear()
+      await vectorStore?.clear()
+      throw err
+    })
+    .finally(() => {
+      if (rebuildInFlight === operation) rebuildInFlight = null
+    })
+  rebuildInFlight = operation
+  return operation
+}
+
+async function performRebuildIndex(kv: StateKV): Promise<number> {
   const idx = getSearchIndex()
   idx.clear()
 
@@ -298,44 +340,36 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
   // scopes, so they need a separate walk. Without this, mem::remember
   // entries vanish from BM25 on every restart even after the live-write
   // fix in remember.ts (#257).
-  try {
-    const memories = await kv.list<Memory>(KV.memories)
-    for (const memory of memories) {
-      if (memory.isLatest === false) continue
-      if (!memory.title || !memory.content) continue
-      idx.add(memoryToObservation(memory))
-      await enqueue({
-        id: memory.id,
-        sessionId: memory.sessionIds?.[0] ?? 'memory',
-        text: memory.title + ' ' + memory.content,
-        context: { kind: "memory", logId: memory.id },
-      })
-      count++
-    }
-  } catch (err) {
-    logger.warn('rebuildIndex: failed to load memories', {
-      error: err instanceof Error ? err.message : String(err),
+  const memories = await listForRebuild<Memory>(kv, KV.memories, "memories")
+  for (const memory of memories) {
+    if (memory.isLatest === false) continue
+    if (!memory.title || !memory.content) continue
+    idx.add(memoryToObservation(memory))
+    await enqueue({
+      id: memory.id,
+      sessionId: memory.sessionIds?.[0] ?? 'memory',
+      text: memory.title + ' ' + memory.content,
+      context: { kind: "memory", logId: memory.id },
     })
+    count++
   }
 
-  const sessions = await kv.list<Session>(KV.sessions)
+  const sessions = await listForRebuild<Session>(kv, KV.sessions, "sessions")
   if (!sessions.length) {
     await flush()
     return count
   }
 
-  const failedSessions: string[] = []
   for (let batch = 0; batch < sessions.length; batch += 10) {
     const chunk = sessions.slice(batch, batch + 10)
     const results = await Promise.all(
-      chunk.map(async (s) => {
-        try {
-          return await kv.list<CompressedObservation>(KV.observations(s.id))
-        } catch {
-          failedSessions.push(s.id)
-          return [] as CompressedObservation[]
-        }
-      })
+      chunk.map((s) =>
+        listForRebuild<CompressedObservation>(
+          kv,
+          KV.observations(s.id),
+          `observations for session ${s.id}`,
+        ),
+      ),
     )
     // Process each bounded session batch before requesting the next one.
     // Keeping every session's observations in obsPerSession doubled the live
@@ -359,10 +393,6 @@ export async function rebuildIndex(kv: StateKV): Promise<number> {
       }
     }
   }
-  if (failedSessions.length > 0) {
-    logger.warn('rebuildIndex: failed to load observations for sessions', { failedSessions })
-  }
-
   // Drain the last partial batch.
   await flush()
   return count

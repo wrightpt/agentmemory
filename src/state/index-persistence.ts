@@ -13,6 +13,7 @@ const FAILURE_LOG_THROTTLE_MS = 60_000;
 const INDEX_PERSISTENCE_FUNCTION_ID = "mem::index-persistence";
 const BM25_KEY = "data";
 const BM25_MANIFEST_KEY = "data:manifest";
+const REBUILD_BARRIER_KEY = "rebuild:in-progress";
 const BM25_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:bm25:`;
 const VECTOR_KEY = "vectors";
 const VECTOR_MANIFEST_KEY = "vectors:manifest";
@@ -25,6 +26,11 @@ type IndexShardManifest = {
   generation?: string;
   shards: Array<{ scope: string; key: string; chars: number }>;
   chars: number;
+};
+
+type RebuildBarrier = {
+  v: 1;
+  startedAt: string;
 };
 
 type IndexPersistenceOptions = {
@@ -80,8 +86,9 @@ function isValidShardDescriptor(
 
 export class IndexPersistence {
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private saveInFlight: Promise<void> | null = null;
+  private saveInFlight: Promise<boolean> | null = null;
   private saveRequested = false;
+  private rebuilding = false;
   private lastFailureLogAt = 0;
 
   constructor(
@@ -105,7 +112,7 @@ export class IndexPersistence {
     // observation would turn sustained agent activity into a permanent save
     // loop. Raw observations are already durable, and explicit save() still
     // flushes the latest index during graceful shutdown.
-    if (this.saveInFlight) {
+    if (this.rebuilding || this.saveInFlight) {
       this.timer = null;
       return;
     }
@@ -113,7 +120,12 @@ export class IndexPersistence {
   }
 
   private armScheduledSave(): void {
-    if (this.timer || this.saveInFlight || !this.saveRequested) return;
+    if (
+      this.timer ||
+      this.rebuilding ||
+      this.saveInFlight ||
+      !this.saveRequested
+    ) return;
     // setTimeout discards the returned promise, so any rejection inside
     // save() would surface as unhandledRejection and crash the process
     // under sustained iii-engine write timeouts (issue #204). Funnel
@@ -137,6 +149,11 @@ export class IndexPersistence {
     // the state visible at the call boundary. If another snapshot is active,
     // join it and then persist at most one coalesced follow-up generation.
     this.saveRequested = true;
+    // Raw observations/memories are already durable. Publishing a derived
+    // snapshot while a full rebuild is still walking those rows would make a
+    // partial index look authoritative after the next restart. Keep the
+    // request coalesced and let completeRebuild() flush the rebuilt index.
+    if (this.rebuilding) return;
     while (this.saveRequested || this.saveInFlight) {
       if (this.saveInFlight) {
         await this.saveInFlight;
@@ -147,6 +164,7 @@ export class IndexPersistence {
   }
 
   private async runScheduledSave(): Promise<void> {
+    if (this.rebuilding) return;
     if (this.saveInFlight) {
       await this.saveInFlight;
     }
@@ -156,31 +174,112 @@ export class IndexPersistence {
     if (this.saveRequested) this.armScheduledSave();
   }
 
-  private async runOneSave(): Promise<void> {
+  private async runOneSave(force = false): Promise<boolean> {
     if (this.saveInFlight) {
-      await this.saveInFlight;
-      return;
+      return this.saveInFlight;
     }
-    if (!this.saveRequested) return;
+    if (!force && !this.saveRequested) return true;
     this.saveRequested = false;
     const operation = this.persistCurrentIndexes();
     this.saveInFlight = operation;
     try {
-      await operation;
+      return await operation;
     } finally {
       if (this.saveInFlight === operation) this.saveInFlight = null;
     }
   }
 
-  private async persistCurrentIndexes(): Promise<void> {
+  private async persistCurrentIndexes(): Promise<boolean> {
     try {
       await this.saveBm25Index(this.bm25.serialize());
       if (this.vector) {
         await this.saveVectorIndex(this.vector.serialize());
       }
+      return true;
     } catch (err) {
       this.logFailure(err);
+      return false;
     }
+  }
+
+  /**
+   * Mark a full index rebuild before callers clear or mutate either index.
+   * The durable marker makes a crash, failed source read, or failed snapshot
+   * fail closed on the next boot: load() ignores all snapshots until a full
+   * rebuild has committed both BM25 and vector generations.
+   */
+  async beginRebuild(): Promise<void> {
+    if (this.rebuilding) return;
+    this.rebuilding = true;
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    try {
+      if (this.saveInFlight) await this.saveInFlight;
+      const barrier: RebuildBarrier = {
+        v: 1,
+        startedAt: new Date().toISOString(),
+      };
+      await this.kv.set(KV.bm25Index, REBUILD_BARRIER_KEY, barrier);
+      await this.auditIndexPersistence(
+        "rebuild_begin",
+        [statePath(KV.bm25Index, REBUILD_BARRIER_KEY)],
+        barrier,
+      );
+    } catch (err) {
+      this.rebuilding = false;
+      if (this.saveRequested) this.armScheduledSave();
+      throw err;
+    }
+  }
+
+  /**
+   * Publish the rebuilt indexes as one fail-closed logical operation. The
+   * BM25 and vector manifests may commit separately, but the rebuild barrier
+   * remains authoritative until both succeed. A save request arriving during
+   * the snapshot is retained for the normal quiet-period follow-up.
+   */
+  async completeRebuild(): Promise<boolean> {
+    if (!this.rebuilding) {
+      throw new Error("index persistence: rebuild has not been started");
+    }
+    const persisted = await this.runOneSave(true);
+    if (!persisted) return false;
+
+    try {
+      let deleteError: unknown;
+      try {
+        await this.kv.delete(KV.bm25Index, REBUILD_BARRIER_KEY);
+      } catch (err) {
+        // Like manifest publication, state deletion can commit and then time
+        // out at the transport boundary. Verify the authoritative row before
+        // deciding that the barrier is still active.
+        deleteError = err;
+      }
+      const remaining = await this.kv.get<RebuildBarrier>(
+        KV.bm25Index,
+        REBUILD_BARRIER_KEY,
+      );
+      if (remaining != null) {
+        throw new Error(
+          "rebuild barrier remained after delete" +
+            (deleteError ? `: ${errorMessage(deleteError)}` : ""),
+        );
+      }
+      await this.auditIndexPersistence(
+        "rebuild_complete",
+        [statePath(KV.bm25Index, REBUILD_BARRIER_KEY)],
+        { result: "committed" },
+      );
+    } catch (err) {
+      this.logFailure(err);
+      return false;
+    }
+
+    this.rebuilding = false;
+    if (this.saveRequested) this.armScheduledSave();
+    return true;
   }
 
   async load(): Promise<{
@@ -189,6 +288,24 @@ export class IndexPersistence {
   }> {
     let bm25: SearchIndex | null = null;
     let vector: LocalVectorStore | null = null;
+
+    const barrier = await this.readIndexValue<RebuildBarrier>(
+      KV.bm25Index,
+      REBUILD_BARRIER_KEY,
+      "rebuild barrier",
+      "manifest",
+    );
+    // A failed barrier read is indistinguishable from an in-progress rebuild.
+    // Likewise, any present value (including a legacy/malformed marker) must
+    // suppress snapshots: accepting them could silently restore partial data.
+    if (!barrier.ok || barrier.value != null) {
+      if (barrier.ok) {
+        logger.warn(
+          "index persistence: rebuild barrier present; ignoring persisted indexes",
+        );
+      }
+      return { bm25: null, vector: null };
+    }
 
     const bm25Data = await this.loadBm25Data();
     if (bm25Data && typeof bm25Data === "string") {

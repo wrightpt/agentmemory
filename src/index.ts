@@ -459,24 +459,37 @@ async function main() {
   const needsRebuild = bm25Index.size === 0;
 
   if (needsRebuild) {
-    // Fire-and-forget. rebuildIndex iterates every observation across
-    // every session and AWAITS an embedding-provider call per record.
-    // On a large corpus + rate-limited embedding endpoint that can
-    // take HOURS; awaiting it here blocks every subsequent boot step
-    // (including startViewerServer below, leaving the viewer port
-    // unbound for the duration). The index lazily fills in over time
-    // and search degrades gracefully — partial coverage > no viewer
-    // for hours. Errors still surface via the inner .catch.
-    void rebuildIndex(kv)
-      .then((indexCount) => {
-        if (indexCount > 0) {
-          bootLog(`Search index rebuilt: ${indexCount} entries`);
-          indexPersistence.scheduleSave();
-        }
-      })
-      .catch((err) => {
-        console.warn(`[agentmemory] Failed to rebuild search index:`, err);
-      });
+    // Establish the durable barrier before rebuildIndex clears either
+    // in-memory index. The rebuild itself stays fire-and-forget so a large
+    // embedding corpus cannot block the viewer/MCP surfaces for hours, but no
+    // intermediate snapshot can be accepted as complete after a restart.
+    try {
+      await indexPersistence.beginRebuild();
+      void rebuildIndex(kv)
+        .then(async (indexCount) => {
+          const committed = await indexPersistence.completeRebuild();
+          if (committed) {
+            bootLog(`Search index rebuilt: ${indexCount} entries`);
+          } else {
+            console.warn(
+              `[agentmemory] Rebuilt search index could not be persisted; ` +
+                `the rebuild barrier remains active for the next boot`,
+            );
+          }
+        })
+        .catch((err) => {
+          console.warn(
+            `[agentmemory] Failed to rebuild search index; ` +
+              `the rebuild barrier remains active for the next boot:`,
+            err,
+          );
+        });
+    } catch (err) {
+      console.warn(
+        `[agentmemory] Refusing to rebuild without a durable rebuild barrier:`,
+        err,
+      );
+    }
   } else {
     // Backfill memories into BM25 for users upgrading from <0.9.5: prior
     // versions of mem::remember never indexed memories, so the persisted
