@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { IndexPersistence } from "../src/state/index-persistence.js";
+import {
+  IndexPersistence,
+  shouldRebuildPersistedIndexes,
+} from "../src/state/index-persistence.js";
 import { SearchIndex } from "../src/state/search-index.js";
 import { VectorIndex } from "../src/state/vector-index.js";
 import { LocalVectorStore } from "../src/state/vector-store.js";
@@ -11,6 +14,7 @@ const BM25_MANIFEST_KEY = "data:manifest";
 const REBUILD_BARRIER_KEY = "rebuild:in-progress";
 const VECTOR_LEGACY_KEY = "vectors";
 const VECTOR_MANIFEST_KEY = "vectors:manifest";
+const VECTOR_FALLBACK_MANIFEST_KEY = "vectors:fallback-manifest";
 
 type TestIndexShardManifest = {
   v: 1;
@@ -82,6 +86,24 @@ async function getBm25Manifest(kv: MockKV): Promise<TestIndexShardManifest> {
   return manifest!;
 }
 
+async function getVectorManifest(
+  kv: MockKV,
+  key = VECTOR_MANIFEST_KEY,
+): Promise<TestIndexShardManifest> {
+  const manifest = await kv.get<TestIndexShardManifest>(BM25_SCOPE, key);
+  expect(manifest).not.toBeNull();
+  return manifest!;
+}
+
+function generationSequence(...generations: string[]): () => string {
+  let index = 0;
+  return () => {
+    const generation = generations[index++];
+    if (!generation) throw new Error("test generation sequence exhausted");
+    return generation;
+  };
+}
+
 describe("IndexPersistence", () => {
   let kv: ReturnType<typeof mockKV>;
 
@@ -92,6 +114,41 @@ describe("IndexPersistence", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("rebuilds when configured vectors are absent or restored from fallback", () => {
+    expect(
+      shouldRebuildPersistedIndexes({
+        bm25Size: 10,
+        vectorConfigured: true,
+        vectorLoaded: false,
+        vectorFallbackUsed: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRebuildPersistedIndexes({
+        bm25Size: 10,
+        vectorConfigured: true,
+        vectorLoaded: true,
+        vectorFallbackUsed: true,
+      }),
+    ).toBe(true);
+    expect(
+      shouldRebuildPersistedIndexes({
+        bm25Size: 10,
+        vectorConfigured: true,
+        vectorLoaded: true,
+        vectorFallbackUsed: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRebuildPersistedIndexes({
+        bm25Size: 10,
+        vectorConfigured: false,
+        vectorLoaded: false,
+        vectorFallbackUsed: false,
+      }),
+    ).toBe(false);
   });
 
   it("saves and loads BM25 index round-trip", async () => {
@@ -291,6 +348,75 @@ describe("IndexPersistence", () => {
     const loaded = await persistence.load();
     expect(loaded.vector).not.toBeNull();
     expect(loaded.vector!.size).toBe(1);
+  });
+
+  it("retains one previous vector generation and cleans the grandparent", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_1", "first snapshot"),
+      makeVector("obs_1"),
+      { createGeneration: generationSequence("bm25_1", "vector_1") },
+    ).save();
+    const vector1 = await getVectorManifest(kv);
+
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_2", "second snapshot"),
+      makeVector("obs_2"),
+      { createGeneration: generationSequence("bm25_2", "vector_2") },
+    ).save();
+    const vector2 = await getVectorManifest(kv);
+    const fallback2 = await getVectorManifest(kv, VECTOR_FALLBACK_MANIFEST_KEY);
+    expect(vector2.generation).toBe("vector_2");
+    expect(fallback2).toEqual(vector1);
+    await expect(
+      kv.get(vector1.shards[0].scope, vector1.shards[0].key),
+    ).resolves.toEqual(expect.any(String));
+
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_3", "third snapshot"),
+      makeVector("obs_3"),
+      { createGeneration: generationSequence("bm25_3", "vector_3") },
+    ).save();
+    const fallback3 = await getVectorManifest(kv, VECTOR_FALLBACK_MANIFEST_KEY);
+    expect(fallback3).toEqual(vector2);
+    await expect(
+      kv.get(vector1.shards[0].scope, vector1.shards[0].key),
+    ).resolves.toBeNull();
+    await expect(
+      kv.get(vector2.shards[0].scope, vector2.shards[0].key),
+    ).resolves.toEqual(expect.any(String));
+  });
+
+  it("restores the previous vector generation when current shards are missing", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_old", "previous snapshot"),
+      makeVector("obs_old"),
+      { createGeneration: generationSequence("bm25_old", "vector_old") },
+    ).save();
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_new", "current snapshot"),
+      makeVector("obs_new"),
+      { createGeneration: generationSequence("bm25_new", "vector_new") },
+    ).save();
+    const current = await getVectorManifest(kv);
+    await kv.delete(current.shards[0].scope, current.shards[0].key);
+
+    const persistence = new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    );
+    const loaded = await persistence.load();
+
+    expect(persistence.usedVectorFallback).toBe(true);
+    expect(loaded.vector?.size).toBe(1);
+    expect(
+      loaded.vector?.search(new Float32Array([0.1, 0.2, 0.3]))[0]?.obsId,
+    ).toBe("obs_old");
   });
 
   it("persists empty vector snapshots so cleared vectors do not reload", async () => {
@@ -509,6 +635,44 @@ describe("IndexPersistence", () => {
       null,
     ).load();
     expect(loaded.bm25!.search("bravo").length).toBe(1);
+  });
+
+  it("continues to vector publication after a committed BM25 manifest timeout", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_old", "alpha previous snapshot"),
+      makeVector("obs_old"),
+      { createGeneration: generationSequence("bm25_old", "vector_old") },
+    ).save();
+
+    const timeoutAfterCommitKv = {
+      ...kv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+          await kv.set(scope, key, data);
+          throw new Error("BM25 manifest timed out after commit");
+        }
+        return kv.set(scope, key, data);
+      }),
+    };
+    await new IndexPersistence(
+      timeoutAfterCommitKv as never,
+      makeBm25("obs_new", "bravo current snapshot"),
+      makeVector("obs_new"),
+      { createGeneration: generationSequence("bm25_new", "vector_new") },
+    ).save();
+
+    const vectorManifest = await getVectorManifest(kv);
+    expect(vectorManifest.generation).toBe("vector_new");
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded.bm25?.search("bravo")[0]?.obsId).toBe("obs_new");
+    expect(
+      loaded.vector?.search(new Float32Array([0.1, 0.2, 0.3]))[0]?.obsId,
+    ).toBe("obs_new");
   });
 
   it("deletes a shard that committed before set rejected", async () => {

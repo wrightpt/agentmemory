@@ -23,7 +23,10 @@ import { StateKV } from "./state/kv.js";
 import { KV } from "./state/schema.js";
 import { LocalVectorStore } from "./state/vector-store.js";
 import { HybridSearch } from "./state/hybrid-search.js";
-import { IndexPersistence } from "./state/index-persistence.js";
+import {
+  IndexPersistence,
+  shouldRebuildPersistedIndexes,
+} from "./state/index-persistence.js";
 import { registerPrivacyFunction } from "./functions/privacy.js";
 import { registerObserveFunction } from "./functions/observe.js";
 import { registerImageQuotaCleanup } from "./functions/image-quota-cleanup.js";
@@ -456,7 +459,16 @@ async function main() {
     }
   }
 
-  const needsRebuild = bm25Index.size === 0;
+  // A corrupt/missing vector snapshot must not silently turn a configured
+  // triple-stream engine into BM25+graph indefinitely. An intentionally empty
+  // vector snapshot restores as a real empty store; null means no trustworthy
+  // vector generation was available and requires a source-backed rebuild.
+  const needsRebuild = shouldRebuildPersistedIndexes({
+    bm25Size: bm25Index.size,
+    vectorConfigured: vectorStore !== null,
+    vectorLoaded: loaded?.vector != null,
+    vectorFallbackUsed: indexPersistence.usedVectorFallback,
+  });
 
   if (needsRebuild) {
     // Establish the durable barrier before rebuildIndex clears either

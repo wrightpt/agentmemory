@@ -17,6 +17,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **Vector snapshot fallback and self-repair.** Vector persistence now retains
+  one verified previous generation before publishing a replacement. If the
+  current manifest references missing or corrupt shards after a fast engine
+  shutdown, startup restores that fallback and schedules a source-backed full
+  rebuild instead of silently running BM25+graph without vectors. Manifest
+  writes that commit before a transport timeout are also recognized so vector
+  publication continues after a confirmed BM25 commit.
 - **Large-index shutdown grace.** `agentmemory stop` now gives the worker 120
   seconds by default to flush a sharded copy-on-write index before escalating
   to `SIGKILL`. Operators may set `AGENTMEMORY_WORKER_STOP_GRACE_MS`; values
