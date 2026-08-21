@@ -113,6 +113,64 @@ describe("HybridSearch", () => {
     expect(results[0].vectorScore).toBe(0.91);
   });
 
+  it("filters legacy routine vector-only noise while preserving exact BM25 recall", async () => {
+    const routine = makeObs({
+      id: "obs_routine",
+      sessionId: "ses_routine",
+      type: "command_run",
+      title: "resolveLaunchAuthorityV2 command output",
+      narrative: "Routine terminal output mentioning resolveLaunchAuthorityV2.",
+      importance: 5,
+    });
+    const decision = makeObs({
+      id: "obs_decision",
+      sessionId: "ses_decision",
+      type: "decision",
+      title: "Launch broker architecture",
+      narrative: "Workstation shell owns all interactive agent launches.",
+      importance: 8,
+    });
+    await kv.set("mem:obs:ses_routine", routine.id, routine);
+    await kv.set("mem:obs:ses_decision", decision.id, decision);
+    const vector: VectorStore = {
+      add: async () => {},
+      remove: async () => {},
+      search: async () => [
+        { obsId: routine.id, sessionId: routine.sessionId, score: 0.99 },
+        { obsId: decision.id, sessionId: decision.sessionId, score: 0.8 },
+      ],
+      size: 2,
+      clear: async () => {},
+    };
+    const embeddingProvider: EmbeddingProvider = {
+      name: "legacy-index-test",
+      dimensions: 2,
+      embed: async () => new Float32Array([1, 0]),
+      embedBatch: async (texts) =>
+        texts.map(() => new Float32Array([1, 0])),
+    };
+    const hybrid = new HybridSearch(
+      bm25,
+      vector,
+      embeddingProvider,
+      kv as never,
+    );
+
+    const semantic = await hybrid.search("different semantic paraphrase", 10);
+    expect(semantic.map((result) => result.observation.id)).toEqual([
+      "obs_decision",
+    ]);
+
+    bm25.add(routine);
+    const exact = await hybrid.search("resolveLaunchAuthorityV2", 10);
+    expect(exact.map((result) => result.observation.id)).toContain(
+      "obs_routine",
+    );
+    expect(
+      exact.find((result) => result.observation.id === "obs_routine")?.bm25Score,
+    ).toBeGreaterThan(0);
+  });
+
   it("falls back to BM25 when the embedding service is unavailable", async () => {
     const obs = makeObs({ id: "obs_fallback", sessionId: "ses_fallback" });
     bm25.add(obs);

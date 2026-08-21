@@ -375,7 +375,7 @@ describe("Smart Search Function", () => {
       expect(result.lessons).toBeUndefined();
     });
 
-    it("forwards project filter to mem::lesson-recall", async () => {
+    it("forwards current and global project filters to mem::lesson-recall", async () => {
       let receivedPayload: any = null;
       sdk.registerFunction("mem::lesson-recall", async (payload: any) => {
         receivedPayload = payload;
@@ -389,10 +389,133 @@ describe("Smart Search Function", () => {
 
       expect(receivedPayload).toMatchObject({
         query: "rebase",
-        project: "gitops-assistant",
+        projects: ["gitops-assistant", "global"],
         retrievalMode: "hybrid",
         compact: true,
       });
+    });
+
+    it("scope-ranks current, explicitly related, and global lessons deterministically", async () => {
+      let receivedPayload: any = null;
+      sdk.registerFunction("mem::lesson-recall", async (payload: any) => {
+        receivedPayload = payload;
+        return {
+          success: true,
+          lessons: [
+            {
+              lessonId: "lsn_related",
+              content: "Workstation shell is the launch authority.",
+              evidenceVerdict: "supported",
+              contradicted: false,
+              confidence: 0.9,
+              createdAt: "2026-08-20T00:00:00Z",
+              project: "workstation-shell",
+              tags: ["dsh"],
+              score: 0.9,
+            },
+            {
+              lessonId: "lsn_global",
+              content: "Launches need one authority.",
+              evidenceVerdict: "supported",
+              contradicted: false,
+              confidence: 0.9,
+              createdAt: "2026-08-20T00:00:00Z",
+              project: "global",
+              tags: ["architecture"],
+              score: 0.95,
+            },
+            {
+              lessonId: "lsn_current",
+              content: "Trading agents delegate launches to workstation shell.",
+              evidenceVerdict: "supported",
+              contradicted: false,
+              confidence: 0.9,
+              createdAt: "2026-08-20T00:00:00Z",
+              project: "trading-system",
+              tags: ["dsh"],
+              score: 0.85,
+            },
+          ],
+        };
+      });
+
+      const result = (await sdk.trigger("mem::smart-search", {
+        query: "Why is workstation-shell the DSH launch authority?",
+        currentProject: "trading-system",
+        currentRepo: "wrightpt/trading-system",
+        includeRelatedProjects: true,
+        relatedProjects: [
+          "wrightpt/workstation-shell",
+          "workstation-shell",
+        ],
+      })) as { lessons: any[] };
+
+      expect(receivedPayload).toMatchObject({
+        projects: [
+          "global",
+          "trading-system",
+          "workstation-shell",
+          "wrightpt/trading-system",
+          "wrightpt/workstation-shell",
+        ],
+        limit: 30,
+      });
+      expect(result.lessons.map((item) => item.lessonId)).toEqual([
+        "lsn_current",
+        "lsn_related",
+        "lsn_global",
+      ]);
+      expect(result.lessons).toEqual([
+        expect.objectContaining({
+          lessonId: "lsn_current",
+          scope: "current_repo",
+          score: 1.003,
+        }),
+        expect.objectContaining({
+          lessonId: "lsn_related",
+          scope: "related_repo",
+          score: 0.972,
+        }),
+        expect.objectContaining({
+          lessonId: "lsn_global",
+          scope: "global",
+          score: 0.931,
+        }),
+      ]);
+    });
+
+    it("resolves stored current and related aliases from canonical repository identity", async () => {
+      await kv.set("mem:project-relationships", "prrel_test", {
+        id: "prrel_test",
+        sourceRepoId: "wrightpt/trading-system",
+        targetRepoId: "wrightpt/workstation-shell",
+        relationType: "orchestrated_by",
+        sourceAliases: ["trading-system"],
+        targetAliases: ["workstation-shell"],
+        provenance: [],
+        createdAt: "2026-08-20T00:00:00Z",
+        updatedAt: "2026-08-20T00:00:00Z",
+        revision: 1,
+      });
+      let receivedPayload: any = null;
+      sdk.registerFunction("mem::lesson-recall", async (payload: any) => {
+        receivedPayload = payload;
+        return { success: true, lessons: [] };
+      });
+
+      await sdk.trigger("mem::smart-search", {
+        query: "DSH launch authority",
+        currentRepo: "wrightpt/trading-system",
+        includeRelatedProjects: true,
+      });
+
+      expect(receivedPayload.projects).toEqual([
+        "global",
+        "trading-system",
+        "workstation-shell",
+        "wrightpt/trading-system",
+        "wrightpt/workstation-shell",
+      ]);
     });
 
     it("tolerates mem::lesson-recall failure: returns empty lessons, observations unchanged", async () => {

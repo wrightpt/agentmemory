@@ -444,6 +444,8 @@ export interface CompactLessonResult {
   createdAt: string;
   project?: string;
   tags: string[];
+  scope?: RetrievalScope;
+  scopeReason?: string;
 }
 
 export interface TimelineEntry {

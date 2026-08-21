@@ -23,6 +23,7 @@ import {
 
 const MAX_QUERY_LENGTH = 2_048;
 const MAX_PROJECT_LENGTH = 512;
+const MAX_PROJECT_FILTERS = 32;
 const MAX_RECALL_LIMIT = 50;
 const MAX_FILTER_TAGS = 32;
 const MAX_FILTER_TAG_LENGTH = 256;
@@ -75,6 +76,7 @@ export type LessonRetrievalMode = "lexical" | "hybrid";
 export interface LessonRecallInput {
   query: string;
   project?: string;
+  projects?: string[];
   minConfidence: number;
   limit: number;
   retrievalMode: LessonRetrievalMode;
@@ -151,6 +153,12 @@ export function parseLessonRecallInput(raw: unknown): LessonRecallInputResult {
     const project = optionalString(
       record.project,
       "project",
+      MAX_PROJECT_LENGTH,
+    );
+    const projects = stringArray(
+      record.projects,
+      "projects",
+      MAX_PROJECT_FILTERS,
       MAX_PROJECT_LENGTH,
     );
     const minConfidence =
@@ -234,6 +242,7 @@ export function parseLessonRecallInput(raw: unknown): LessonRecallInputResult {
       value: {
         query,
         project,
+        projects,
         minConfidence,
         limit,
         retrievalMode,
@@ -261,6 +270,10 @@ export function selectLessonRecallCandidates(
   input: LessonRecallInput,
 ): LessonReadModel[] {
   const accessContext = lessonAccessContextFromPayload(input.accessContext);
+  const projectFilter = new Set([
+    ...(input.project ? [input.project] : []),
+    ...(input.projects ?? []),
+  ]);
   const normalized = storedLessons.map((lesson) => toLessonReadModel(lesson));
   if (new Set(normalized.map((lesson) => lesson.id)).size !== normalized.length) {
     throw new Error("lesson_state_unavailable");
@@ -273,7 +286,11 @@ export function selectLessonRecallCandidates(
     )
     .filter((lesson) => canReadLesson(lesson, accessContext))
     .filter((lesson) => lesson.confidence >= input.minConfidence)
-    .filter((lesson) => !input.project || lesson.project === input.project)
+    .filter(
+      (lesson) =>
+        projectFilter.size === 0 ||
+        (lesson.project !== undefined && projectFilter.has(lesson.project)),
+    )
     .filter(
       (lesson) =>
         !input.mechanismId ||

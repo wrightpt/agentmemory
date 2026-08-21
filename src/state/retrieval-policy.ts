@@ -47,6 +47,10 @@ const SCOPE_MULTIPLIER: Record<RetrievalScope, number> = {
   legacy_unattributed: 0.7,
 };
 
+export function retrievalScopeMultiplier(scope: RetrievalScope): number {
+  return SCOPE_MULTIPLIER[scope];
+}
+
 const SCOPE_ORDER: Record<RetrievalScope, number> = {
   current_mission: 0,
   current_repo: 1,
@@ -232,7 +236,7 @@ export function applyRetrievalPolicy<T>(
         ...classified,
         adjustedScore:
           candidate.baseScore *
-          (hasLocalContext ? SCOPE_MULTIPLIER[classified.scope] : 1) *
+          (hasLocalContext ? retrievalScopeMultiplier(classified.scope) : 1) *
           (hasLocalContext ? qualityMultiplier(candidate.provenance) : 1) *
           (hasLocalContext ? fileFactor : 1),
       };
