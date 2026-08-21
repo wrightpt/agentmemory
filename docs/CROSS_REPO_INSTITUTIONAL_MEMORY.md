@@ -28,6 +28,15 @@ snapshot-specific operations are kept outside the general interface so a
 future remote implementation can own its persistence instead of pretending to
 serialize into the local KV snapshot.
 
+Local index snapshots are copy-on-write and single-flight. Writes arriving
+during a large BM25/vector snapshot are coalesced into one later generation
+instead of publishing and cleaning up overlapping shard manifests. Explicit
+delete and shutdown flushes join the active generation and persist the latest
+requested state before returning. If a snapshot is unavailable at startup,
+rebuild hydrates observations in bounded session batches; the cumulative
+indexes remain in memory, but raw observations are released before the next
+batch is loaded.
+
 ## Canonical repository identity
 
 `project` remains the stable, backward-compatible project registry key.

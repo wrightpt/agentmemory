@@ -386,4 +386,75 @@ describe("mem::search", () => {
     setVectorIndex(null);
     setEmbeddingProvider(null);
   });
+
+  it("rebuildIndex releases each session batch before loading the next one", async () => {
+    const sessions = Array.from({ length: 11 }, (_, index) => ({
+      id: `stream_session_${index}`,
+      project: "streaming-rebuild",
+      cwd: `/tmp/streaming-rebuild-${index}`,
+      startedAt: "2026-01-01T00:00:00Z",
+      status: "completed" as const,
+      observationCount: 4,
+    }));
+    const observations = new Map(
+      sessions.map((session) => [
+        KV.observations(session.id),
+        Array.from({ length: 4 }, (_, index): CompressedObservation => ({
+          id: `${session.id}_obs_${index}`,
+          sessionId: session.id,
+          timestamp: "2026-01-01T00:00:00Z",
+          type: "decision",
+          title: `Streaming decision ${session.id} ${index}`,
+          facts: ["bounded hydration"],
+          narrative: "A durable architecture decision used to exercise streaming rebuild batches.",
+          concepts: ["streaming", "rebuild"],
+          files: [],
+          importance: 8,
+        })),
+      ]),
+    );
+    let releaseLastBatch!: () => void;
+    let markLastBatchStarted!: () => void;
+    const lastBatchGate = new Promise<void>((resolve) => {
+      releaseLastBatch = resolve;
+    });
+    const lastBatchStarted = new Promise<void>((resolve) => {
+      markLastBatchStarted = resolve;
+    });
+    const embedBatch = vi.fn(async (texts: string[]) => (
+      texts.map(() => new Float32Array([0.1, 0.2, 0.3]))
+    ));
+    const streamingKv = {
+      list: vi.fn(async <T>(scope: string): Promise<T[]> => {
+        if (scope === KV.memories) return [];
+        if (scope === KV.sessions) return sessions as T[];
+        if (scope === KV.observations(sessions[10].id)) {
+          markLastBatchStarted();
+          await lastBatchGate;
+        }
+        return (observations.get(scope) || []) as T[];
+      }),
+    };
+    setEmbeddingProvider({
+      name: "stream-test",
+      dimensions: 3,
+      embed: async () => new Float32Array([0.1, 0.2, 0.3]),
+      embedBatch,
+    });
+    setVectorIndex(new VectorIndex());
+
+    const rebuilding = rebuildIndex(streamingKv as never);
+    await lastBatchStarted;
+
+    // The first ten sessions contain 40 semantic rows, so the 32-item
+    // embedding batch must have flushed before session eleven is hydrated.
+    expect(embedBatch).toHaveBeenCalledTimes(1);
+
+    releaseLastBatch();
+    await expect(rebuilding).resolves.toBe(44);
+    expect(embedBatch).toHaveBeenCalledTimes(2);
+
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
+  });
 });
