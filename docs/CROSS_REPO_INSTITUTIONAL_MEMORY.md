@@ -33,11 +33,20 @@ use a trailing 60-second quiet period; writes arriving during a large
 BM25/vector snapshot are coalesced behind that quiet period instead of
 overlapping shard manifests or continuously repeating full-corpus saves. Raw
 observations remain durable while the derived index is dirty. Explicit delete
-and shutdown flushes join the active generation and persist the latest
-requested state before returning. If a snapshot is unavailable at startup,
-rebuild hydrates observations in bounded session batches; the cumulative
-indexes remain in memory, but raw observations are released before the next
-batch is loaded.
+and shutdown flushes join the active generation and perform at most one
+call-boundary follow-up; later writes re-arm the quiet-period flush instead of
+holding the caller in a permanent save loop. Shard reads and writes use four
+concurrent III calls, and production manifests alternate between fixed
+`bank-a`/`bank-b` scope names so weak asynchronous delete durability cannot
+grow the state engine's scope cardinality without bound. The local vector
+fallback shares those two banks: rewriting the inactive bank can temporarily
+overwrite the generation named by the fallback manifest, while the current
+manifest continues to reference the untouched bank. A crash in that window
+therefore keeps the primary snapshot loadable; a later double fault fails
+closed to a raw-observation rebuild instead of trusting a torn fallback. If a
+snapshot is unavailable at startup, rebuild hydrates observations in bounded
+session batches; the cumulative indexes remain in memory, but raw observations
+are released before the next batch is loaded.
 
 ## Non-authoritative Qdrant shadow
 

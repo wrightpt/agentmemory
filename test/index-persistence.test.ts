@@ -41,6 +41,7 @@ function mockKV() {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
     },
+    scopeNames: (): string[] => Array.from(store.keys()),
   };
 }
 
@@ -193,6 +194,146 @@ describe("IndexPersistence", () => {
     const loaded = await persistence.load();
     expect(loaded.bm25).not.toBeNull();
     expect(loaded.bm25!.search("auth").length).toBe(1);
+  });
+
+  it("bounds default BM25 shard scopes to two alternating banks", async () => {
+    const bm25 = makeBm25("obs_1", "bounded generation snapshot");
+    const persistence = new IndexPersistence(kv as never, bm25, null, {
+      shardChars: 80,
+    });
+
+    const generations: string[] = [];
+    for (let save = 0; save < 6; save++) {
+      persistence.scheduleSave();
+      await persistence.save();
+      generations.push((await getBm25Manifest(kv)).generation!);
+    }
+
+    expect(generations).toEqual([
+      "bank-a",
+      "bank-b",
+      "bank-a",
+      "bank-b",
+      "bank-a",
+      "bank-b",
+    ]);
+    const shardScopes = kv
+      .scopeNames()
+      .filter((scope) => scope.startsWith("mem:index:bm25:bm25:"));
+    expect(
+      new Set(
+        shardScopes.map((scope) => scope.split(":").at(-2)),
+      ),
+    ).toEqual(new Set(["bank-a", "bank-b"]));
+  });
+
+  it("audits one generation write instead of one row per shard", async () => {
+    const bm25 = makeBm25(
+      "obs_audit",
+      "generation-level audit ".repeat(80),
+    );
+    await new IndexPersistence(kv as never, bm25, null, {
+      shardChars: 80,
+    }).save();
+
+    const entries = await kv.list<{
+      functionId: string;
+      details: { action?: string; shards?: number };
+    }>("mem:audit");
+    const indexEntries = entries.filter(
+      (entry) => entry.functionId === "mem::index-persistence",
+    );
+    expect(
+      indexEntries.filter(
+        (entry) => entry.details.action === "generation_write",
+      ),
+    ).toHaveLength(1);
+    expect(
+      indexEntries.some((entry) => entry.details.action === "shard_write"),
+    ).toBe(false);
+    expect(
+      indexEntries.find(
+        (entry) => entry.details.action === "generation_write",
+      )?.details.shards,
+    ).toBeGreaterThan(1);
+  });
+
+  it("bounds concurrent shard writes and reads", async () => {
+    const baseKv = mockKV();
+    let active = 0;
+    let maxActive = 0;
+    const track = async <T>(operation: () => Promise<T>): Promise<T> => {
+      active++;
+      maxActive = Math.max(maxActive, active);
+      await Promise.resolve();
+      try {
+        return await operation();
+      } finally {
+        active--;
+      }
+    };
+    const guardedKv = {
+      ...baseKv,
+      get: async <T>(scope: string, key: string): Promise<T | null> =>
+        scope.startsWith("mem:index:bm25:bm25:")
+          ? track(() => baseKv.get<T>(scope, key))
+          : baseKv.get<T>(scope, key),
+      set: async <T>(scope: string, key: string, data: T): Promise<T> =>
+        scope.startsWith("mem:index:bm25:bm25:")
+          ? track(() => baseKv.set(scope, key, data))
+          : baseKv.set(scope, key, data),
+    };
+    const persistence = new IndexPersistence(
+      guardedKv as never,
+      makeBm25("obs_io", "bounded shard input output ".repeat(80)),
+      null,
+      {
+        shardChars: 80,
+        shardIoConcurrency: 2,
+        createGeneration: () => "gen_io",
+      },
+    );
+
+    await persistence.save();
+    expect(maxActive).toBe(2);
+
+    active = 0;
+    maxActive = 0;
+    const loaded = await persistence.load();
+    expect(loaded.bm25?.size).toBe(1);
+    expect(maxActive).toBe(2);
+  });
+
+  it("keeps the active bank loadable when the inactive bank write fails", async () => {
+    const first = makeBm25("obs_first", "first bank snapshot");
+    await new IndexPersistence(kv as never, first, null).save();
+    const second = makeBm25("obs_second", "second bank snapshot");
+    await new IndexPersistence(kv as never, second, null).save();
+    expect((await getBm25Manifest(kv)).generation).toBe("bank-b");
+
+    const failingKv = {
+      ...kv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        if (scope.startsWith("mem:index:bm25:bm25:bank-a:")) {
+          throw new Error("inactive bank unavailable");
+        }
+        return kv.set(scope, key, data);
+      }),
+    };
+    await new IndexPersistence(
+      failingKv as never,
+      makeBm25("obs_failed", "failed bank snapshot"),
+      null,
+    ).save();
+
+    expect((await getBm25Manifest(kv)).generation).toBe("bank-b");
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+    expect(loaded.bm25?.search("second")[0]?.obsId).toBe("obs_second");
+    expect(loaded.bm25?.search("failed")).toEqual([]);
   });
 
   it("loads legacy monolithic BM25 and vector snapshots", async () => {
@@ -1114,6 +1255,43 @@ describe("IndexPersistence", () => {
     expect(generations).toEqual(["gen_1", "gen_2"]);
     const loaded = await persistence.load();
     expect(loaded.bm25?.size).toBe(1);
+  });
+
+  it("returns from an explicit save when writes continue during snapshots", async () => {
+    const baseKv = mockKV();
+    const generations: string[] = [];
+    const scheduledDuring = new Set<string>();
+    let persistence!: IndexPersistence;
+    const guardedKv = {
+      ...baseKv,
+      set: vi.fn(async <T>(scope: string, key: string, data: T): Promise<T> => {
+        const generation = scope.match(/:bm25:(gen_\d+):/)?.[1];
+        if (generation && !scheduledDuring.has(generation)) {
+          scheduledDuring.add(generation);
+          persistence.scheduleSave();
+        }
+        return baseKv.set(scope, key, data);
+      }),
+    };
+    persistence = new IndexPersistence(
+      guardedKv as never,
+      makeBm25("obs_bounded", "bounded explicit snapshot"),
+      null,
+      {
+        createGeneration: () => {
+          const generation = `gen_${generations.length + 1}`;
+          generations.push(generation);
+          return generation;
+        },
+        debounceMs: 10,
+      },
+    );
+
+    await persistence.save();
+    expect(generations).toEqual(["gen_1"]);
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(generations).toEqual(["gen_1", "gen_2"]);
   });
 
   it("stop clears the pending timer", async () => {
