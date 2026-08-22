@@ -414,7 +414,7 @@ async function main() {
     return null;
   });
   if (loaded?.bm25 && loaded.bm25.size > 0) {
-    bm25Index.restoreFrom(loaded.bm25);
+    bm25Index.adoptFrom(loaded.bm25);
     bootLog(
       `Loaded persisted BM25 index (${bm25Index.size} docs)`,
     );

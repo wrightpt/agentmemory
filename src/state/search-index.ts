@@ -195,6 +195,21 @@ export class SearchIndex {
     this.sortedTerms = null;
   }
 
+  adoptFrom(other: SearchIndex): void {
+    if (other === this) return;
+    this.entries = other.entries;
+    this.invertedIndex = other.invertedIndex;
+    this.docTermCounts = other.docTermCounts;
+    this.totalDocLength = other.totalDocLength;
+    this.sortedTerms = other.sortedTerms;
+
+    other.entries = new Map();
+    other.invertedIndex = new Map();
+    other.docTermCounts = new Map();
+    other.totalDocLength = 0;
+    other.sortedTerms = null;
+  }
+
   serialize(): string {
     const entries = Array.from(this.entries.entries());
     const inverted = Array.from(this.invertedIndex.entries()).map(

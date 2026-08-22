@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-08-22T04:33:15.000Z",
+  "before_revision": "3ecdff1ba27a488e919621a7660bb093c3a56cbe",
+  "before_source_note": "The persistence and SearchIndex source is byte-identical at 4a82c78 and deployed 3ecdff1.",
+  "live_read_only_inventory": {
+    "state_store_bytes_approx": 1400000000,
+    "bm25_manifest": {
+      "generation": "idx_mt3vew4i_466afa46ea22",
+      "chars": 212895408,
+      "shards": 107
+    },
+    "vector_manifest": {
+      "chars": 3633697,
+      "shards": 2
+    },
+    "vector_fallback_manifest": {
+      "chars": 3631581,
+      "shards": 2
+    },
+    "referenced_files": 111,
+    "referenced_bytes": 240506660,
+    "orphan_files": 381,
+    "orphan_bytes": 834511824,
+    "snapshot_audit_aug_21_count": 265,
+    "snapshot_audit_aug_21_logical_bytes": 30923764531
+  },
+  "synthetic_snapshot_fixture": {
+    "documents": 200,
+    "saves": 3,
+    "shard_chars": 500,
+    "shards_per_snapshot": 139,
+    "before": {
+      "shard_scopes": 417,
+      "generations": 3,
+      "index_persistence_audit_rows": 701,
+      "max_concurrent_shard_calls": 139,
+      "state_set_calls": 1121
+    },
+    "after": {
+      "shard_scopes": 278,
+      "generations": 2,
+      "index_persistence_audit_rows": 9,
+      "max_concurrent_shard_calls": 4,
+      "state_set_calls": 429
+    }
+  },
+  "search_index_transfer_fixture": {
+    "documents": 25000,
+    "copy": {
+      "heap_delta_bytes": 56864568,
+      "rss_delta_bytes": 58736640,
+      "source_size_after": 25000,
+      "target_size_after": 25000
+    },
+    "adopt": {
+      "heap_delta_bytes": 1848,
+      "rss_delta_bytes": 131072,
+      "source_size_after": 0,
+      "target_size_after": 25000
+    }
+  }
+}

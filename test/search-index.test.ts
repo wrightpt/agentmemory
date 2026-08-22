@@ -89,6 +89,17 @@ describe("SearchIndex", () => {
     expect(index.search("auth")).toEqual([]);
   });
 
+  it("adopts a restored index without retaining a duplicate owner", () => {
+    const restored = new SearchIndex();
+    restored.add(makeObs({ id: "obs_restored", title: "restored auth index" }));
+
+    index.adoptFrom(restored);
+
+    expect(index.search("restored")[0]?.obsId).toBe("obs_restored");
+    expect(restored.size).toBe(0);
+    expect(restored.search("restored")).toEqual([]);
+  });
+
   // Regression coverage: deleted docs must not keep occupying result
   // slots after remove(). Without remove(), a limit-capped search can
   // return fewer live results than requested because the slot is held

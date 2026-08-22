@@ -4,23 +4,27 @@ import {
   type PersistableLocalVectorStore,
 } from "./vector-store.js";
 import type { StateKV } from "./kv.js";
-import { KV, generateId } from "./schema.js";
+import { KV } from "./schema.js";
+import {
+  BM25_LEGACY_KEY,
+  BM25_MANIFEST_KEY,
+  BM25_SHARD_SCOPE_PREFIX,
+  INDEX_SHARD_KEY,
+  REBUILD_BARRIER_KEY,
+  VECTOR_FALLBACK_MANIFEST_KEY,
+  VECTOR_LEGACY_KEY,
+  VECTOR_MANIFEST_KEY,
+  VECTOR_SHARD_SCOPE_PREFIX,
+} from "./index-persistence-layout.js";
 import { logger } from "../logger.js";
 import { safeAudit } from "../functions/audit.js";
 
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const FAILURE_LOG_THROTTLE_MS = 60_000;
 const INDEX_PERSISTENCE_FUNCTION_ID = "mem::index-persistence";
-const BM25_KEY = "data";
-const BM25_MANIFEST_KEY = "data:manifest";
-const REBUILD_BARRIER_KEY = "rebuild:in-progress";
-const BM25_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:bm25:`;
-const VECTOR_KEY = "vectors";
-const VECTOR_MANIFEST_KEY = "vectors:manifest";
-const VECTOR_FALLBACK_MANIFEST_KEY = "vectors:fallback-manifest";
-const VECTOR_SHARD_SCOPE_PREFIX = `${KV.bm25Index}:vectors:`;
-const INDEX_SHARD_KEY = "data";
 const DEFAULT_INDEX_SHARD_CHARS = 2_000_000;
+const DEFAULT_SHARD_IO_CONCURRENCY = 4;
+const INDEX_GENERATION_BANKS = ["bank-a", "bank-b"] as const;
 
 type IndexShardManifest = {
   v: 1;
@@ -36,6 +40,7 @@ type RebuildBarrier = {
 
 type IndexPersistenceOptions = {
   shardChars?: number;
+  shardIoConcurrency?: number;
   createGeneration?: () => string;
   debounceMs?: number;
 };
@@ -58,8 +63,25 @@ function shardChars(options: IndexPersistenceOptions): number {
   return wholeChars >= 1 ? wholeChars : DEFAULT_INDEX_SHARD_CHARS;
 }
 
-function createIndexGeneration(): string {
-  return generateId("idx");
+function shardIoConcurrency(options: IndexPersistenceOptions): number {
+  const configured = options.shardIoConcurrency;
+  if (typeof configured !== "number" || !Number.isFinite(configured)) {
+    return DEFAULT_SHARD_IO_CONCURRENCY;
+  }
+  const wholeConcurrency = Math.floor(configured);
+  return wholeConcurrency >= 1 ? wholeConcurrency : DEFAULT_SHARD_IO_CONCURRENCY;
+}
+
+function isBoundedGeneration(generation: string | undefined): boolean {
+  return INDEX_GENERATION_BANKS.some((bank) => bank === generation);
+}
+
+function nextBoundedGeneration(
+  previous: IndexShardManifest | null,
+): (typeof INDEX_GENERATION_BANKS)[number] {
+  return previous?.generation === INDEX_GENERATION_BANKS[0]
+    ? INDEX_GENERATION_BANKS[1]
+    : INDEX_GENERATION_BANKS[0];
 }
 
 function statePath(scope: string, key: string): string {
@@ -169,13 +191,10 @@ export class IndexPersistence {
     // partial index look authoritative after the next restart. Keep the
     // request coalesced and let completeRebuild() flush the rebuilt index.
     if (this.rebuilding) return;
-    while (this.saveRequested || this.saveInFlight) {
-      if (this.saveInFlight) {
-        await this.saveInFlight;
-        continue;
-      }
-      await this.runOneSave();
-    }
+    const activeAtCallBoundary = this.saveInFlight;
+    if (activeAtCallBoundary) await activeAtCallBoundary;
+    if (this.saveRequested) await this.runOneSave();
+    if (this.saveRequested) this.armScheduledSave();
   }
 
   private async runScheduledSave(): Promise<void> {
@@ -370,7 +389,7 @@ export class IndexPersistence {
     await this.saveShardedIndex(
       serialized,
       BM25_MANIFEST_KEY,
-      BM25_KEY,
+      BM25_LEGACY_KEY,
       BM25_SHARD_SCOPE_PREFIX,
     );
   }
@@ -379,7 +398,7 @@ export class IndexPersistence {
     await this.saveShardedIndex(
       serialized,
       VECTOR_MANIFEST_KEY,
-      VECTOR_KEY,
+      VECTOR_LEGACY_KEY,
       VECTOR_SHARD_SCOPE_PREFIX,
       VECTOR_FALLBACK_MANIFEST_KEY,
     );
@@ -400,8 +419,10 @@ export class IndexPersistence {
           .get<IndexShardManifest>(KV.bm25Index, fallbackManifestKey)
           .catch(() => null)
       : null;
-    const generation =
-      this.options.createGeneration?.() ?? createIndexGeneration();
+    const boundedGenerations = this.options.createGeneration === undefined;
+    const generation = boundedGenerations
+      ? nextBoundedGeneration(previous)
+      : this.options.createGeneration!();
     const chunkChars = shardChars(this.options);
     const shards: IndexShardManifest["shards"] = [];
     const chunks: string[] = [];
@@ -417,28 +438,36 @@ export class IndexPersistence {
       chunks.push(chunk);
     }
 
-    const writeResults = await Promise.allSettled(
-      shards.map(async (shard, index) => {
-        const chunk = chunks[index] ?? "";
-        await this.kv.set(shard.scope, shard.key, chunk);
-        await this.auditIndexPersistence("shard_write", [
-          statePath(shard.scope, shard.key),
-        ], {
-          scope: shard.scope,
-          key: shard.key,
-          manifestKey,
-          generation,
-          chars: chunk.length,
-        });
-      }),
-    );
-    const failedWrite = writeResults.find(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
+    let failedWrite: PromiseRejectedResult | undefined;
+    const concurrency = shardIoConcurrency(this.options);
+    for (let offset = 0; offset < shards.length; offset += concurrency) {
+      const writeResults = await Promise.allSettled(
+        shards.slice(offset, offset + concurrency).map(async (shard, index) => {
+          const chunk = chunks[offset + index] ?? "";
+          await this.kv.set(shard.scope, shard.key, chunk);
+        }),
+      );
+      failedWrite = writeResults.find(
+        (result): result is PromiseRejectedResult =>
+          result.status === "rejected",
+      );
+      if (failedWrite) break;
+    }
     if (failedWrite) {
       await this.deleteShards(shards, "shard_write_rollback");
       throw failedWrite.reason;
     }
+    await this.auditIndexPersistence(
+      "generation_write",
+      [this.generationTarget(shards)],
+      {
+        manifestKey,
+        generation,
+        chars: serialized.length,
+        shards: shards.length,
+        result: "written",
+      },
+    );
 
     const nextManifest: IndexShardManifest = {
       v: 1,
@@ -487,19 +516,28 @@ export class IndexPersistence {
             (shard) => `${shard.scope}\0${shard.key}`,
           ),
         );
-        for (const shard of oldFallback.shards) {
-          if (retainedShardIds.has(`${shard.scope}\0${shard.key}`)) continue;
-          await this.deleteShards([shard], "fallback_generation_cleanup");
-        }
+        await this.deleteShards(
+          oldFallback.shards.filter(
+            (shard) =>
+              !retainedShardIds.has(`${shard.scope}\0${shard.key}`),
+          ),
+          "fallback_generation_cleanup",
+        );
       }
-    } else if (previous?.v === 1 && Array.isArray(previous.shards)) {
+    } else if (
+      previous?.v === 1 &&
+      Array.isArray(previous.shards) &&
+      (!boundedGenerations || !isBoundedGeneration(previous.generation))
+    ) {
       const currentShardIds = new Set(
         shards.map((shard) => `${shard.scope}\0${shard.key}`),
       );
-      for (const shard of previous.shards) {
-        if (currentShardIds.has(`${shard.scope}\0${shard.key}`)) continue;
-        await this.deleteShards([shard], "previous_generation_cleanup");
-      }
+      await this.deleteShards(
+        previous.shards.filter(
+          (shard) => !currentShardIds.has(`${shard.scope}\0${shard.key}`),
+        ),
+        "previous_generation_cleanup",
+      );
     }
   }
 
@@ -562,12 +600,12 @@ export class IndexPersistence {
     key: string,
     reason: string,
   ): Promise<void> {
-    let result = "deleted";
+    let result = "delete_acknowledged";
     let error: string | undefined;
     try {
       await this.kv.delete(scope, key);
     } catch (err) {
-      result = "failed";
+      result = "delete_failed";
       error = errorMessage(err);
     }
     await this.auditIndexPersistence("delete", [statePath(scope, key)], {
@@ -583,9 +621,40 @@ export class IndexPersistence {
     shards: IndexShardManifest["shards"],
     reason: string,
   ): Promise<void> {
+    if (shards.length === 0) return;
+    const failures: Array<{ scope: string; key: string; error: string }> = [];
+    let acknowledged = 0;
     for (const shard of shards) {
-      await this.deleteKey(shard.scope, shard.key, reason);
+      try {
+        await this.kv.delete(shard.scope, shard.key);
+        acknowledged++;
+      } catch (err) {
+        failures.push({
+          scope: shard.scope,
+          key: shard.key,
+          error: errorMessage(err),
+        });
+      }
     }
+    await this.auditIndexPersistence(
+      "generation_cleanup",
+      [this.generationTarget(shards)],
+      {
+        reason,
+        attempted: shards.length,
+        acknowledged,
+        failed: failures.length,
+        failures: failures.slice(0, 5),
+        durability: "iii_file_adapter_async",
+      },
+    );
+  }
+
+  private generationTarget(shards: IndexShardManifest["shards"]): string {
+    const first = shards[0];
+    if (!first) return KV.bm25Index;
+    const separator = first.scope.lastIndexOf(":");
+    return separator > 0 ? first.scope.slice(0, separator) : first.scope;
   }
 
   private async isManifestPublished(
@@ -616,12 +685,16 @@ export class IndexPersistence {
   }
 
   private async loadBm25Data(): Promise<string | null> {
-    return this.loadShardedData(BM25_KEY, BM25_MANIFEST_KEY, "BM25");
+    return this.loadShardedData(
+      BM25_LEGACY_KEY,
+      BM25_MANIFEST_KEY,
+      "BM25",
+    );
   }
 
   private async loadVectorData(): Promise<string | null> {
     const current = await this.loadShardedData(
-      VECTOR_KEY,
+      VECTOR_LEGACY_KEY,
       VECTOR_MANIFEST_KEY,
       "vector",
     );
@@ -727,12 +800,24 @@ export class IndexPersistence {
         return null;
       }
     }
-    const loadedShards = await Promise.all(
-      manifest.shards.map(async (shard) => ({
-        shard,
-        chunk: await this.kv.get<string>(shard.scope, shard.key).catch(() => null),
-      })),
-    );
+    const loadedShards: Array<{
+      shard: IndexShardManifest["shards"][number];
+      chunk: string | null;
+    }> = [];
+    const concurrency = shardIoConcurrency(this.options);
+    for (let offset = 0; offset < manifest.shards.length; offset += concurrency) {
+      const batch = manifest.shards.slice(offset, offset + concurrency);
+      loadedShards.push(
+        ...(await Promise.all(
+          batch.map(async (shard) => ({
+            shard,
+            chunk: await this.kv
+              .get<string>(shard.scope, shard.key)
+              .catch(() => null),
+          })),
+        )),
+      );
+    }
     const chunks: string[] = [];
     let chars = 0;
     for (const { shard, chunk } of loadedShards) {
