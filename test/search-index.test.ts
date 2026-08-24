@@ -100,6 +100,85 @@ describe("SearchIndex", () => {
     expect(restored.search("restored")).toEqual([]);
   });
 
+  it("replaces an existing id without retaining stale postings", () => {
+    index.add(
+      makeObs({
+        id: "obs_replace",
+        title: "alpha marker",
+        subtitle: "",
+        narrative: "alpha marker",
+        facts: [],
+        concepts: [],
+        files: [],
+      }),
+    );
+    index.add(
+      makeObs({
+        id: "obs_replace",
+        title: "beta marker",
+        subtitle: "",
+        narrative: "beta marker",
+        facts: [],
+        concepts: [],
+        files: [],
+      }),
+    );
+
+    expect(index.size).toBe(1);
+    expect(index.search("alpha")).toEqual([]);
+    expect(index.search("beta")[0]?.obsId).toBe("obs_replace");
+  });
+
+  it("serializes compact v3 postings without duplicate docTerms", () => {
+    index.add(makeObs({ id: "obs_a", title: "alpha beta" }));
+    index.add(makeObs({ id: "obs_b", title: "beta gamma" }));
+    const before = index.search("alpha beta", 10);
+
+    const serialized = index.serialize();
+    const persisted = JSON.parse(serialized);
+    const restored = SearchIndex.deserialize(serialized);
+
+    expect(persisted.v).toBe(3);
+    expect(persisted).not.toHaveProperty("docTerms");
+    expect(persisted.inverted).toEqual(expect.any(Array));
+    expect(restored.search("alpha beta", 10)).toEqual(before);
+  });
+
+  it("migrates v2 snapshots and rewrites them as compact v3", () => {
+    const legacy = JSON.stringify({
+      v: 2,
+      entries: [
+        [
+          "obs_legacy",
+          { obsId: "obs_legacy", sessionId: "ses_legacy", termCount: 3 },
+        ],
+      ],
+      inverted: [
+        ["alpha", ["obs_legacy"]],
+        ["beta", ["obs_legacy"]],
+      ],
+      docTerms: [
+        [
+          "obs_legacy",
+          [
+            ["alpha", 2],
+            ["beta", 1],
+          ],
+        ],
+      ],
+      totalDocLength: 3,
+    });
+
+    const restored = SearchIndex.deserialize(legacy);
+    const rewritten = JSON.parse(restored.serialize());
+
+    expect(restored.size).toBe(1);
+    expect(restored.getSessionId("obs_legacy")).toBe("ses_legacy");
+    expect(restored.search("alpha")[0]?.obsId).toBe("obs_legacy");
+    expect(rewritten.v).toBe(3);
+    expect(rewritten).not.toHaveProperty("docTerms");
+  });
+
   // Regression coverage: deleted docs must not keep occupying result
   // slots after remove(). Without remove(), a limit-capped search can
   // return fewer live results than requested because the slot is held
