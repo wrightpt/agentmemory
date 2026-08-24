@@ -349,6 +349,7 @@ export interface HealthSnapshot {
   memory: {
     heapUsed: number;
     heapTotal: number;
+    heapLimit?: number;
     rss: number;
     external: number;
   };
