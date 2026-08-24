@@ -4,15 +4,14 @@ import { getSynonyms } from "./synonyms.js";
 import { segmentCjk, hasCjk } from "./cjk-segmenter.js";
 
 interface IndexEntry {
-  obsId: string;
   sessionId: string;
   termCount: number;
+  terms: string[];
 }
 
 export class SearchIndex {
   private entries: Map<string, IndexEntry> = new Map();
-  private invertedIndex: Map<string, Set<string>> = new Map();
-  private docTermCounts: Map<string, Map<string, number>> = new Map();
+  private invertedIndex: Map<string, Map<string, number>> = new Map();
   private totalDocLength = 0;
   private sortedTerms: string[] | null = null;
 
@@ -20,28 +19,28 @@ export class SearchIndex {
   private readonly b = 0.75;
 
   add(obs: CompressedObservation): void {
+    if (this.entries.has(obs.id)) this.remove(obs.id);
+
     const terms = this.extractTerms(obs);
     const termFreq = new Map<string, number>();
-    let termCount = 0;
-
     for (const term of terms) {
       termFreq.set(term, (termFreq.get(term) || 0) + 1);
-      termCount++;
     }
 
     this.entries.set(obs.id, {
-      obsId: obs.id,
       sessionId: obs.sessionId,
-      termCount,
+      termCount: terms.length,
+      terms: Array.from(termFreq.keys()),
     });
-    this.docTermCounts.set(obs.id, termFreq);
-    this.totalDocLength += termCount;
+    this.totalDocLength += terms.length;
 
-    for (const term of termFreq.keys()) {
-      if (!this.invertedIndex.has(term)) {
-        this.invertedIndex.set(term, new Set());
+    for (const [term, frequency] of termFreq) {
+      let postings = this.invertedIndex.get(term);
+      if (!postings) {
+        postings = new Map();
+        this.invertedIndex.set(term, postings);
       }
-      this.invertedIndex.get(term)!.add(obs.id);
+      postings.set(obs.id, frequency);
     }
 
     this.sortedTerms = null;
@@ -59,18 +58,11 @@ export class SearchIndex {
     const entry = this.entries.get(id);
     if (!entry) return;
 
-    const termFreq = this.docTermCounts.get(id);
-    if (termFreq) {
-      for (const term of termFreq.keys()) {
-        const postingList = this.invertedIndex.get(term);
-        if (postingList) {
-          postingList.delete(id);
-          if (postingList.size === 0) {
-            this.invertedIndex.delete(term);
-          }
-        }
-      }
-      this.docTermCounts.delete(id);
+    for (const term of entry.terms) {
+      const postings = this.invertedIndex.get(term);
+      if (!postings) continue;
+      postings.delete(id);
+      if (postings.size === 0) this.invertedIndex.delete(term);
     }
 
     this.totalDocLength = Math.max(0, this.totalDocLength - entry.termCount);
@@ -113,10 +105,8 @@ export class SearchIndex {
         const df = matchingDocs.size;
         const idf = Math.log((N - df + 0.5) / (df + 0.5) + 1);
 
-        for (const obsId of matchingDocs) {
+        for (const [obsId, tf] of matchingDocs) {
           const entry = this.entries.get(obsId)!;
-          const docTerms = this.docTermCounts.get(obsId);
-          const tf = docTerms?.get(term) || 0;
           const docLen = entry.termCount;
 
           const numerator = tf * (this.k1 + 1);
@@ -138,10 +128,8 @@ export class SearchIndex {
         const prefixDf = obsIds.size;
         const prefixIdf =
           Math.log((N - prefixDf + 0.5) / (prefixDf + 0.5) + 1) * 0.5;
-        for (const obsId of obsIds) {
+        for (const [obsId, tf] of obsIds) {
           const entry = this.entries.get(obsId)!;
-          const docTerms = this.docTermCounts.get(obsId);
-          const tf = docTerms?.get(indexTerm) || 0;
           const docLen = entry.termCount;
           const numerator = tf * (this.k1 + 1);
           const denominator =
@@ -170,25 +158,21 @@ export class SearchIndex {
   clear(): void {
     this.entries.clear();
     this.invertedIndex.clear();
-    this.docTermCounts.clear();
     this.totalDocLength = 0;
     this.sortedTerms = null;
   }
 
   restoreFrom(other: SearchIndex): void {
     this.entries = new Map(
-      Array.from(other.entries.entries()).map(([k, v]) => [k, { ...v }]),
-    );
-    this.invertedIndex = new Map(
-      Array.from(other.invertedIndex.entries()).map(([k, v]) => [
-        k,
-        new Set(v),
+      Array.from(other.entries.entries()).map(([id, entry]) => [
+        id,
+        { ...entry, terms: [...entry.terms] },
       ]),
     );
-    this.docTermCounts = new Map(
-      Array.from(other.docTermCounts.entries()).map(([k, v]) => [
-        k,
-        new Map(v),
+    this.invertedIndex = new Map(
+      Array.from(other.invertedIndex.entries()).map(([term, postings]) => [
+        term,
+        new Map(postings),
       ]),
     );
     this.totalDocLength = other.totalDocLength;
@@ -199,31 +183,30 @@ export class SearchIndex {
     if (other === this) return;
     this.entries = other.entries;
     this.invertedIndex = other.invertedIndex;
-    this.docTermCounts = other.docTermCounts;
     this.totalDocLength = other.totalDocLength;
     this.sortedTerms = other.sortedTerms;
 
     other.entries = new Map();
     other.invertedIndex = new Map();
-    other.docTermCounts = new Map();
     other.totalDocLength = 0;
     other.sortedTerms = null;
   }
 
   serialize(): string {
-    const entries = Array.from(this.entries.entries());
-    const inverted = Array.from(this.invertedIndex.entries()).map(
-      ([term, ids]) => [term, Array.from(ids)] as [string, string[]],
-    );
-    const docTerms = Array.from(this.docTermCounts.entries()).map(
-      ([id, counts]) =>
-        [id, Array.from(counts.entries())] as [string, [string, number][]],
-    );
+    // Term frequencies already live in postings. Persisting a second per-doc
+    // map duplicated every doc/term pair and amplified heap use during restore.
+    const entries = Array.from(this.entries, ([id, entry]) => [
+      id,
+      { sessionId: entry.sessionId, termCount: entry.termCount },
+    ]);
+    const inverted = Array.from(this.invertedIndex, ([term, postings]) => [
+      term,
+      Array.from(postings),
+    ]);
     return JSON.stringify({
-      v: 2,
+      v: 3,
       entries,
       inverted,
-      docTerms,
       totalDocLength: this.totalDocLength,
     });
   }
@@ -232,19 +215,91 @@ export class SearchIndex {
     try {
       const idx = new SearchIndex();
       const data = JSON.parse(json);
-      if (!data?.entries || !data?.inverted || !data?.docTerms) return idx;
-      for (const [key, val] of data.entries) {
-        idx.entries.set(key, val);
+      if (!Array.isArray(data?.entries) || !Array.isArray(data?.inverted)) {
+        return idx;
       }
-      for (const [term, ids] of data.inverted) {
-        idx.invertedIndex.set(term, new Set(ids));
+
+      for (const row of data.entries) {
+        if (!Array.isArray(row) || row.length < 2) continue;
+        const [id, rawEntry] = row;
+        const termCount = Number(rawEntry?.termCount);
+        if (
+          typeof id !== "string" ||
+          typeof rawEntry?.sessionId !== "string" ||
+          !Number.isInteger(termCount) ||
+          termCount < 0
+        ) {
+          continue;
+        }
+        idx.entries.set(id, {
+          sessionId: rawEntry.sessionId,
+          termCount,
+          terms: [],
+        });
       }
-      for (const [id, counts] of data.docTerms) {
-        idx.docTermCounts.set(id, new Map(counts));
+
+      if (data.v === 3) {
+        for (const row of data.inverted) {
+          if (!Array.isArray(row) || row.length < 2) continue;
+          const [term, rawPostings] = row;
+          if (typeof term !== "string" || !Array.isArray(rawPostings)) continue;
+          const postings = new Map<string, number>();
+          for (const posting of rawPostings) {
+            if (!Array.isArray(posting) || posting.length < 2) continue;
+            const [id, rawFrequency] = posting;
+            const frequency = Number(rawFrequency);
+            const entry =
+              typeof id === "string" ? idx.entries.get(id) : undefined;
+            if (
+              !entry ||
+              !Number.isInteger(frequency) ||
+              frequency <= 0 ||
+              postings.has(id)
+            ) {
+              continue;
+            }
+            postings.set(id, frequency);
+            entry.terms.push(term);
+          }
+          if (postings.size > 0) idx.invertedIndex.set(term, postings);
+        }
+      } else {
+        if (!Array.isArray(data.docTerms)) return new SearchIndex();
+        for (const row of data.docTerms) {
+          if (!Array.isArray(row) || row.length < 2) continue;
+          const [id, rawCounts] = row;
+          const entry = typeof id === "string" ? idx.entries.get(id) : undefined;
+          if (!entry || !Array.isArray(rawCounts)) continue;
+          for (const count of rawCounts) {
+            if (!Array.isArray(count) || count.length < 2) continue;
+            const [term, rawFrequency] = count;
+            const frequency = Number(rawFrequency);
+            if (
+              typeof term !== "string" ||
+              !Number.isInteger(frequency) ||
+              frequency <= 0
+            ) {
+              continue;
+            }
+            let postings = idx.invertedIndex.get(term);
+            if (!postings) {
+              postings = new Map();
+              idx.invertedIndex.set(term, postings);
+            }
+            if (!postings.has(id)) entry.terms.push(term);
+            postings.set(id, frequency);
+          }
+        }
       }
-      const rawLen = Number(data.totalDocLength);
+
+      const rawLength = Number(data.totalDocLength);
       idx.totalDocLength =
-        Number.isFinite(rawLen) && rawLen >= 0 ? Math.floor(rawLen) : 0;
+        Number.isFinite(rawLength) && rawLength >= 0
+          ? Math.floor(rawLength)
+          : Array.from(idx.entries.values()).reduce(
+              (sum, entry) => sum + entry.termCount,
+              0,
+            );
       return idx;
     } catch {
       return new SearchIndex();
