@@ -41,6 +41,7 @@ function mockKV() {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
     },
+    listGroups: async (): Promise<string[]> => Array.from(store.keys()),
     scopeNames: (): string[] => Array.from(store.keys()),
   };
 }
@@ -225,6 +226,133 @@ describe("IndexPersistence", () => {
         shardScopes.map((scope) => scope.split(":").at(-2)),
       ),
     ).toEqual(new Set(["bank-a", "bank-b"]));
+  });
+
+  it("reclaims unreferenced BM25 and vector shard scopes after load", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_old", "old persisted snapshot"),
+      makeVector("obs_old"),
+      {
+        shardChars: 80,
+        createGeneration: generationSequence("bm25_old", "vector_old"),
+      },
+    ).save();
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_current", "current persisted snapshot"),
+      makeVector("obs_current"),
+      {
+        shardChars: 80,
+        createGeneration: generationSequence("bm25_current", "vector_current"),
+      },
+    ).save();
+
+    const bm25Manifest = await getBm25Manifest(kv);
+    const vectorManifest = await getVectorManifest(kv);
+    const fallbackManifest = await getVectorManifest(
+      kv,
+      VECTOR_FALLBACK_MANIFEST_KEY,
+    );
+    const orphanBm25 = "mem:index:bm25:bm25:orphaned:00000";
+    const orphanVector = "mem:index:bm25:vectors:orphaned:00000";
+    await kv.set(orphanBm25, "data", "orphaned BM25 data");
+    await kv.set(orphanVector, "data", "orphaned vector data");
+
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+
+    expect(loaded.bm25?.search("current")[0]?.obsId).toBe("obs_current");
+    await expect(kv.get(orphanBm25, "data")).resolves.toBeNull();
+    await expect(kv.get(orphanVector, "data")).resolves.toBeNull();
+    for (const manifest of [bm25Manifest, vectorManifest, fallbackManifest]) {
+      const shard = manifest.shards[0];
+      await expect(kv.get(shard.scope, shard.key)).resolves.toEqual(
+        expect.any(String),
+      );
+    }
+  });
+
+  it("keeps orphaned shards when a manifest is malformed", async () => {
+    const orphan = "mem:index:bm25:bm25:manual-recovery:00000";
+    await kv.set(orphan, "data", "recoverable shard");
+    await kv.set(BM25_SCOPE, BM25_MANIFEST_KEY, {
+      v: 1,
+      chars: 20,
+      shards: "not-an-array",
+    });
+
+    await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+
+    await expect(kv.get(orphan, "data")).resolves.toBe("recoverable shard");
+  });
+
+  it("keeps orphaned shards when a manifest read fails", async () => {
+    const baseKv = mockKV();
+    const orphan = "mem:index:bm25:bm25:manual-recovery:00000";
+    await baseKv.set(orphan, "data", "recoverable shard");
+    const failingKv = {
+      ...baseKv,
+      get: vi.fn(async <T>(scope: string, key: string): Promise<T | null> => {
+        if (scope === BM25_SCOPE && key === BM25_MANIFEST_KEY) {
+          throw new Error("manifest backend unavailable");
+        }
+        return baseKv.get<T>(scope, key);
+      }),
+    };
+
+    await new IndexPersistence(
+      failingKv as never,
+      new SearchIndex(),
+      null,
+    ).load();
+
+    await expect(baseKv.get(orphan, "data")).resolves.toBe(
+      "recoverable shard",
+    );
+  });
+
+  it("bounds concurrent orphan shard deletions", async () => {
+    const baseKv = mockKV();
+    for (let index = 0; index < 5; index++) {
+      await baseKv.set(
+        "mem:index:bm25:bm25:orphaned:" + String(index).padStart(5, "0"),
+        "data",
+        "orphan " + index,
+      );
+    }
+    let active = 0;
+    let maxActive = 0;
+    const guardedKv = {
+      ...baseKv,
+      delete: vi.fn(async (scope: string, key: string): Promise<void> => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await Promise.resolve();
+        try {
+          await baseKv.delete(scope, key);
+        } finally {
+          active--;
+        }
+      }),
+    };
+
+    await new IndexPersistence(
+      guardedKv as never,
+      new SearchIndex(),
+      null,
+      { shardIoConcurrency: 2 },
+    ).load();
+
+    expect(maxActive).toBe(2);
+    expect(guardedKv.delete).toHaveBeenCalledTimes(5);
   });
 
   it("audits one generation write instead of one row per shard", async () => {

@@ -120,6 +120,19 @@ function isValidShardDescriptor(
   );
 }
 
+function isValidShardManifest(value: unknown): value is IndexShardManifest {
+  if (!value || typeof value !== "object") return false;
+  const manifest = value as Partial<IndexShardManifest>;
+  return (
+    manifest.v === 1 &&
+    Array.isArray(manifest.shards) &&
+    manifest.shards.length > 0 &&
+    manifest.shards.every(isValidShardDescriptor) &&
+    Number.isInteger(manifest.chars) &&
+    (manifest.chars ?? -1) >= 0
+  );
+}
+
 export class IndexPersistence {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private saveInFlight: Promise<boolean> | null = null;
@@ -352,6 +365,7 @@ export class IndexPersistence {
       vector = LocalVectorStore.deserialize(vecData);
     }
 
+    await this.reclaimOrphanedShardScopes();
     return { bm25, vector };
   }
 
@@ -363,6 +377,99 @@ export class IndexPersistence {
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
+    }
+  }
+
+  private async reclaimOrphanedShardScopes(): Promise<void> {
+    const manifestSpecs = [
+      { key: BM25_MANIFEST_KEY, label: "BM25" },
+      { key: VECTOR_MANIFEST_KEY, label: "vector" },
+      { key: VECTOR_FALLBACK_MANIFEST_KEY, label: "vector fallback" },
+    ] as const;
+
+    try {
+      const manifestReads = await Promise.all(
+        manifestSpecs.map(async (spec) => ({
+          spec,
+          result: await this.readIndexValue<IndexShardManifest>(
+            KV.bm25Index,
+            spec.key,
+            spec.label,
+            "manifest",
+          ),
+        })),
+      );
+      if (manifestReads.some(({ result }) => !result.ok)) {
+        logger.warn(
+          "index persistence: orphan shard reclamation skipped after manifest read failure",
+        );
+        return;
+      }
+
+      const referencedScopes = new Set<string>();
+      for (const { spec, result } of manifestReads) {
+        if (!result.ok || result.value == null) continue;
+        if (!isValidShardManifest(result.value)) {
+          logger.warn(
+            "index persistence: orphan shard reclamation skipped for invalid manifest",
+            { manifestKey: spec.key },
+          );
+          return;
+        }
+        for (const shard of result.value.shards) {
+          referencedScopes.add(shard.scope);
+        }
+      }
+
+      if (typeof this.kv.listGroups !== "function") return;
+      const groups = await this.kv.listGroups();
+      const orphanScopes = groups.filter(
+        (scope) =>
+          (scope.startsWith(BM25_SHARD_SCOPE_PREFIX) ||
+            scope.startsWith(VECTOR_SHARD_SCOPE_PREFIX)) &&
+          !referencedScopes.has(scope),
+      );
+      if (orphanScopes.length === 0) return;
+
+      const failures: Array<{ scope: string; error: string }> = [];
+      let acknowledged = 0;
+      const concurrency = shardIoConcurrency(this.options);
+      for (let offset = 0; offset < orphanScopes.length; offset += concurrency) {
+        const scopes = orphanScopes.slice(offset, offset + concurrency);
+        const results = await Promise.allSettled(
+          scopes.map((scope) => this.kv.delete(scope, INDEX_SHARD_KEY)),
+        );
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            acknowledged++;
+          } else {
+            failures.push({
+              scope: scopes[index] ?? "unknown",
+              error: errorMessage(result.reason),
+            });
+          }
+        });
+      }
+
+      logger.info("index persistence: reclaimed orphaned shard scopes", {
+        attempted: orphanScopes.length,
+        acknowledged,
+        failed: failures.length,
+      });
+      await this.auditIndexPersistence(
+        "orphan_shard_cleanup",
+        [statePath(KV.bm25Index, "orphan-shards")],
+        {
+          attempted: orphanScopes.length,
+          acknowledged,
+          failed: failures.length,
+          failures: failures.slice(0, 5),
+        },
+      );
+    } catch (err) {
+      logger.warn("index persistence: orphan shard reclamation failed", {
+        message: errorMessage(err),
+      });
     }
   }
 
