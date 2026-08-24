@@ -35,6 +35,43 @@ describe("evaluateHealth memory severity", () => {
     expect(notes.find((n) => n.startsWith("memory_heap_tight_"))).toBeDefined();
   });
 
+  it("uses V8 heap capacity while retaining committed-heap diagnostics", () => {
+    const s = snap({
+      memory: {
+        heapUsed: 970 * 1024 * 1024,
+        heapTotal: 1000 * 1024 * 1024,
+        heapLimit: 3000 * 1024 * 1024,
+        rss: 1100 * 1024 * 1024,
+        external: 0,
+      },
+    });
+
+    const { status, alerts, notes } = evaluateHealth(s);
+
+    expect(status).toBe("healthy");
+    expect(alerts.some((a) => a.startsWith("memory_"))).toBe(false);
+    expect(
+      notes.some((note) => note.startsWith("memory_heap_committed_tight_")),
+    ).toBe(true);
+  });
+
+  it("goes critical when heap use approaches the V8 capacity limit", () => {
+    const s = snap({
+      memory: {
+        heapUsed: 2900 * 1024 * 1024,
+        heapTotal: 2950 * 1024 * 1024,
+        heapLimit: 3000 * 1024 * 1024,
+        rss: 3200 * 1024 * 1024,
+        external: 0,
+      },
+    });
+
+    const { status, alerts } = evaluateHealth(s);
+
+    expect(status).toBe("critical");
+    expect(alerts.some((a) => a.startsWith("memory_critical_97%"))).toBe(true);
+  });
+
   it("goes critical when heap ratio is high AND RSS is above the floor", () => {
     const s = snap({
       memory: {

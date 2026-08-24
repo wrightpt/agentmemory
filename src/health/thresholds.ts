@@ -59,7 +59,18 @@ export function evaluateHealth(
     degraded = true;
   }
 
+  const reportedHeapLimit = snapshot.memory.heapLimit;
+  const heapCapacity =
+    typeof reportedHeapLimit === "number" &&
+    Number.isFinite(reportedHeapLimit) &&
+    reportedHeapLimit > 0
+      ? reportedHeapLimit
+      : snapshot.memory.heapTotal;
   const memPercent =
+    heapCapacity > 0
+      ? (snapshot.memory.heapUsed / heapCapacity) * 100
+      : 0;
+  const committedPercent =
     snapshot.memory.heapTotal > 0
       ? (snapshot.memory.heapUsed / snapshot.memory.heapTotal) * 100
       : 0;
@@ -74,6 +85,14 @@ export function evaluateHealth(
     degraded = true;
   } else if (memPercent > cfg.memoryWarnPercent) {
     notes.push(`memory_heap_tight_${Math.round(memPercent)}%_rss${memMb}mb`);
+  }
+  if (
+    heapCapacity !== snapshot.memory.heapTotal &&
+    committedPercent > cfg.memoryWarnPercent
+  ) {
+    notes.push(
+      `memory_heap_committed_tight_${Math.round(committedPercent)}%_rss${memMb}mb`,
+    );
   }
 
   const status = critical ? "critical" : degraded ? "degraded" : "healthy";
