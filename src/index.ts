@@ -647,11 +647,17 @@ async function main() {
     console.log(`\n[agentmemory] Shutting down...`);
     healthMonitor.stop();
     dedupMap.stop();
-    indexPersistence.stop();
-    await new Promise<void>((resolve) => viewerServer.close(() => resolve()));
+    // Flush the derived index before any teardown that can hang (viewer
+    // close, shadow shutdown, sdk shutdown) or cancel the pending debounce
+    // timer. save() performs at most one call-boundary follow-up; a
+    // straggler write landing mid-flush re-arms the quiet-period path and
+    // the stop() below cancels it — at worst a few derived entries rebuild
+    // from durable raw observations on next boot.
     await indexPersistence.save().catch((err) => {
       console.warn(`[agentmemory] Failed to save index on shutdown:`, err);
     });
+    indexPersistence.stop();
+    await new Promise<void>((resolve) => viewerServer.close(() => resolve()));
     await vectorShadow?.shutdown(2_000);
     await sdk.shutdown();
     clearWorkerPidfile();
