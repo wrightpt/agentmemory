@@ -27,7 +27,10 @@ import { compressWithRetry } from "../eval/self-correct.js";
 import type { MetricsStore } from "../eval/metrics-store.js";
 import { logger } from "../logger.js";
 import { getLlmExecutionState } from "../config.js";
-import { shouldSemanticallyIndexObservation } from "../state/indexing-policy.js";
+import {
+  shouldLexicallyIndexObservation,
+  shouldSemanticallyIndexObservation,
+} from "../state/indexing-policy.js";
 
 const VALID_TYPES = new Set<string>([
   "file_read",
@@ -207,16 +210,18 @@ export function registerCompressFunction(
           compressed,
         );
 
-        try {
-          getSearchIndex().add(compressed);
-          scheduleIndexSave();
-        } catch (err) {
-          logger.warn("Failed to index compressed observation into BM25", {
-            obsId: compressed.id,
-            sessionId: compressed.sessionId,
-            title: compressed.title,
-            error: err instanceof Error ? err.message : String(err),
-          });
+        if (shouldLexicallyIndexObservation(compressed)) {
+          try {
+            getSearchIndex().add(compressed);
+            scheduleIndexSave();
+          } catch (err) {
+            logger.warn("Failed to index compressed observation into BM25", {
+              obsId: compressed.id,
+              sessionId: compressed.sessionId,
+              title: compressed.title,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
 
         if (shouldSemanticallyIndexObservation(compressed)) {

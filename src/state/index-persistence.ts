@@ -29,6 +29,7 @@ const INDEX_GENERATION_BANKS = ["bank-a", "bank-b"] as const;
 type IndexShardManifest = {
   v: 1;
   generation?: string;
+  policyVersion?: number;
   shards: Array<{ scope: string; key: string; chars: number }>;
   chars: number;
   retired?: Array<IndexShardGenerationRef>;
@@ -49,6 +50,7 @@ type IndexPersistenceOptions = {
   shardIoConcurrency?: number;
   createGeneration?: () => string;
   debounceMs?: number;
+  bm25PolicyVersion?: number;
 };
 
 function debounceMs(options: IndexPersistenceOptions): number {
@@ -76,6 +78,15 @@ function shardIoConcurrency(options: IndexPersistenceOptions): number {
   }
   const wholeConcurrency = Math.floor(configured);
   return wholeConcurrency >= 1 ? wholeConcurrency : DEFAULT_SHARD_IO_CONCURRENCY;
+}
+
+function bm25PolicyVersion(
+  options: IndexPersistenceOptions,
+): number | undefined {
+  const configured = options.bm25PolicyVersion;
+  return Number.isInteger(configured) && (configured ?? 0) >= 1
+    ? configured
+    : undefined;
 }
 
 function isBoundedGeneration(generation: string | undefined): boolean {
@@ -175,7 +186,9 @@ function isValidShardManifest(value: unknown): value is IndexShardManifest {
     (manifest.chars ?? -1) >= 0 &&
     (manifest.retired === undefined ||
       (Array.isArray(manifest.retired) &&
-        manifest.retired.every(isValidShardGenerationRef)))
+        manifest.retired.every(isValidShardGenerationRef))) &&
+    (manifest.policyVersion === undefined ||
+      (Number.isInteger(manifest.policyVersion) && manifest.policyVersion >= 1))
   );
 }
 
@@ -544,6 +557,8 @@ export class IndexPersistence {
       BM25_MANIFEST_KEY,
       BM25_LEGACY_KEY,
       BM25_SHARD_SCOPE_PREFIX,
+      undefined,
+      bm25PolicyVersion(this.options),
     );
   }
 
@@ -563,6 +578,7 @@ export class IndexPersistence {
     legacyKey: string,
     scopePrefix: string,
     fallbackManifestKey?: string,
+    policyVersion?: number,
   ): Promise<void> {
     const previous = await this.kv
       .get<IndexShardManifest>(KV.bm25Index, manifestKey)
@@ -649,6 +665,7 @@ export class IndexPersistence {
       generation,
       shards,
       chars: serialized.length,
+      ...(policyVersion !== undefined ? { policyVersion } : {}),
     };
     const carriedForRetry = (() => {
       if (!retiredTracking || carriedRetired.length === 0) return [];
@@ -898,6 +915,7 @@ export class IndexPersistence {
     if (
       published?.v !== 1 ||
       published.generation !== expected.generation ||
+      published.policyVersion !== expected.policyVersion ||
       published.chars !== expected.chars ||
       !Array.isArray(published.shards) ||
       published.shards.length !== expected.shards.length
@@ -920,6 +938,7 @@ export class IndexPersistence {
       BM25_LEGACY_KEY,
       BM25_MANIFEST_KEY,
       "BM25",
+      bm25PolicyVersion(this.options),
     );
   }
 
@@ -961,6 +980,7 @@ export class IndexPersistence {
     legacyKey: string,
     manifestKey: string,
     label: string,
+    requiredPolicyVersion?: number,
   ): Promise<string | null> {
     const manifest = await this.readIndexValue<IndexShardManifest>(
       KV.bm25Index,
@@ -979,7 +999,24 @@ export class IndexPersistence {
       manifest.value != null &&
       typeof manifest.value === "object"
     ) {
+      if (
+        requiredPolicyVersion !== undefined &&
+        manifest.value.policyVersion !== requiredPolicyVersion
+      ) {
+        logger.info(`index persistence: ${label} policy changed; rebuilding`, {
+          persistedPolicyVersion: manifest.value.policyVersion ?? null,
+          requiredPolicyVersion,
+        });
+        return null;
+      }
       return this.loadManifestData(manifest.value, label);
+    }
+
+    if (requiredPolicyVersion !== undefined) {
+      logger.info(`index persistence: ${label} legacy snapshot requires rebuild`, {
+        requiredPolicyVersion,
+      });
+      return null;
     }
 
     const legacy = await this.readIndexValue<string>(

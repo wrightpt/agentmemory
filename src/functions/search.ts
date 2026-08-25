@@ -16,7 +16,10 @@ import { memoryToObservation } from '../state/memory-utils.js'
 import { recordAccessBatch } from './access-tracker.js'
 import { logger } from "../logger.js";
 import { getAgentId, isAgentScopeIsolated } from "../config.js";
-import { shouldSemanticallyIndexObservation } from "../state/indexing-policy.js";
+import {
+  shouldLexicallyIndexObservation,
+  shouldSemanticallyIndexObservation,
+} from "../state/indexing-policy.js";
 import {
   compactRetrievalProvenance,
   publicRetrievalObservation,
@@ -420,7 +423,7 @@ async function performRebuildIndex(kv: StateKV): Promise<number> {
     // observation hydration is now released batch by batch.
     for (const observations of results) {
       for (const obs of observations) {
-        if (obs.title && obs.narrative) {
+        if (shouldLexicallyIndexObservation(obs)) {
           idx.add(obs)
           if (shouldSemanticallyIndexObservation(obs)) {
             await enqueue({

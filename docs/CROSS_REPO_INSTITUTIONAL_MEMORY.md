@@ -206,18 +206,27 @@ The four states are intentionally distinct:
    semantic until superseded.
 
 Routine file reads, searches, status notifications, command chatter, and
-ordinary conversations remain stored and may remain lexical, but are not
-embedded unless their importance crosses a high threshold. Existing stored
-observations are not deleted. Restored legacy vector snapshots can predate this
-policy, so read-time retrieval removes only low-value, vector-only routine hits
-before optional reranking. A lexical or graph match remains eligible, preserving
-exact-symbol BM25 behavior and graph evidence. Git and source search remain
-authoritative for exact current code.
+ordinary conversations remain stored but do not enter derived search indexes
+unless their importance crosses a high threshold. Source-change summaries stay
+lexical from importance 4 and become semantic at importance 7. Institutional
+decision, discovery, error, task, and subagent records remain lexical and
+become semantic from importance 4. Existing stored observations are never
+deleted by this policy, and explicit durable memories remain lexical and
+semantic until superseded.
 
-Low-value rows that have only lexical evidence remain in the result pool but do
-not enter the natural-language reranker, preventing routine command/status text
-from receiving a semantic score near 1. Exact single-identifier queries and
-graph-supported rows retain the reranker path.
+The observation indexing policy is versioned independently from authoritative
+raw storage. A production snapshot written by an older policy is rejected at
+startup and rebuilt from raw observations and durable memories behind the
+existing rebuild barrier. The vector snapshot remains independently readable;
+the coordinated rebuild re-establishes both derived indexes without a data
+migration. Exact identifiers in retained source-change or durable-memory rows
+keep BM25 behavior, while git and source search remain authoritative for exact
+current code.
+
+Low-value legacy vector-only hits do not enter the natural-language reranker,
+preventing routine command/status text from receiving a semantic score near 1.
+Exact single-identifier queries and graph-supported rows retain the reranker
+path when their source is still eligible for retrieval.
 
 ## Cross-agent access
 

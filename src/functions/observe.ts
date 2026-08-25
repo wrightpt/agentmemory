@@ -17,7 +17,10 @@ import { logger } from "../logger.js";
 import { saveImageToDisk } from "../utils/image-store.js";
 import { safeAudit } from "./audit.js";
 import { triggerDetached } from "../utils/trigger-detached.js";
-import { shouldSemanticallyIndexObservation } from "../state/indexing-policy.js";
+import {
+  shouldLexicallyIndexObservation,
+  shouldSemanticallyIndexObservation,
+} from "../state/indexing-policy.js";
 import {
   normalizeSessionContextValues,
   SESSION_CONTEXT_STRING_FIELDS,
@@ -425,8 +428,10 @@ export function registerObserveFunction(
             obsId,
             synthetic,
           );
-          getSearchIndex().add(synthetic);
-          scheduleIndexSave();
+          if (shouldLexicallyIndexObservation(synthetic)) {
+            getSearchIndex().add(synthetic);
+            scheduleIndexSave();
+          }
           if (shouldSemanticallyIndexObservation(synthetic)) {
             await vectorIndexAddGuarded(
               synthetic.id,

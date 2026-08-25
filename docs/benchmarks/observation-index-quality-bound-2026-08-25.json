@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "live-observation-index-quality-bound",
+  "measuredAt": "2026-08-25T10:05:26.722Z",
+  "baselineRevision": "d3c282e630268494586290b76b242bb5aaeb3e1f",
+  "readOnly": true,
+  "contentEmitted": false,
+  "concurrency": 4,
+  "policyVersion": 2,
+  "baselineBm25Manifest": {
+    "measuredAt": "2026-08-25T09:05:03.353Z",
+    "generation": "bank-b",
+    "chars": 158393361,
+    "shards": 80
+  },
+  "sessionCount": 882,
+  "rawObservations": 145588,
+  "textBearingObservations": 143199,
+  "retainedObservations": 13421,
+  "observationRowReductionPct": 90.6277,
+  "sourceChars": 51084903,
+  "retainedSourceChars": 5234480,
+  "sourceCharReductionPct": 89.7534,
+  "durableMemoriesTotal": 1121,
+  "activeDurableMemories": 1033,
+  "resultingBm25Entries": 14454,
+  "serializedChars": 19045097,
+  "projectedShardCountAt2mChars": 10,
+  "fetchAndBuildMs": 5727.4,
+  "serializeMs": 227.4,
+  "processMemoryBytes": {
+    "baselineRss": 103071744,
+    "finalRss": 397852672,
+    "rssDelta": 294780928,
+    "finalHeapUsed": 117565032,
+    "finalHeapTotal": 187355136
+  },
+  "byType": {
+    "command_run": 121480,
+    "conversation": 3680,
+    "error": 432,
+    "file_edit": 11465,
+    "file_read": 3881,
+    "file_write": 1249,
+    "notification": 504,
+    "other": 1285,
+    "search": 410,
+    "subagent": 1021,
+    "web_fetch": 181
+  },
+  "retainedByType": {
+    "error": 432,
+    "file_edit": 11465,
+    "file_write": 1249,
+    "subagent": 275
+  }
+}

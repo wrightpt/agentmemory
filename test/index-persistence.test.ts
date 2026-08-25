@@ -19,6 +19,7 @@ const VECTOR_FALLBACK_MANIFEST_KEY = "vectors:fallback-manifest";
 type TestIndexShardManifest = {
   v: 1;
   generation?: string;
+  policyVersion?: number;
   shards: Array<{ scope: string; key: string; chars: number }>;
   chars: number;
   retired?: Array<{
@@ -654,6 +655,53 @@ describe("IndexPersistence", () => {
     expect(loaded.bm25!.search("legacy").length).toBe(1);
     expect(loaded.vector).not.toBeNull();
     expect(loaded.vector!.size).toBe(1);
+  });
+
+  it("persists the configured BM25 indexing policy version", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_policy", "policy-bound snapshot"),
+      null,
+      { bm25PolicyVersion: 2 },
+    ).save();
+
+    expect((await getBm25Manifest(kv)).policyVersion).toBe(2);
+  });
+
+  it("rejects stale BM25 policy snapshots without discarding vector state", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_old", "old policy snapshot"),
+      makeVector("obs_old"),
+      { bm25PolicyVersion: 1 },
+    ).save();
+
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+      { bm25PolicyVersion: 2 },
+    ).load();
+
+    expect(loaded.bm25).toBeNull();
+    expect(loaded.vector?.size).toBe(1);
+  });
+
+  it("rejects legacy BM25 data when a policy version is required", async () => {
+    await kv.set(
+      BM25_SCOPE,
+      BM25_LEGACY_KEY,
+      makeBm25("obs_legacy", "legacy policy snapshot").serialize(),
+    );
+
+    const loaded = await new IndexPersistence(
+      kv as never,
+      new SearchIndex(),
+      null,
+      { bm25PolicyVersion: 2 },
+    ).load();
+
+    expect(loaded.bm25).toBeNull();
   });
 
   it("fails closed instead of falling back when manifest reads fail", async () => {
