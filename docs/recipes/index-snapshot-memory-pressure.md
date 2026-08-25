@@ -73,3 +73,14 @@ Rollback is to stop the service, restore the exact checksummed store backup (or
 move quarantined files back to their original names), and restart the previously
 pinned AgentMemory build. Do not mix a state rollback with a source-version
 change.
+
+## Known bounded failure mode: vector fallback tear during bank alternation
+
+Under `bank-a`/`bank-b` alternation, the incoming generation always writes the
+bank referenced by the current vector fallback manifest. A crash mid
+shard-write can therefore tear the retained fallback copy while the primary
+manifest stays intact and authoritative. This is accepted by design: shard
+loads validate per-shard lengths, a torn fallback fails closed into the full
+rebuild-from-observations path, and BM25 has no fallback manifest. Do not
+"repair" a torn fallback in place; rerun the rebuild path or re-publish a
+generation via a normal save.

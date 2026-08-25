@@ -588,6 +588,12 @@ export class IndexPersistence {
     // cycle so a fast shutdown cannot leave a manifest whose shards vanished
     // while the engine was exiting. BM25 generations are much larger, so this
     // two-generation policy is intentionally limited to the vector snapshot.
+    // Under bounded bank alternation the incoming generation always targets
+    // the bank the current fallback manifest references, so a crash mid
+    // shard-write can tear the fallback copy while the primary manifest stays
+    // intact. That failure mode is safe by construction: shard reads fail
+    // closed on length mismatch and fall back to a full rebuild from durable
+    // raw observations.
     let retainedPrevious: IndexShardManifest | null = null;
     if (
       fallbackManifestKey &&
