@@ -21,6 +21,10 @@ type TestIndexShardManifest = {
   generation?: string;
   shards: Array<{ scope: string; key: string; chars: number }>;
   chars: number;
+  retired?: Array<{
+    generation: string;
+    shards: Array<{ scope: string; key: string; chars: number }>;
+  }>;
 };
 
 function mockKV() {
@@ -35,7 +39,9 @@ function mockKV() {
       return data;
     },
     delete: async (scope: string, key: string): Promise<void> => {
-      store.get(scope)?.delete(key);
+      const group = store.get(scope);
+      group?.delete(key);
+      if (group?.size === 0) store.delete(scope);
     },
     list: async <T>(scope: string): Promise<T[]> => {
       const entries = store.get(scope);
@@ -197,7 +203,7 @@ describe("IndexPersistence", () => {
     expect(loaded.bm25!.search("auth").length).toBe(1);
   });
 
-  it("bounds default BM25 shard scopes to two alternating banks", async () => {
+  it("alternates bounded BM25 banks while retaining only the current bank", async () => {
     const bm25 = makeBm25("obs_1", "bounded generation snapshot");
     const persistence = new IndexPersistence(kv as never, bm25, null, {
       shardChars: 80,
@@ -225,10 +231,11 @@ describe("IndexPersistence", () => {
       new Set(
         shardScopes.map((scope) => scope.split(":").at(-2)),
       ),
-    ).toEqual(new Set(["bank-a", "bank-b"]));
+    ).toEqual(new Set(["bank-b"]));
+    expect(shardScopes).toHaveLength((await getBm25Manifest(kv)).shards.length);
   });
 
-  it("records the previous bank as retired and consumes it on the next save", async () => {
+  it("deletes a superseded BM25 bank after publishing its replacement", async () => {
     const persistence = new IndexPersistence(kv as never, null, null, {
       shardChars: 80,
     });
@@ -246,6 +253,12 @@ describe("IndexPersistence", () => {
     const manifest2 = await getBm25Manifest(kv);
     expect(manifest2.generation).toBe("bank-b");
     expect(manifest2.retired?.map((r) => r.generation)).toEqual(["bank-a"]);
+    expect(
+      kv.scopeNames().some((scope) => scope.includes(":bank-a:")),
+    ).toBe(false);
+    expect(
+      kv.scopeNames().filter((scope) => scope.includes(":bank-b:")),
+    ).toHaveLength(manifest2.shards.length);
 
     const third = new IndexPersistence(kv as never, makeBm25("obs_3", "three ".repeat(30)), null, {
       shardChars: 80,
@@ -253,32 +266,26 @@ describe("IndexPersistence", () => {
     await third.save();
     const manifest3 = await getBm25Manifest(kv);
     expect(manifest3.generation).toBe("bank-a");
-    // The carried bank-a entry is fully consumed by this save (same scopes
-    // rewritten); the freshly retired bank-b becomes the single carried ref.
+    // The carried bank-a retry record is consumed by the rewrite; bank-b is
+    // the newly retired cleanup record and has already been deleted.
     expect(manifest3.retired?.map((r) => r.generation)).toEqual(["bank-b"]);
     expect(
-      kv.scopeNames().filter((s) => s.includes(":bank-a:") || s.includes(":bank-b:")).length,
-    ).toBeLessThanOrEqual(
-      (manifest3.shards.length + manifest2.shards.length) * 2,
-    );
+      kv.scopeNames().some((scope) => scope.includes(":bank-b:")),
+    ).toBe(false);
+    expect(
+      kv.scopeNames().filter((scope) => scope.includes(":bank-a:")),
+    ).toHaveLength(manifest3.shards.length);
     const loaded = await new IndexPersistence(kv as never, new SearchIndex(), null, {
       shardChars: 80,
     }).load();
     expect(loaded.bm25?.search("three")[0]?.obsId).toBe("obs_3");
   });
 
-  it("retries retired-bank shard deletes that were rejected on the previous save", async () => {
+  it("retries a rejected retired-bank tail deletion on the next save", async () => {
     const big = new IndexPersistence(kv as never, makeBm25("obs_big", "payload ".repeat(400)), null, {
       shardChars: 60,
     });
     await big.save(); // bank-a, several shards
-
-    const flip = new IndexPersistence(kv as never, makeBm25("obs_flip", "flip ".repeat(400)), null, {
-      shardChars: 60,
-    });
-    await flip.save(); // bank-b
-    const manifest2 = await getBm25Manifest(kv);
-    expect(manifest2.generation).toBe("bank-b");
 
     const smallTarget = "mem:index:bm25:bm25:bank-a:00001";
     const rejectingKv = {
@@ -288,24 +295,99 @@ describe("IndexPersistence", () => {
         return kv.delete(scope, key);
       }),
     };
-    const small = new IndexPersistence(rejectingKv as never, makeBm25("obs_small", "tiny"), null, {
+    const flip = new IndexPersistence(rejectingKv as never, makeBm25("obs_flip", "flip ".repeat(400)), null, {
+      shardChars: 60,
+    });
+    await flip.save(); // bank-b; bank-a cleanup rejects one tail
+
+    const manifest2 = await getBm25Manifest(kv);
+    expect(manifest2.generation).toBe("bank-b");
+    expect(manifest2.retired?.map((r) => r.generation)).toEqual(["bank-a"]);
+    expect(await kv.get(smallTarget, "data")).not.toBeNull();
+
+    const small = new IndexPersistence(kv as never, makeBm25("obs_small", "tiny"), null, {
       shardChars: 4000,
     });
-    await small.save(); // bank-a rewritten tiny: cannot touch 00000 tail scopes
-
+    await small.save(); // bank-a rewrites 00000 and retries the old 00001 tail
     const manifest3 = await getBm25Manifest(kv);
-    const bankARef = manifest3.retired?.find((r) => r.generation === "bank-a");
     expect(manifest3.generation).toBe("bank-a");
-    expect(bankARef?.shards.some((s) => s.scope === smallTarget)).toBe(true);
-
-    await new IndexPersistence(kv as never, makeBm25("obs_next", "next ".repeat(400)), null, {
-      shardChars: 60,
-    }).save(); // bank-b: retries the rejected delete
     expect(await kv.get(smallTarget, "data")).toBeNull();
-    const manifest4 = await getBm25Manifest(kv);
-    expect(manifest4.retired?.map((r) => r.generation)).toEqual(["bank-a"]);
-    const bankARetryRef = manifest4.retired!.find((r) => r.generation === "bank-a")!;
-    void bankARetryRef;
+    expect(manifest3.retired?.map((r) => r.generation)).toEqual([
+      "bank-b",
+      "bank-a",
+    ]);
+    expect(
+      kv.scopeNames().filter((scope) =>
+        scope.startsWith("mem:index:bm25:bm25:"),
+      ),
+    ).toHaveLength(manifest3.shards.length);
+  });
+
+  it("deduplicates retirement metadata across repeated delete failures", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_a_big", "alpha ".repeat(400)),
+      null,
+      { shardChars: 60 },
+    ).save();
+    const failedScope = "mem:index:bm25:bm25:bank-a:00001";
+    const rejectingKv = {
+      ...kv,
+      delete: vi.fn(async (scope: string, key: string) => {
+        if (scope === failedScope) throw new Error("delete unavailable");
+        return kv.delete(scope, key);
+      }),
+    };
+
+    await new IndexPersistence(
+      rejectingKv as never,
+      makeBm25("obs_b_big", "bravo ".repeat(400)),
+      null,
+      { shardChars: 60 },
+    ).save();
+    await new IndexPersistence(
+      rejectingKv as never,
+      makeBm25("obs_a_small", "tiny"),
+      null,
+      { shardChars: 4000 },
+    ).save();
+    await new IndexPersistence(
+      rejectingKv as never,
+      makeBm25("obs_b_small", "small"),
+      null,
+      { shardChars: 4000 },
+    ).save();
+
+    const manifest = await getBm25Manifest(kv);
+    const generations = manifest.retired?.map((ref) => ref.generation) ?? [];
+    expect(new Set(generations).size).toBe(generations.length);
+    const retiredIds = (manifest.retired ?? []).flatMap((ref) =>
+      ref.shards.map((shard) => `${shard.scope}\0${shard.key}`),
+    );
+    expect(new Set(retiredIds).size).toBe(retiredIds.length);
+    expect(await kv.get(failedScope, "data")).not.toBeNull();
+  });
+
+  it("ignores malformed legacy retired metadata on the next save", async () => {
+    await new IndexPersistence(
+      kv as never,
+      makeBm25("obs_old", "old snapshot"),
+      null,
+    ).save();
+    const oldManifest = await getBm25Manifest(kv);
+    await kv.set(BM25_SCOPE, BM25_MANIFEST_KEY, {
+      ...oldManifest,
+      retired: [{ generation: "bank-b" }],
+    });
+
+    await expect(
+      new IndexPersistence(
+        kv as never,
+        makeBm25("obs_new", "new snapshot"),
+        null,
+      ).save(),
+    ).resolves.toBeUndefined();
+    expect((await getBm25Manifest(kv)).generation).toBe("bank-b");
   });
 
   it("does not attach retired generations to vector manifests", async () => {

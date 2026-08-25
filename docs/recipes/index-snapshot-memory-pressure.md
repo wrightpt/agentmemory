@@ -13,6 +13,13 @@ III `state::delete` acknowledgement is not yet durable. Explicit flushes join an
 in-flight snapshot and perform at most one follow-up; writes arriving during the
 follow-up return to the normal quiet-period debounce.
 
+BM25 publishes the replacement manifest before deleting the superseded bank.
+The old bank is not a readable fallback, so retaining it would consume III
+memory without improving recovery. A cleanup record stays in the manifest for
+retry; a torn current snapshot fails closed to rebuild from authoritative raw
+observations. Local-vector persistence remains different: it intentionally
+retains the prior vector manifest and its shards as the bounded fallback.
+
 Legacy manifests with generated `idx_*` names remain readable. The first new
 snapshot publishes a banked manifest before any legacy-generation cleanup is
 attempted.
