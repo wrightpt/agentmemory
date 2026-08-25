@@ -228,6 +228,98 @@ describe("IndexPersistence", () => {
     ).toEqual(new Set(["bank-a", "bank-b"]));
   });
 
+  it("records the previous bank as retired and consumes it on the next save", async () => {
+    const persistence = new IndexPersistence(kv as never, null, null, {
+      shardChars: 80,
+    });
+    void persistence;
+
+    const first = new IndexPersistence(kv as never, makeBm25("obs_1", "one ".repeat(60)), null, {
+      shardChars: 80,
+    });
+    await first.save();
+    const second = new IndexPersistence(kv as never, makeBm25("obs_2", "two ".repeat(60)), null, {
+      shardChars: 80,
+    });
+    await second.save();
+
+    const manifest2 = await getBm25Manifest(kv);
+    expect(manifest2.generation).toBe("bank-b");
+    expect(manifest2.retired?.map((r) => r.generation)).toEqual(["bank-a"]);
+
+    const third = new IndexPersistence(kv as never, makeBm25("obs_3", "three ".repeat(30)), null, {
+      shardChars: 80,
+    });
+    await third.save();
+    const manifest3 = await getBm25Manifest(kv);
+    expect(manifest3.generation).toBe("bank-a");
+    // The carried bank-a entry is fully consumed by this save (same scopes
+    // rewritten); the freshly retired bank-b becomes the single carried ref.
+    expect(manifest3.retired?.map((r) => r.generation)).toEqual(["bank-b"]);
+    expect(
+      kv.scopeNames().filter((s) => s.includes(":bank-a:") || s.includes(":bank-b:")).length,
+    ).toBeLessThanOrEqual(
+      (manifest3.shards.length + manifest2.shards.length) * 2,
+    );
+    const loaded = await new IndexPersistence(kv as never, new SearchIndex(), null, {
+      shardChars: 80,
+    }).load();
+    expect(loaded.bm25?.search("three")[0]?.obsId).toBe("obs_3");
+  });
+
+  it("retries retired-bank shard deletes that were rejected on the previous save", async () => {
+    const big = new IndexPersistence(kv as never, makeBm25("obs_big", "payload ".repeat(400)), null, {
+      shardChars: 60,
+    });
+    await big.save(); // bank-a, several shards
+
+    const flip = new IndexPersistence(kv as never, makeBm25("obs_flip", "flip ".repeat(400)), null, {
+      shardChars: 60,
+    });
+    await flip.save(); // bank-b
+    const manifest2 = await getBm25Manifest(kv);
+    expect(manifest2.generation).toBe("bank-b");
+
+    const smallTarget = "mem:index:bm25:bm25:bank-a:00001";
+    const rejectingKv = {
+      ...kv,
+      delete: vi.fn(async (scope: string, key: string) => {
+        if (scope === smallTarget) throw new Error("delete unavailable");
+        return kv.delete(scope, key);
+      }),
+    };
+    const small = new IndexPersistence(rejectingKv as never, makeBm25("obs_small", "tiny"), null, {
+      shardChars: 4000,
+    });
+    await small.save(); // bank-a rewritten tiny: cannot touch 00000 tail scopes
+
+    const manifest3 = await getBm25Manifest(kv);
+    const bankARef = manifest3.retired?.find((r) => r.generation === "bank-a");
+    expect(manifest3.generation).toBe("bank-a");
+    expect(bankARef?.shards.some((s) => s.scope === smallTarget)).toBe(true);
+
+    await new IndexPersistence(kv as never, makeBm25("obs_next", "next ".repeat(400)), null, {
+      shardChars: 60,
+    }).save(); // bank-b: retries the rejected delete
+    expect(await kv.get(smallTarget, "data")).toBeNull();
+    const manifest4 = await getBm25Manifest(kv);
+    expect(manifest4.retired?.map((r) => r.generation)).toEqual(["bank-a"]);
+    const bankARetryRef = manifest4.retired!.find((r) => r.generation === "bank-a")!;
+    void bankARetryRef;
+  });
+
+  it("does not attach retired generations to vector manifests", async () => {
+    const v1 = new IndexPersistence(kv as never, new SearchIndex(), makeVector("obs_v1"), {
+      shardChars: 80,
+    });
+    await v1.save();
+    const v2 = new IndexPersistence(kv as never, new SearchIndex(), makeVector("obs_v2"), {
+      shardChars: 80,
+    });
+    await v2.save();
+    expect((await getVectorManifest(kv)).retired).toBeUndefined();
+  });
+
   it("reclaims unreferenced BM25 and vector shard scopes after load", async () => {
     await new IndexPersistence(
       kv as never,

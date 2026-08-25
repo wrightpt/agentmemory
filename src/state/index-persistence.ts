@@ -31,6 +31,12 @@ type IndexShardManifest = {
   generation?: string;
   shards: Array<{ scope: string; key: string; chars: number }>;
   chars: number;
+  retired?: Array<IndexShardGenerationRef>;
+};
+
+type IndexShardGenerationRef = {
+  generation: string;
+  shards: Array<{ scope: string; key: string; chars: number }>;
 };
 
 type RebuildBarrier = {
@@ -527,9 +533,21 @@ export class IndexPersistence {
           .catch(() => null)
       : null;
     const boundedGenerations = this.options.createGeneration === undefined;
+    // Retired-generation tracking applies only to the primary (BM25) snapshot:
+    // the vector path deliberately retains its prior generation as a fallback.
+    const retiredTracking = boundedGenerations && !fallbackManifestKey;
     const generation = boundedGenerations
       ? nextBoundedGeneration(previous)
       : this.options.createGeneration!();
+    // Generations retired one full publish cycle ago. Their shard files had
+    // to survive an entire inter-save interval, so deleting them now cannot
+    // race the async file-adapter durability the way deleting the
+    // immediately-previous generation would. Overlapping scopes (same bank
+    // rewritten by the incoming generation) are skipped, not deleted.
+    const carriedRetired = (Array.isArray(previous?.retired)
+      ? previous!.retired!
+      : []
+    ).filter((ref) => isBoundedGeneration(ref.generation));
     const chunkChars = shardChars(this.options);
     const shards: IndexShardManifest["shards"] = [];
     const chunks: string[] = [];
@@ -547,6 +565,32 @@ export class IndexPersistence {
 
     let failedWrite: PromiseRejectedResult | undefined;
     const concurrency = shardIoConcurrency(this.options);
+
+    // Retire generations that have survived one full publish cycle. Scopes
+    // the incoming generation just overwrote are skipped (already gone);
+    // everything else is deleted here, one full cycle after it was
+    // superseded, so async file durability cannot race the delete.
+    const carriedDeleteFailures = new Set<string>();
+    if (retiredTracking && carriedRetired.length > 0) {
+      const currentScopes = new Set(shards.map((shard) => shard.scope));
+      for (const ref of carriedRetired) {
+        const staleShards = ref.shards.filter(
+          (shard) => !currentScopes.has(shard.scope),
+        );
+        if (staleShards.length === 0) continue;
+        const writeResults = await Promise.allSettled(
+          staleShards.map((shard) =>
+            this.kv.delete(shard.scope, shard.key),
+          ),
+        );
+        writeResults.forEach((result, index) => {
+          if (result.status === "rejected") {
+            const shard = staleShards[index];
+            carriedDeleteFailures.add(`${ref.generation}\0${shard!.scope}`);
+          }
+        });
+      }
+    }
     for (let offset = 0; offset < shards.length; offset += concurrency) {
       const writeResults = await Promise.allSettled(
         shards.slice(offset, offset + concurrency).map(async (shard, index) => {
@@ -576,12 +620,41 @@ export class IndexPersistence {
       },
     );
 
+    const newlyRetired: IndexShardGenerationRef[] =
+      retiredTracking &&
+      previous?.v === 1 &&
+      Array.isArray(previous.shards) &&
+      isBoundedGeneration(previous.generation)
+        ? [{ generation: previous.generation!, shards: previous.shards }]
+        : [];
+
     const nextManifest: IndexShardManifest = {
       v: 1,
       generation,
       shards,
       chars: serialized.length,
     };
+    const carriedStillMissing = (() => {
+      if (!retiredTracking || carriedRetired.length === 0) return [];
+      // Overwritten scopes are gone; acknowledged deletes are done. Only
+      // shards whose delete was REJECTED stay listed so a later save retries.
+      const writtenScopes = new Set(shards.map((shard) => shard.scope));
+      return carriedRetired
+        .map((ref) => ({
+          generation: ref.generation,
+          shards: ref.shards.filter(
+            (shard) =>
+              !writtenScopes.has(shard.scope) &&
+              carriedDeleteFailures.has(
+                `${ref.generation}\0${shard.scope}`,
+              ),
+          ),
+        }))
+        .filter((ref) => ref.shards.length > 0);
+    })();
+    if (newlyRetired.length + carriedStillMissing.length > 0) {
+      nextManifest.retired = [...newlyRetired, ...carriedStillMissing];
+    }
 
     // iii-state's file adapter can acknowledge a new scope before its file is
     // durable. Retain the prior vector generation for one complete publish
