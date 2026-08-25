@@ -11,6 +11,11 @@ Two kinds of numbers live in this directory:
    throughput against a running daemon. This is the file you want when
    somebody asks "what's p99 at 100k memories under concurrency 100?".
 
+3. **Index retention** — `index-shard-retention.bench.mjs`. Deterministic,
+   in-process proof that alternating BM25 snapshots keep two bounded scope
+   names historically while retaining only the currently published bank in
+   the KV state after each save.
+
 ## load-100k.ts
 
 Hand-rolled, dependency-free load harness. Issues real HTTP against a
@@ -98,6 +103,29 @@ from JSON payload jitter.
 The release flow appends a `## Performance` section to `CHANGELOG.md`
 referencing the JSON in `benchmark/results/` for that release's git
 sha. p99 is the headline number; the JSON is the receipt.
+
+## BM25 index-bank retention
+
+`index-shard-retention.bench.mjs` exercises repeated copy-on-write BM25 saves
+against an in-memory KV adapter. It is deterministic and cannot contact or
+mutate a live AgentMemory store. The default fixture uses eight saves, 5,000
+documents per save, and enough shards to exercise multi-shard cleanup.
+
+```bash
+npm run bench:index-retention
+```
+
+The run fails unless all of these bounds hold:
+
+- historical shard scope names stay within two banks;
+- resident shard scopes after every completed save equal the current
+  manifest's shard count;
+- the current manifest remains loadable throughout the alternating sequence.
+
+Use `BENCH_SAVES`, `BENCH_DOCS`, or `BENCH_SHARD_CHARS` for a larger diagnostic.
+This harness measures persistence mechanics, not end-to-end search latency;
+use the institutional-memory and load benchmarks for retrieval quality and
+latency.
 
 ## Cross-repository institutional memory
 

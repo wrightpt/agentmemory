@@ -126,6 +126,43 @@ function isValidShardDescriptor(
   );
 }
 
+function isValidShardGenerationRef(
+  value: unknown,
+): value is IndexShardGenerationRef {
+  if (!value || typeof value !== "object") return false;
+  const ref = value as Partial<IndexShardGenerationRef>;
+  return (
+    typeof ref.generation === "string" &&
+    ref.generation.length > 0 &&
+    Array.isArray(ref.shards) &&
+    ref.shards.length > 0 &&
+    ref.shards.every(isValidShardDescriptor)
+  );
+}
+
+function mergeShardGenerationRefs(
+  refs: IndexShardGenerationRef[],
+): IndexShardGenerationRef[] {
+  const byGeneration = new Map<
+    string,
+    Map<string, IndexShardManifest["shards"][number]>
+  >();
+  for (const ref of refs) {
+    let shards = byGeneration.get(ref.generation);
+    if (!shards) {
+      shards = new Map();
+      byGeneration.set(ref.generation, shards);
+    }
+    for (const shard of ref.shards) {
+      shards.set(`${shard.scope}\0${shard.key}`, shard);
+    }
+  }
+  return Array.from(byGeneration, ([generation, shards]) => ({
+    generation,
+    shards: Array.from(shards.values()),
+  })).filter((ref) => ref.shards.length > 0);
+}
+
 function isValidShardManifest(value: unknown): value is IndexShardManifest {
   if (!value || typeof value !== "object") return false;
   const manifest = value as Partial<IndexShardManifest>;
@@ -135,7 +172,10 @@ function isValidShardManifest(value: unknown): value is IndexShardManifest {
     manifest.shards.length > 0 &&
     manifest.shards.every(isValidShardDescriptor) &&
     Number.isInteger(manifest.chars) &&
-    (manifest.chars ?? -1) >= 0
+    (manifest.chars ?? -1) >= 0 &&
+    (manifest.retired === undefined ||
+      (Array.isArray(manifest.retired) &&
+        manifest.retired.every(isValidShardGenerationRef)))
   );
 }
 
@@ -539,15 +579,17 @@ export class IndexPersistence {
     const generation = boundedGenerations
       ? nextBoundedGeneration(previous)
       : this.options.createGeneration!();
-    // Generations retired one full publish cycle ago. Their shard files had
-    // to survive an entire inter-save interval, so deleting them now cannot
-    // race the async file-adapter durability the way deleting the
-    // immediately-previous generation would. Overlapping scopes (same bank
-    // rewritten by the incoming generation) are skipped, not deleted.
+    // A prior post-publish cleanup can fail or be interrupted. Its retired
+    // descriptors are retry metadata, not a readable fallback generation.
+    // Accept only structurally valid bounded-bank records from the manifest.
     const carriedRetired = (Array.isArray(previous?.retired)
       ? previous!.retired!
       : []
-    ).filter((ref) => isBoundedGeneration(ref.generation));
+    ).filter(
+      (ref) =>
+        isValidShardGenerationRef(ref) &&
+        isBoundedGeneration(ref.generation),
+    );
     const chunkChars = shardChars(this.options);
     const shards: IndexShardManifest["shards"] = [];
     const chunks: string[] = [];
@@ -566,31 +608,6 @@ export class IndexPersistence {
     let failedWrite: PromiseRejectedResult | undefined;
     const concurrency = shardIoConcurrency(this.options);
 
-    // Retire generations that have survived one full publish cycle. Scopes
-    // the incoming generation just overwrote are skipped (already gone);
-    // everything else is deleted here, one full cycle after it was
-    // superseded, so async file durability cannot race the delete.
-    const carriedDeleteFailures = new Set<string>();
-    if (retiredTracking && carriedRetired.length > 0) {
-      const currentScopes = new Set(shards.map((shard) => shard.scope));
-      for (const ref of carriedRetired) {
-        const staleShards = ref.shards.filter(
-          (shard) => !currentScopes.has(shard.scope),
-        );
-        if (staleShards.length === 0) continue;
-        const writeResults = await Promise.allSettled(
-          staleShards.map((shard) =>
-            this.kv.delete(shard.scope, shard.key),
-          ),
-        );
-        writeResults.forEach((result, index) => {
-          if (result.status === "rejected") {
-            const shard = staleShards[index];
-            carriedDeleteFailures.add(`${ref.generation}\0${shard!.scope}`);
-          }
-        });
-      }
-    }
     for (let offset = 0; offset < shards.length; offset += concurrency) {
       const writeResults = await Promise.allSettled(
         shards.slice(offset, offset + concurrency).map(async (shard, index) => {
@@ -622,8 +639,7 @@ export class IndexPersistence {
 
     const newlyRetired: IndexShardGenerationRef[] =
       retiredTracking &&
-      previous?.v === 1 &&
-      Array.isArray(previous.shards) &&
+      isValidShardManifest(previous) &&
       isBoundedGeneration(previous.generation)
         ? [{ generation: previous.generation!, shards: previous.shards }]
         : [];
@@ -634,26 +650,29 @@ export class IndexPersistence {
       shards,
       chars: serialized.length,
     };
-    const carriedStillMissing = (() => {
+    const carriedForRetry = (() => {
       if (!retiredTracking || carriedRetired.length === 0) return [];
-      // Overwritten scopes are gone; acknowledged deletes are done. Only
-      // shards whose delete was REJECTED stay listed so a later save retries.
-      const writtenScopes = new Set(shards.map((shard) => shard.scope));
+      // The incoming bank overwrites same-named scopes. Only carried tail
+      // scopes that the new snapshot did not rewrite still need deletion.
+      const writtenShardIds = new Set(
+        shards.map((shard) => `${shard.scope}\0${shard.key}`),
+      );
       return carriedRetired
         .map((ref) => ({
           generation: ref.generation,
           shards: ref.shards.filter(
             (shard) =>
-              !writtenScopes.has(shard.scope) &&
-              carriedDeleteFailures.has(
-                `${ref.generation}\0${shard.scope}`,
-              ),
+              !writtenShardIds.has(`${shard.scope}\0${shard.key}`),
           ),
         }))
         .filter((ref) => ref.shards.length > 0);
     })();
-    if (newlyRetired.length + carriedStillMissing.length > 0) {
-      nextManifest.retired = [...newlyRetired, ...carriedStillMissing];
+    const retired = mergeShardGenerationRefs([
+      ...newlyRetired,
+      ...carriedForRetry,
+    ]);
+    if (retired.length > 0) {
+      nextManifest.retired = retired;
     }
 
     // iii-state's file adapter can acknowledge a new scope before its file is
@@ -688,6 +707,32 @@ export class IndexPersistence {
     } catch (err) {
       await this.deleteShards(shards, "manifest_publish_rollback");
       throw err;
+    }
+
+    if (retiredTracking && nextManifest.retired) {
+      // BM25 has no fallback manifest: once the new manifest is published,
+      // keeping its predecessor consumes iii memory without providing a
+      // readable recovery path. Delete the superseded bank now. If iii's
+      // asynchronous file flush tears across a crash, the current manifest
+      // fails closed and BM25 is rebuilt from authoritative raw observations;
+      // a stale deleted file is unreferenced and boot reclamation removes it.
+      // The retired descriptors remain in the manifest so a later save can
+      // retry an unacknowledged tail deletion.
+      const currentShardIds = new Set(
+        shards.map((shard) => `${shard.scope}\0${shard.key}`),
+      );
+      const seenRetiredShardIds = new Set<string>();
+      const retiredShards = nextManifest.retired
+        .flatMap((ref) => ref.shards)
+        .filter((shard) => {
+          const id = `${shard.scope}\0${shard.key}`;
+          if (currentShardIds.has(id) || seenRetiredShardIds.has(id)) {
+            return false;
+          }
+          seenRetiredShardIds.add(id);
+          return true;
+        });
+      await this.deleteShards(retiredShards, "retired_generation_cleanup");
     }
 
     await this.deleteKey(KV.bm25Index, legacyKey, "legacy_cleanup");
