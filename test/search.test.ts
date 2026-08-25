@@ -433,6 +433,30 @@ describe("mem::search", () => {
     ]);
   });
 
+  it("rebuildIndex leaves routine telemetry stored but outside BM25", async () => {
+    const routine: CompressedObservation = {
+      id: "obs_routine_command",
+      sessionId: "ses_1",
+      timestamp: "2026-01-03T00:00:00Z",
+      type: "command_run",
+      title: "Bash",
+      facts: [],
+      narrative: "zzroutineonlytoken",
+      concepts: [],
+      files: ["src/auth.ts"],
+      importance: 5,
+    };
+    await kv.set(KV.observations("ses_1"), routine.id, routine);
+    setVectorIndex(null);
+    setEmbeddingProvider(null);
+
+    await expect(rebuildIndex(kv as never)).resolves.toBe(2);
+
+    expect(await kv.get(KV.observations("ses_1"), routine.id)).toEqual(routine);
+    expect(getSearchIndex().search("zzroutineonlytoken", 5)).toEqual([]);
+    expect(getSearchIndex().search("auth middleware", 5)).not.toEqual([]);
+  });
+
   it("rebuildIndex releases each session batch before loading the next one", async () => {
     const sessions = Array.from({ length: 11 }, (_, index) => ({
       id: `stream_session_${index}`,

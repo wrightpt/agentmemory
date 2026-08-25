@@ -140,6 +140,64 @@ describe("mem::observe auto-compress gate (#138)", () => {
     expect(obs.confidence).toBe(0.3);
   });
 
+  it("default: leaves routine tool telemetry stored but outside BM25", async () => {
+    const { registerObserveFunction } = await import(
+      "../src/functions/observe.js"
+    );
+    const { getSearchIndex, setIndexPersistence } = await import(
+      "../src/functions/search.js"
+    );
+    const sdk = mockSdk();
+    const kv = mockKV();
+    const persistence = {
+      scheduleSave: vi.fn(),
+      save: vi.fn(async () => undefined),
+    };
+    getSearchIndex().clear();
+    setIndexPersistence(persistence);
+    registerObserveFunction(sdk as never, kv as never);
+
+    await sdk.trigger("mem::observe", validPayload());
+
+    expect(kv.store.get("mem:obs:ses_test")?.size).toBe(1);
+    expect(getSearchIndex().search("file contents", 5)).toEqual([]);
+    expect(persistence.scheduleSave).not.toHaveBeenCalled();
+    setIndexPersistence(null);
+  });
+
+  it("default: keeps source edits in BM25 and schedules persistence", async () => {
+    const { registerObserveFunction } = await import(
+      "../src/functions/observe.js"
+    );
+    const { getSearchIndex, setIndexPersistence } = await import(
+      "../src/functions/search.js"
+    );
+    const sdk = mockSdk();
+    const kv = mockKV();
+    const persistence = {
+      scheduleSave: vi.fn(),
+      save: vi.fn(async () => undefined),
+    };
+    getSearchIndex().clear();
+    setIndexPersistence(persistence);
+    registerObserveFunction(sdk as never, kv as never);
+
+    await sdk.trigger(
+      "mem::observe",
+      validPayload({
+        data: {
+          tool_name: "Edit",
+          tool_input: { file_path: "src/foo.ts", old_string: "a", new_string: "b" },
+          tool_output: "updated source contract",
+        },
+      }),
+    );
+
+    expect(getSearchIndex().search("source contract", 5)).toHaveLength(1);
+    expect(persistence.scheduleSave).toHaveBeenCalledTimes(1);
+    setIndexPersistence(null);
+  });
+
   it("default: keeps viewer updates transient while retaining the session stream", async () => {
     const { registerObserveFunction } = await import(
       "../src/functions/observe.js"

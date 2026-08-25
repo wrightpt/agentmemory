@@ -8,6 +8,8 @@ export interface MemoryQualityDisposition {
   reason: string;
 }
 
+export const OBSERVATION_INDEX_POLICY_VERSION = 2;
+
 const INSTITUTIONAL_TYPES = new Set<CompressedObservation["type"]>([
   "decision",
   "discovery",
@@ -20,6 +22,7 @@ const ROUTINE_TYPES = new Set<CompressedObservation["type"]>([
   "file_read",
   "command_run",
   "search",
+  "web_fetch",
   "notification",
 ]);
 
@@ -35,10 +38,12 @@ export function observationIndexingDisposition(
     observation.title?.trim() && observation.narrative?.trim(),
   );
   const importance = Math.max(0, Math.min(10, observation.importance ?? 0));
+  let lexicallySearchable = false;
   let semanticallyIndexed = false;
-  let reason = "compressed observation remains available to lexical search";
+  let reason = "observation is stored but has no searchable text";
 
   if (hasSearchText && INSTITUTIONAL_TYPES.has(observation.type)) {
+    lexicallySearchable = true;
     semanticallyIndexed = importance >= 4;
     reason = semanticallyIndexed
       ? "institutional observation type with sufficient importance"
@@ -47,30 +52,42 @@ export function observationIndexingDisposition(
     hasSearchText &&
     (observation.type === "file_write" || observation.type === "file_edit")
   ) {
+    lexicallySearchable = importance >= 4;
     semanticallyIndexed = importance >= 7;
     reason = semanticallyIndexed
       ? "important source change summary"
-      : "routine source change remains lexical only";
+      : lexicallySearchable
+        ? "source change remains lexical only"
+        : "low-importance source change remains stored only";
   } else if (hasSearchText && observation.type === "conversation") {
+    lexicallySearchable = importance >= 6;
     semanticallyIndexed = importance >= 8;
     reason = semanticallyIndexed
       ? "high-importance conversation conclusion"
-      : "routine conversation remains lexical only";
+      : lexicallySearchable
+        ? "substantive conversation remains lexical only"
+        : "routine conversation remains stored only";
   } else if (hasSearchText && ROUTINE_TYPES.has(observation.type)) {
+    lexicallySearchable = importance >= 8;
     semanticallyIndexed = importance >= 9;
     reason = semanticallyIndexed
       ? "exceptionally important routine event"
-      : "routine tool/status noise remains lexical only";
+      : lexicallySearchable
+        ? "important routine event remains lexical only"
+        : "routine tool/status noise remains stored only";
   } else if (hasSearchText) {
+    lexicallySearchable = importance >= 6;
     semanticallyIndexed = importance >= 8;
     reason = semanticallyIndexed
       ? "high-importance observation"
-      : "low-signal observation remains lexical only";
+      : lexicallySearchable
+        ? "observation remains lexical only"
+        : "low-signal observation remains stored only";
   }
 
   return {
     stored: true,
-    lexicallySearchable: hasSearchText,
+    lexicallySearchable,
     semanticallyIndexed,
     promotedToDurableMemory: false,
     reason,
@@ -97,4 +114,10 @@ export function shouldSemanticallyIndexObservation(
   observation: CompressedObservation,
 ): boolean {
   return observationIndexingDisposition(observation).semanticallyIndexed;
+}
+
+export function shouldLexicallyIndexObservation(
+  observation: CompressedObservation,
+): boolean {
+  return observationIndexingDisposition(observation).lexicallySearchable;
 }

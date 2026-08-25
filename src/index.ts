@@ -24,6 +24,7 @@ import { KV } from "./state/schema.js";
 import { LocalVectorStore } from "./state/vector-store.js";
 import { configureVectorShadow } from "./state/vector-shadow-runtime.js";
 import { HybridSearch } from "./state/hybrid-search.js";
+import { OBSERVATION_INDEX_POLICY_VERSION } from "./state/indexing-policy.js";
 import {
   IndexPersistence,
   shouldRebuildPersistedIndexes,
@@ -402,7 +403,9 @@ async function main() {
 
   const healthMonitor = registerHealthMonitor(sdk, kv);
 
-  const indexPersistence = new IndexPersistence(kv, bm25Index, vectorStore);
+  const indexPersistence = new IndexPersistence(kv, bm25Index, vectorStore, {
+    bm25PolicyVersion: OBSERVATION_INDEX_POLICY_VERSION,
+  });
   // Wire the persistence hook so delete paths can flush BM25/vector
   // index mutations to disk. Without this, an in-memory remove can be
   // lost across a hard process exit and the persisted snapshot

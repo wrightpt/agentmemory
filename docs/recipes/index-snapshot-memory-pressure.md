@@ -24,6 +24,15 @@ Legacy manifests with generated `idx_*` names remain readable. The first new
 snapshot publishes a banked manifest before any legacy-generation cleanup is
 attempted.
 
+Derived BM25 manifests also carry an observation-index policy version. Current
+builds keep routine command output, file reads, searches, and notifications in
+authoritative observation storage but exclude low-importance copies from BM25.
+On a policy-version mismatch, startup rejects only the stale BM25 snapshot and
+uses the normal durable rebuild barrier to republish both derived indexes from
+raw observations and active durable memories. This is an idempotent derived
+index rebuild, not a raw-data migration. Do not delete observations to reduce
+index pressure.
+
 ## Read-only inventory
 
 Run the inventory while AgentMemory is live so it can read a stable pair of
