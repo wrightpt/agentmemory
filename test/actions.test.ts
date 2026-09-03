@@ -5,6 +5,7 @@ vi.mock("../src/logger.js", () => ({
 }));
 
 import { registerActionsFunction } from "../src/functions/actions.js";
+import { KV } from "../src/state/schema.js";
 import type { Action, ActionEdge } from "../src/types.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
 
@@ -339,6 +340,37 @@ describe("Actions Functions", () => {
 
       expect(result.success).toBe(true);
       expect(result.actions.length).toBe(3);
+    });
+
+    it("reuses the action and edge snapshot while the revision is unchanged", async () => {
+      const list = vi.spyOn(kv, "list");
+
+      await sdk.trigger("mem::action-list", { project: "alpha" });
+      await sdk.trigger("mem::action-list", { project: "beta" });
+
+      const scopes = list.mock.calls.map(([scope]) => scope);
+      expect(scopes.filter((scope) => scope === KV.actions)).toHaveLength(1);
+      expect(scopes.filter((scope) => scope === KV.actionEdges)).toHaveLength(1);
+      expect(scopes.filter((scope) => scope === KV.checkpoints)).toHaveLength(2);
+      expect(scopes.filter((scope) => scope === KV.sentinels)).toHaveLength(2);
+      expect(scopes.filter((scope) => scope === KV.leases)).toHaveLength(2);
+    });
+
+    it("reloads the cached action snapshot after a collection change", async () => {
+      const first = (await sdk.trigger("mem::action-list", {})) as {
+        actions: Action[];
+      };
+      const list = vi.spyOn(kv, "list");
+
+      await sdk.trigger("mem::action-list", {});
+      await sdk.trigger("mem::action-update", {
+        actionId: first.actions[0].id,
+        title: "Changed title",
+      });
+      await sdk.trigger("mem::action-list", {});
+
+      const actionReads = list.mock.calls.filter(([scope]) => scope === KV.actions);
+      expect(actionReads).toHaveLength(1);
     });
 
     it("filters by status", async () => {

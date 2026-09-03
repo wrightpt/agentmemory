@@ -23,6 +23,7 @@ import {
 import {
   ActionNormalizationError,
   ActionRevisionConflictError,
+  type ActionStoreSnapshot,
   deleteAction,
   persistActionEdgeUnlocked,
   persistActionUnlocked,
@@ -108,6 +109,21 @@ interface ActionUpdateInput {
 }
 
 export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
+  let cachedActionListSnapshot: ActionStoreSnapshot | null = null;
+  const readActionListSnapshot = (): Promise<ActionStoreSnapshot> =>
+    withActionStoreLock(async () => {
+      const state = await recoverActionStoreUnlocked(kv);
+      if (cachedActionListSnapshot?.state.revision === state.revision) {
+        return cachedActionListSnapshot;
+      }
+      const [actions, edges] = await Promise.all([
+        kv.list<Action>(KV.actions).catch(() => []),
+        kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
+      ]);
+      cachedActionListSnapshot = { state, actions, edges, events: [] };
+      return cachedActionListSnapshot;
+    });
+
   sdk.registerFunction("mem::action-create", async (data: ActionCreateInput) => {
     const validationError = validateCreateInput(data);
     if (validationError) return { success: false, error: validationError };
@@ -390,7 +406,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
     }
     try {
       const [snapshot, checkpoints, sentinels, leases] = await Promise.all([
-        readActionStoreSnapshot(kv),
+        readActionListSnapshot(),
         kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
         kv.list<Sentinel>(KV.sentinels).catch(() => []),
         kv.list<Lease>(KV.leases).catch(() => []),
