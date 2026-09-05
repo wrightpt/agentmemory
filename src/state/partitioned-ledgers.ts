@@ -283,12 +283,15 @@ export async function getActionEvent(
       scopes.add(location.scope);
     }
   }
-  if (!options.scopeHint && !(options.timestamp && options.actionId)) {
-    for (const scope of await partitionScopes(kv, isActionEventPartitionScope)) {
-      scopes.add(scope);
-    }
-  }
   for (const scope of scopes) {
+    const event = await kv.get<ActionEvent>(scope, eventId);
+    if (event) return event;
+  }
+  // Locators are derived state. Independent file flushes can leave an event
+  // durable without its locator after a crash, so a locator miss cannot prove
+  // the global ID is unused. Scan only after the cheap hinted lookups miss.
+  for (const scope of await partitionScopes(kv, isActionEventPartitionScope)) {
+    if (scopes.has(scope)) continue;
     const event = await kv.get<ActionEvent>(scope, eventId);
     if (event) return event;
   }

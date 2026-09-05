@@ -267,4 +267,15 @@ describe("partitioned append-only ledgers", () => {
     expect(await kv.list(KV.audit)).toEqual([auditEntry]);
     expect(await kv.list(KV.actionEvents)).toEqual([event]);
   });
+
+  it("preserves global event identity when a crash loses the derived locator", async () => {
+    const kv = mockKV();
+    const original = actionEvent("persisted_without_locator", "act_original", "2026-09-04T00:00:00.000Z", "created");
+    await writeActionEvent(kv, original);
+    await kv.delete(actionEventLocationScope(original.id), original.id);
+
+    expect(await getActionEvent(kv, original.id, {
+      actionId: "act_altered", timestamp: "2030-01-01T00:00:00.000Z",
+    })).toEqual(original);
+  });
 });

@@ -76,15 +76,21 @@ The table supports the copy-amplification lead and smaller write collections.
 It does not predict this integration's exact savings: the production design
 uses 64 action-ID buckets per month, rather than the experiment's 256 row
 buckets, and leaves historical collections loaded. Cold reload RSS was nearly
-unchanged. A separate allocator-instrumented synthetic run is needed to
-distinguish free-but-retained arenas from outstanding allocations; its result
-must be reported separately from this paired comparison.
+unchanged. The subsequent, separately instrumented 4,096-row / 20.7 MiB fixture
+settled at 281.9 MiB RSS. glibc reported 265.8 MiB of arena space: 184.2 MiB free
+and 81.6 MiB still allocated. Cold reload used 73.9 MiB RSS and about 57.6 MiB
+allocated arena space. This confirms a substantial free-but-retained component,
+while leaving roughly 24 MiB more allocated arena memory than the cold baseline.
+The smaller instrumented run is diagnostic, not a paired performance result.
+No iii RPC or invocation errors were reproduced in these experiments.
 
 Authoritative experiment files:
 
 - `/home/cp/shared/pi-astra-max-benchmark-20260905-KL5O4e/followup-iii-pressure/evidence/comparison.json`
 - The adjacent `PLAN_AMENDMENT.md` and `evidence/resource-audit.json` document
   the resource-guard limitation and the bounded follow-up.
+- `REPORT.md` and `allocator-summary.json` in that follow-up directory record
+  the completed allocator discrimination and its limits.
 
 ## Repair and integrity guarantees
 
@@ -97,6 +103,9 @@ Authoritative experiment files:
   untrusted historical timestamps do not create unbounded calendar partitions.
 - Small event-ID locators have their own 64 buckets. They retain global ID
   conflict detection even when an import changes an event's action or date.
+  A failed direct lookup falls back to partition discovery: because iii flushes
+  files independently, a crash can leave a durable event without its derived
+  locator. A locator miss must never prove that an event ID is unused.
 - Pending commits record their exact event scope. Recovery works across a
   restart or write-mode change; interrupted locator/event/projection writes
   remain covered by tests.
@@ -136,8 +145,8 @@ Integration evidence is kept at
 The original patch and its file hashes were preserved before integration;
 the original worktree was not edited. Seven added safety tests initially failed
 against that patch. Those cases now pass, with rollback and invalid-mode cases
-added afterward. The final full suite passed 1,917 tests in 182 files, recorded
-in `full-suite-rollback.log`.
+added afterward. A final lost-locator recovery regression brings the full suite
+to 1,918 passing tests in 182 files, recorded in `full-suite-locator-recovery.log`.
 `npm run build` passed. `tsc --noEmit` reported the same 40 pre-existing
 diagnostics as the Pi source baseline, with no added diagnostic after ignoring
 line-number movement. Another independently owned task is addressing them.
@@ -145,7 +154,9 @@ line-number movement. Another independently owned task is addressing them.
 `benchmark/verify-ledger-persistence.mts` also passed against a private iii
 process: 69 synthetic events and two audits survived two restarts, imported
 event identity lookup, legacy-write rollback and reactivation. All three owned
-engine processes exited. The result and private file store are in `engine-smoke`.
+engine processes exited. A follow-up also removed a locator before persistence
+and verified the surviving imported event after reload. The result and private
+file store are in `engine-locator-smoke`.
 This validates persistence after the configured flush interval; it does not add
 an fsync acknowledgement or an ACID transaction across iii collection files.
 
@@ -176,4 +187,7 @@ Remaining concerns include historical boot rehydration, allocator retention,
 other large collections, outstanding invocation accounting and bursty hot
 partitions. Daily/monthly partitioning bounds history per period, not bytes
 under arbitrary traffic. Export/full-history reads still materialize records.
+Unknown event IDs require partition lookups, so very large imports need a
+separate bounded performance check; correctness takes precedence over treating
+a missing derived locator as authoritative absence.
 Do not declare the whole incident resolved until these measurements support it.

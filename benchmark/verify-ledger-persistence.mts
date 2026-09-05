@@ -11,7 +11,7 @@ import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
 import type { ActionEvent, AuditEntry } from "../src/types.js";
 import {
-  getActionEvent, listActionEvents, listActionEventsForAction, listAuditEntries,
+  actionEventLocationScope, getActionEvent, listActionEvents, listActionEventsForAction, listAuditEntries,
   writeActionEvent, writeAuditEntry,
 } from "../src/state/partitioned-ledgers.js";
 
@@ -88,6 +88,7 @@ try {
   }
   await writeActionEvent(kv!, event("partitioned-update", initial.actionId, 66));
   await writeActionEvent(kv!, event("imported-update", initial.actionId, 67), { imported: true });
+  await kv!.delete(actionEventLocationScope("imported-update"), "imported-update");
   await writeAuditEntry(kv!, { ...audit, id: "audit-new" });
   await sleep(5500);
   await stop();
