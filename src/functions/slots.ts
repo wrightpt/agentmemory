@@ -147,7 +147,7 @@ function validateScope(raw: unknown): SlotScope | null {
   return null;
 }
 
-function validateSizeLimit(raw: unknown): number | null | undefined {
+function validateSizeLimit(raw: unknown): number | null {
   if (raw === undefined || raw === null) return DEFAULT_SIZE_LIMIT;
   if (typeof raw !== "number") return null;
   if (!Number.isInteger(raw) || raw < 1 || raw > 20000) return null;
@@ -317,24 +317,25 @@ export function registerSlotsFunctions(sdk: ISdk, kv: StateKV): void {
       if (!label) return { success: false, error: "label required" };
       if (typeof data?.content !== "string") return { success: false, error: "content required (string)" };
       return withKeyedLock(`slot:${label}`, async () => {
+        // The boundary guard validates content before entering this callback.
         const { slot, scope } = await readSlot(kv, label);
         if (!slot) return { success: false, error: "slot not found (use mem::slot-create first)" };
         if (slot.readOnly) return { success: false, error: "slot is read-only" };
-        if (data.content.length > slot.sizeLimit) {
+        if (data.content!.length > slot.sizeLimit) {
           return {
             success: false,
-            error: `content exceeds sizeLimit (${data.content.length} > ${slot.sizeLimit})`,
+            error: `content exceeds sizeLimit (${data.content!.length} > ${slot.sizeLimit})`,
             sizeLimit: slot.sizeLimit,
           };
         }
-        const updated: MemorySlot = { ...slot, content: data.content, updatedAt: nowIso() };
+        const updated: MemorySlot = { ...slot, content: data.content!, updatedAt: nowIso() };
         await kv.set(scopeKv(scope), label, updated);
         await recordAudit(kv, "slot_replace", "mem::slot-replace", [label], {
           scope,
           before: slot.content.length,
-          after: data.content.length,
+          after: data.content!.length,
         });
-        return { success: true, slot: updated, size: data.content.length };
+        return { success: true, slot: updated, size: data.content!.length };
       });
     },
   );

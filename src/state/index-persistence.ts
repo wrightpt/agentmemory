@@ -133,7 +133,7 @@ function isValidShardDescriptor(
     typeof candidate.key === "string" &&
     candidate.key.length > 0 &&
     Number.isInteger(candidate.chars) &&
-    candidate.chars >= 0
+    (candidate.chars as number) >= 0
   );
 }
 

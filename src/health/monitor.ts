@@ -6,7 +6,12 @@ import { KV } from "../state/schema.js";
 import { evaluateHealth } from "./thresholds.js";
 
 export function registerHealthMonitor(
-  sdk: ISdk,
+  sdk: ISdk & {
+    on?: (
+      event: "connection_state",
+      listener: (state?: unknown) => void,
+    ) => unknown;
+  },
   kv: StateKV,
 ): { stop: () => void } {
   let connectionState = "connected";

@@ -345,7 +345,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
           }
           const edge: ActionEdge = {
             id: generateId("ae"),
-            type: data.type,
+            type: data.type as ActionEdge["type"],
             sourceActionId: data.sourceActionId,
             targetActionId: data.targetActionId,
             createdAt: new Date().toISOString(),
