@@ -469,7 +469,10 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
     if (!data.actionId) {
       return { success: false, error: "actionId is required" };
     }
-    const snapshot = await readActionStoreSnapshot(kv, { includeEvents: true });
+    const snapshot = await readActionStoreSnapshot(kv, {
+      includeEvents: true,
+      eventActionId: data.actionId,
+    });
     const action = snapshot.actions.find((candidate) => candidate.id === data.actionId);
     if (!action) return { success: false, error: "action not found" };
     const edges = snapshot.edges.filter(

@@ -11,6 +11,10 @@ import type {
   ActionEvent,
 } from "../src/types.js";
 import { mockKV } from "./helpers/mocks.js";
+import {
+  listActionEvents,
+  listAuditEntries,
+} from "../src/state/partitioned-ledgers.js";
 
 function legacyAction(
   id: string,
@@ -48,7 +52,7 @@ describe("Actions v2 migration", () => {
       error: "invalid_migration_config",
     });
     expect(result.configurationErrors).toHaveLength(2);
-    expect(await kv.list("mem:action-events")).toEqual([]);
+    expect(await listActionEvents(kv)).toEqual([]);
     expect(await kv.get("mem:action-state", "current")).toBeNull();
   });
 
@@ -72,9 +76,9 @@ describe("Actions v2 migration", () => {
       revisionAfter: 0,
     });
     expect(await kv.get("mem:actions", action.id)).toEqual(before);
-    expect(await kv.list("mem:action-events")).toEqual([]);
+    expect(await listActionEvents(kv)).toEqual([]);
     expect(await kv.get("mem:action-state", "current")).toBeNull();
-    expect(await kv.list("mem:audit")).toEqual([]);
+    expect(await listAuditEntries(kv)).toEqual([]);
   });
 
   it("normalizes legacy identity and typed tags, then skips an identical retry", async () => {
@@ -94,7 +98,7 @@ describe("Actions v2 migration", () => {
       actor: "migration-test",
     });
     const migrated = await kv.get<Action>("mem:actions", action.id);
-    const eventsAfterFirst = await kv.list<ActionEvent>("mem:action-events");
+    const eventsAfterFirst = await listActionEvents(kv);
     const second = await migrateActionsV2(kv as never, {
       dryRun: false,
       projectAliases: { [repoRoot]: "trading-system" },
@@ -145,8 +149,8 @@ describe("Actions v2 migration", () => {
       revisionBefore: 1,
       revisionAfter: 1,
     });
-    expect(await kv.list("mem:action-events")).toHaveLength(1);
-    expect(await kv.list("mem:audit")).toHaveLength(1);
+    expect(await listActionEvents(kv)).toHaveLength(1);
+    expect(await listAuditEntries(kv)).toHaveLength(1);
   });
 
   it("does not rewrite an approval when only its JSON key order changed", async () => {
@@ -187,7 +191,7 @@ describe("Actions v2 migration", () => {
       revisionBefore: 1,
       revisionAfter: 1,
     });
-    expect(await kv.list("mem:action-events")).toHaveLength(1);
+    expect(await listActionEvents(kv)).toHaveLength(1);
   });
 
   it("infers canonical IDs from Unix and Windows repository paths", async () => {
@@ -315,7 +319,7 @@ describe("Actions v2 migration", () => {
       revisionAfter: 0,
     });
     expect(await kv.get("mem:actions", action.id)).toEqual(before);
-    expect(await kv.list("mem:action-events")).toEqual([]);
+    expect(await listActionEvents(kv)).toEqual([]);
     expect(await kv.get("mem:action-state", "current")).toBeNull();
   });
 
@@ -352,7 +356,7 @@ describe("Actions v2 migration", () => {
       revisionBefore: 2,
       revisionAfter: 3,
     });
-    expect(await kv.list("mem:action-events")).toHaveLength(3);
+    expect(await listActionEvents(kv)).toHaveLength(3);
   });
 
   it("reports a pending store write during dry-run without recovering it", async () => {

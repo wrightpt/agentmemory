@@ -1,6 +1,10 @@
 import type { AuditEntry, Lesson } from "../types.js";
 import { KV, generateId } from "../state/schema.js";
 import type { StateKV } from "../state/kv.js";
+import {
+  listAuditEntries,
+  writeAuditEntry,
+} from "../state/partitioned-ledgers.js";
 import { logger } from "../logger.js";
 import {
   buildLessonAccessIndex,
@@ -55,7 +59,7 @@ export async function recordAudit(
     details,
     qualityScore,
   };
-  await kv.set(KV.audit, entry.id, entry);
+  await writeAuditEntry(kv, entry);
   return entry;
 }
 
@@ -92,7 +96,7 @@ export async function queryAudit(
     accessContext?: unknown;
   },
 ): Promise<AuditEntry[]> {
-  const all = await kv.list<AuditEntry>(KV.audit);
+  const all = await listAuditEntries(kv);
   let entries = [...all].sort(
     (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
   );

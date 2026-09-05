@@ -22,6 +22,11 @@ import type {
   Sentinel,
 } from "../src/types.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
+import {
+  actionEventLocationScope,
+  actionEventPartitionScope,
+  listActionEvents,
+} from "../src/state/partitioned-ledgers.js";
 
 describe("Actions v2", () => {
   let sdk: ReturnType<typeof mockSdk>;
@@ -69,7 +74,7 @@ describe("Actions v2", () => {
       "schema",
     ]);
 
-    const events = await kv.list<ActionEvent>("mem:action-events");
+    const events = await listActionEvents(kv);
     const state = await kv.get<ActionCollectionState>(
       "mem:action-state",
       "current",
@@ -124,7 +129,7 @@ describe("Actions v2", () => {
     expect(result.success).toBe(true);
     expect(result.revision).toBe(5);
     expect(result.revision).toBe(state?.revision);
-    expect(await kv.list<ActionEvent>("mem:action-events")).toHaveLength(5);
+    expect(await listActionEvents(kv)).toHaveLength(5);
   });
 
   it("derives separate actionable, scheduled, waiting, blocked, and completed views", async () => {
@@ -356,7 +361,7 @@ describe("Actions v2", () => {
       actor: "planner",
     })) as { action: Action };
     const firstEvent = (
-      await kv.list<ActionEvent>("mem:action-events")
+      await listActionEvents(kv)
     )[0];
 
     await sdk.trigger("mem::action-update", {
@@ -656,5 +661,67 @@ describe("Actions v2", () => {
     expect(page.revision).toBe(1);
     expect(state).toMatchObject({ revision: 1 });
     expect(state?.pending).toBeUndefined();
+  });
+
+  it("recovers a pending event from its exact partition scope", async () => {
+    const action: Action = {
+      id: "act_partition_recover",
+      title: "Partition recovery",
+      description: "",
+      status: "pending",
+      lifecycle: "pending",
+      priority: 5,
+      createdAt: "2026-09-04T06:00:00.000Z",
+      updatedAt: "2026-09-04T06:00:00.000Z",
+      createdBy: "codex",
+      project: "agentmemory",
+      projectId: "agentmemory",
+      projectAliases: [],
+      tags: [],
+      sourceObservationIds: [],
+      sourceMemoryIds: [],
+      schemaVersion: 2,
+      revision: 1,
+      awaitingHuman: false,
+    };
+    const event: ActionEvent = {
+      schemaVersion: 2,
+      id: "aev_partition_recover",
+      actionId: action.id,
+      entityType: "action",
+      revision: 1,
+      type: "created",
+      actor: "codex",
+      timestamp: action.createdAt,
+      after: action,
+    };
+    const eventScope = actionEventPartitionScope(
+      event.timestamp,
+      event.actionId,
+    );
+    await kv.set(eventScope, event.id, event);
+    await kv.set<ActionCollectionState>("mem:action-state", "current", {
+      schemaVersion: 2,
+      revision: 0,
+      updatedAt: action.createdAt,
+      pending: { revision: 1, eventId: event.id, eventScope },
+    });
+
+    const page = (await sdk.trigger("mem::action-list", {})) as {
+      actions: Action[];
+      revision: number;
+    };
+    const state = await kv.get<ActionCollectionState>(
+      "mem:action-state",
+      "current",
+    );
+    expect(page.actions.map((candidate) => candidate.id)).toEqual([action.id]);
+    expect(page.revision).toBe(1);
+    expect(state?.pending).toBeUndefined();
+    expect(await kv.get("mem:action-events", event.id)).toBeNull();
+    expect(await kv.get(actionEventLocationScope(event.id), event.id)).toMatchObject({
+      eventId: event.id,
+      scope: eventScope,
+    });
   });
 });

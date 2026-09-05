@@ -10,6 +10,7 @@ import { getAllTools } from "../src/mcp/tools-registry.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import type { AuditEntry, Lesson } from "../src/types.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
+import { listAuditEntries } from "../src/state/partitioned-ledgers.js";
 
 describe("lesson corrections", () => {
   let sdk: ReturnType<typeof mockSdk>;
@@ -66,7 +67,7 @@ describe("lesson corrections", () => {
     expect(recall.lessons).toEqual([]);
     expect(list.lessons).toEqual([]);
 
-    const audit = await kv.list<AuditEntry>("mem:audit");
+    const audit = await listAuditEntries(kv);
     expect(audit.filter((entry) => entry.operation === "lesson_delete")).toEqual([
       expect.objectContaining({
         functionId: "mem::lesson-delete",
@@ -105,7 +106,7 @@ describe("lesson corrections", () => {
       success: false,
       code: "lesson_deleted",
     });
-    const audit = await kv.list<AuditEntry>("mem:audit");
+    const audit = await listAuditEntries(kv);
     expect(
       audit.filter((entry) => entry.operation === "lesson_delete"),
     ).toHaveLength(1);
@@ -140,7 +141,7 @@ describe("lesson corrections", () => {
     );
     expect(storedReplacement?.deleted).not.toBe(true);
 
-    const audit = await kv.list<AuditEntry>("mem:audit");
+    const audit = await listAuditEntries(kv);
     expect(
       audit.filter((entry) => entry.operation === "lesson_supersede"),
     ).toEqual([

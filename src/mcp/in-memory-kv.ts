@@ -42,6 +42,10 @@ export class InMemoryKV {
     return entries ? (Array.from(entries.values()) as T[]) : [];
   }
 
+  async listGroups(): Promise<string[]> {
+    return [...this.store.keys()];
+  }
+
   persist(): void {
     if (!this.persistPath) return;
     try {
