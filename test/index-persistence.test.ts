@@ -6,6 +6,7 @@ import {
 import { SearchIndex } from "../src/state/search-index.js";
 import { VectorIndex } from "../src/state/vector-index.js";
 import { LocalVectorStore } from "../src/state/vector-store.js";
+import { listAuditEntries } from "../src/state/partitioned-ledgers.js";
 import type { CompressedObservation } from "../src/types.js";
 
 const BM25_SCOPE = "mem:index:bm25";
@@ -539,10 +540,7 @@ describe("IndexPersistence", () => {
       shardChars: 80,
     }).save();
 
-    const entries = await kv.list<{
-      functionId: string;
-      details: { action?: string; shards?: number };
-    }>("mem:audit");
+    const entries = await listAuditEntries(kv);
     const indexEntries = entries.filter(
       (entry) => entry.functionId === "mem::index-persistence",
     );

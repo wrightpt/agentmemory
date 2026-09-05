@@ -2,6 +2,16 @@ import { isDeepStrictEqual } from "node:util";
 import type { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV, generateId } from "../state/schema.js";
+import {
+  actionEventStorageScope,
+  deleteActionEventLocation,
+  getActionEvent,
+  isActionEventPartitionScope,
+  listActionEvents,
+  listActionEventsForAction,
+  writeActionEvent,
+  writeActionEventLocation,
+} from "../state/partitioned-ledgers.js";
 import type {
   Action,
   ActionCollectionState,
@@ -68,15 +78,17 @@ export function withActionStoreLock<T>(fn: () => Promise<T>): Promise<T> {
 
 export async function readActionStoreSnapshot(
   kv: StateKV,
-  options: { includeEvents?: boolean } = {},
+  options: { includeEvents?: boolean; eventActionId?: string } = {},
 ): Promise<ActionStoreSnapshot> {
   return withActionStoreLock(async () => {
     const state = await recoverActionStoreUnlocked(kv);
     const [actions, edges, events] = await Promise.all([
-      kv.list<Action>(KV.actions).catch(() => []),
-      kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
+      kv.list<Action>(KV.actions),
+      kv.list<ActionEdge>(KV.actionEdges),
       options.includeEvents
-        ? kv.list<ActionEvent>(KV.actionEvents).catch(() => [])
+        ? options.eventActionId
+          ? listActionEventsForAction(kv, options.eventActionId)
+          : listActionEvents(kv)
         : Promise.resolve([] as ActionEvent[]),
     ]);
     return { state, actions, edges, events };
@@ -263,8 +275,17 @@ export async function recoverActionStoreUnlocked(
 ): Promise<ActionCollectionState> {
   const state = await readActionCollectionState(kv);
   if (!state.pending) return state;
-  const event = await kv.get<ActionEvent>(KV.actionEvents, state.pending.eventId);
+  const event = await getActionEvent(kv, state.pending.eventId, {
+    scopeHint: state.pending.eventScope,
+  });
   if (event && event.revision === state.pending.revision) {
+    const eventScope = state.pending.eventScope;
+    if (
+      eventScope === KV.actionEvents ||
+      (eventScope && isActionEventPartitionScope(eventScope))
+    ) {
+      await writeActionEventLocation(kv, event, eventScope);
+    }
     await applyEventProjection(kv, event);
     const recovered: ActionCollectionState = {
       schemaVersion: ACTION_SCHEMA_VERSION,
@@ -273,6 +294,9 @@ export async function recoverActionStoreUnlocked(
     };
     await kv.set(KV.actionState, ACTION_STATE_KEY, recovered);
     return recovered;
+  }
+  if (!event) {
+    await deleteActionEventLocation(kv, state.pending.eventId);
   }
   const cleared: ActionCollectionState = {
     schemaVersion: ACTION_SCHEMA_VERSION,
@@ -288,14 +312,19 @@ async function commitEventUnlocked(
   state: ActionCollectionState,
   event: ActionEvent,
 ): Promise<ActionCollectionState> {
+  const eventScope = actionEventStorageScope(kv, event);
   const pendingState: ActionCollectionState = {
     schemaVersion: ACTION_SCHEMA_VERSION,
     revision: state.revision,
     updatedAt: event.timestamp,
-    pending: { revision: event.revision, eventId: event.id },
+    pending: {
+      revision: event.revision,
+      eventId: event.id,
+      eventScope,
+    },
   };
   await kv.set(KV.actionState, ACTION_STATE_KEY, pendingState);
-  await kv.set(KV.actionEvents, event.id, event);
+  await writeActionEvent(kv, event);
   await applyEventProjection(kv, event);
   const committed: ActionCollectionState = {
     schemaVersion: ACTION_SCHEMA_VERSION,

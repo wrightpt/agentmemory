@@ -31,6 +31,12 @@ import type {
 import { normalizeAccessLog } from "./access-tracker.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
+import {
+  deleteActionEventLocation,
+  getActionEvent,
+  listActionEventLedgerEntries,
+  writeActionEvent,
+} from "../state/partitioned-ledgers.js";
 import { VERSION } from "../version.js";
 import { recordAudit } from "./audit.js";
 import { logger } from "../logger.js";
@@ -808,9 +814,18 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       }
       if (strategy === "merge" || strategy === "skip") {
         for (const event of importedActionEvents) {
-          const existing = await kv
-            .get<ActionEvent>(KV.actionEvents, event.id)
-            .catch(() => null);
+          let existing: ActionEvent | null;
+          try {
+            existing = await getActionEvent(kv, event.id, {
+              timestamp: event.timestamp,
+              actionId: event.actionId,
+            });
+          } catch (error) {
+            return {
+              success: false,
+              error: `Cannot verify action event identity: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
           if (
             existing &&
             JSON.stringify(existing) !== JSON.stringify(event)
@@ -1064,6 +1079,9 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       await withActionStoreLock(async () => {
+        // Imported event timestamps are untrusted and may span arbitrary
+        // centuries. Fixed hash buckets bound scope cardinality and make a
+        // retry deterministic even if a locator write did not persist.
         const priorActionState = await kv
           .get<ActionCollectionState>(KV.actionState, "current")
           .catch(() => null);
@@ -1073,14 +1091,12 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           const existingEdges = await kv
             .list<ActionEdge>(KV.actionEdges)
             .catch(() => []);
-          const existingEvents = await kv
-            .list<ActionEvent>(KV.actionEvents)
-            .catch(() => []);
+          const existingEventEntries = await listActionEventLedgerEntries(kv);
           replacedExistingActionData = Boolean(
             priorActionState ||
               existingActions.length ||
               existingEdges.length ||
-              existingEvents.length,
+              existingEventEntries.length,
           );
           for (const action of existingActions) {
             await kv.delete(KV.actions, action.id);
@@ -1088,8 +1104,9 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
           for (const edge of existingEdges) {
             await kv.delete(KV.actionEdges, edge.id);
           }
-          for (const event of existingEvents) {
-            await kv.delete(KV.actionEvents, event.id);
+          for (const { scope, value: event } of existingEventEntries) {
+            await kv.delete(scope, event.id);
+            await deleteActionEventLocation(kv, event.id);
           }
           await kv.delete(KV.actionState, "current").catch(() => {});
         }
@@ -1122,15 +1139,16 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
         }
         for (const event of importedActionEvents) {
           if (strategy === "skip" || strategy === "merge") {
-            const existing = await kv
-              .get<ActionEvent>(KV.actionEvents, event.id)
-              .catch(() => null);
+            const existing = await getActionEvent(kv, event.id, {
+              timestamp: event.timestamp,
+              actionId: event.actionId,
+            });
             if (existing) {
               stats.skipped++;
               continue;
             }
           }
-          await kv.set(KV.actionEvents, event.id, event);
+          await writeActionEvent(kv, event, { imported: true });
           stats.actionEvents++;
         }
 
