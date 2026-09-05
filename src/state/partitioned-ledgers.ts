@@ -99,7 +99,7 @@ async function listEntries<T>(
   const entries: Array<PartitionedLedgerEntry<T>> = [];
   for (const scope of scopes) {
     const values = await kv.list<T>(scope);
-    entries.push(...values.map((value) => ({ scope, value })));
+    for (const value of values) entries.push({ scope, value });
   }
   return entries;
 }

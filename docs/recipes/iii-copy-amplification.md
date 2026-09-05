@@ -23,6 +23,14 @@ It adds history integrity regressions, explicit read-error handling and a
 compatible write-mode rollback. Attribution belongs to those separate pieces;
 there is no evidence that nobody else identified the mechanism.
 
+Pi's independent review then caught a scale compatibility failure in candidate
+`e9faed4`: spreading a 160,000-row legacy audit into `Array.push` exceeded the
+JavaScript argument limit. The 20 smaller partition tests still passed.
+Activation was held; the integration reproduced the failure and incorporated
+Pi's iterative append fix and count/ID-hash regression. This also avoids the
+temporary mapped array. Neither the earlier `dab9b8c` nor `e9faed4` package was
+activated by this integration.
+
 ## Mechanism
 
 The captured iii source, `iii-builtin-kv.rs`, shows:
@@ -145,8 +153,9 @@ Integration evidence is kept at
 The original patch and its file hashes were preserved before integration;
 the original worktree was not edited. Seven added safety tests initially failed
 against that patch. Those cases now pass, with rollback and invalid-mode cases
-added afterward. A final lost-locator recovery regression brings the full suite
-to 1,918 passing tests in 182 files, recorded in `full-suite-locator-recovery.log`.
+added afterward. Lost-locator recovery and Pi's large-ledger regression bring
+the final full suite to 1,919 passing tests in 183 files, recorded in
+`full-suite-scale-fixed.log`.
 `npm run build` passed. `tsc --noEmit` reported the same 40 pre-existing
 diagnostics as the Pi source baseline, with no added diagnostic after ignoring
 line-number movement. Another independently owned task is addressing them.
