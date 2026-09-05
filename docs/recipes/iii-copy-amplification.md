@@ -178,6 +178,50 @@ separate states. Consult the exact lock, deployment marker, live `/health`
 revision and the integration's deployment record before declaring it deployed.
 Building this checkout alone has no effect on the installed package.
 
+### Unhealthy first activation and rebuild responsiveness
+
+The `3a45a7d` package, including Pi's iterative append fix, was installed at
+09:15 UTC on 2026-09-05. Initial health probes passed briefly, but subsequent
+five-second `/agentmemory/livez` and `/agentmemory/health` requests timed out.
+The deployment recorder failed its health check and retained the previous
+`67cf4f7` marker. Automatic recovery restarted the service repeatedly. This is
+an installed but unhealthy rollout, not a successful runtime verification.
+Pi independently reported the same timeouts at 09:26-09:28 UTC; Pi performed
+no deployment or restart.
+
+The surviving index rebuild barrier correctly forces rebuilding after an
+incomplete rebuild. The boot path starts rebuilding without awaiting it, but
+that alone does not keep the JavaScript event loop responsive. Its local ONNX
+embedding calls can block the thread, and the old 32-item batch loop had no
+explicit event-loop yield. A private, network-isolated probe of the installed
+cached model took about 437 ms for one synthetic item with zero 100 ms timer
+heartbeats during that call (`local-embedding-single.log`). This establishes a
+blocking mechanism; it does not establish that it explains every live timeout.
+
+The follow-up uses a one-item default rebuild batch for the local provider and
+yields with `setImmediate` after each flush. Remote defaults and explicit batch
+overrides remain supported. Four regression cases reproduce the old behavior
+and verify batch sizing and servicing pending work before the next batch. The
+barrier remains intact until both complete indexes are persisted; no partial
+snapshot is accepted to make startup appear successful. Final runtime status
+must come from the subsequent deployment record and sustained live probes.
+
+Pi's additional private cutover validation passed all 1,919 tests and build
+for `e9faed4` plus the identical append fix. Across cutover, locator loss,
+legacy-write rollback and reactivation, whole-record hashes and counts
+preserved 111 events and 16 audits. Legacy files were byte-identical during
+partition-only writes, and all three owned engines exited. Evidence:
+`/home/cp/shared/pi-astra-max-benchmark-20260905-KL5O4e/ledger-repair-validation/evidence/cutover/result.json`.
+These integrity results do not supersede the unhealthy live observations.
+
+The rebuild follow-up passed `npm test -- --maxWorkers=2`: 1,923 tests in
+184 files (`full-suite-rebuild-responsive.log`), with the same 40 baseline
+typecheck diagnostics. At 09:39 UTC, before installing that follow-up, the
+existing `3a45a7d` process became responsive again. Its health response showed
+low event-loop lag and 1,827 local vectors. This recovery must not be attributed
+to the follow-up patch, which was not yet installed; it also does not erase the
+earlier multi-minute startup failures.
+
 ## Runtime acceptance and remaining limits
 
 Use natural traffic for the live soak. Record process start times, interval CPU,
