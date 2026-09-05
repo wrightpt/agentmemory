@@ -17,7 +17,9 @@ const MAX_PAYLOAD_BYTES = 1024 * 1024;
 const MAX_LIST_LIMIT = 500;
 const OPAQUE_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 const SESSION_REF = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
-const ERROR_CODE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+// RegExp.test coerces null to a string; the separate input guard rejects it.
+const ERROR_CODE: RegExp & { test(value: string | null): boolean } =
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const INPUT_CLAIM_LOCK = "mem:input-intents:claim";
 
@@ -41,6 +43,16 @@ type ClaimInput = {
 };
 
 type SettleOutcome = "accepted" | "ambiguous" | "blocked" | "retry";
+
+type ImmutableInput = Pick<
+  InputIntent,
+  | "idempotencyKey"
+  | "targetSession"
+  | "sourceSession"
+  | "payloadRef"
+  | "payloadSha256"
+  | "payloadBytes"
+>;
 
 function nonEmpty(value: unknown, maxLength = 256): string | null {
   if (typeof value !== "string") return null;
@@ -89,14 +101,7 @@ function clearClaim(intent: InputIntent): void {
 
 function immutableInputMatches(
   existing: InputIntent,
-  input: {
-    idempotencyKey: string;
-    targetSession: string;
-    sourceSession?: string;
-    payloadRef: string;
-    payloadSha256: string;
-    payloadBytes: number;
-  },
+  input: ImmutableInput,
 ): boolean {
   return (
     existing.idempotencyKey === input.idempotencyKey &&
@@ -190,7 +195,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
       !targetSession ||
       !SESSION_REF.test(targetSession) ||
       (data.sourceSession !== undefined && !sourceSession) ||
-      (sourceSession !== undefined && !SESSION_REF.test(sourceSession)) ||
+      (sourceSession !== undefined && !SESSION_REF.test(sourceSession!)) ||
       !payloadRef ||
       !OPAQUE_REF.test(payloadRef) ||
       !payloadSha256 ||
@@ -216,6 +221,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
     );
     return withKeyedLock(`mem:input-intent:${id}`, async () => {
       const existing = await kv.get<InputIntent>(KV.inputIntents, id);
+      // Validation above rejects parser nulls whenever the input is supplied.
       const immutable = {
         idempotencyKey,
         targetSession,
@@ -223,7 +229,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
         payloadRef,
         payloadSha256,
         payloadBytes,
-      };
+      } as ImmutableInput;
       if (existing) {
         if (!immutableInputMatches(existing, immutable)) {
           return {
@@ -288,7 +294,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
       !workerId ||
       !SESSION_REF.test(workerId) ||
       (data.targetSession !== undefined && !targetSession) ||
-      (targetSession !== undefined && !SESSION_REF.test(targetSession)) ||
+      (targetSession !== undefined && !SESSION_REF.test(targetSession!)) ||
       ttlMs === null
     ) {
       return { success: false, error: "invalid_claim_request" };
@@ -505,8 +511,9 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
           intent.status = data.outcome;
           intent.settledAt = now;
         }
-        intent.evidence = evidence;
-        intent.lastErrorCode = errorCode;
+        // The outcome/input guards reject null; omitted values stay undefined.
+        intent.evidence = evidence as InputDeliveryEvidence | undefined;
+        intent.lastErrorCode = errorCode as string | undefined;
         intent.updatedAt = now;
         intent.revision += 1;
         clearClaim(intent);
@@ -562,7 +569,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
         (data.intentId !== undefined && !intentId) ||
         (data.targetSession !== undefined && !targetSession) ||
         (data.statuses !== undefined &&
-          (statuses === null || statuses.length !== data.statuses.length)) ||
+          (statuses === null || statuses!.length !== data.statuses.length)) ||
         limit === null
       ) {
         return { success: false, error: "invalid_input_list_query" };
@@ -616,7 +623,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
         intent.status = "cancelled";
         intent.settledAt = new Date().toISOString();
         intent.updatedAt = intent.settledAt;
-        intent.lastErrorCode = reason;
+        intent.lastErrorCode = reason as string | undefined;
         intent.revision += 1;
         clearClaim(intent);
         await kv.set(KV.inputIntents, intent.id, intent);

@@ -438,7 +438,8 @@ function rebaseActionMutation(
   const source = input as Action & Record<string, unknown>;
   for (const field of intendedFields) {
     if (Object.prototype.hasOwnProperty.call(source, field)) {
-      rebased[field] = structuredClone(source[field]);
+      (rebased as Record<keyof Action, Action[keyof Action]>)[field] =
+        structuredClone(source[field]);
     } else {
       delete rebased[field];
     }

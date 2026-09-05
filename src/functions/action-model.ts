@@ -126,6 +126,19 @@ export function normalizeActionV2(
   input: Action,
   options: NormalizeActionOptions = {},
 ): NormalizeActionResult {
+  const result = normalizeAction(input, options);
+  return {
+    ...result,
+    changed: canonicalJson(result.action) !== canonicalJson(input),
+  };
+}
+
+// Read projections need normalization, but not a full-body comparison for
+// mutation detection. Keep descriptions and results out of that allocation path.
+function normalizeAction(
+  input: Action,
+  options: NormalizeActionOptions = {},
+): Omit<NormalizeActionResult, "changed"> {
   const raw = input as Action & { tags?: unknown };
   const warnings: string[] = [];
   const conflicts: string[] = [];
@@ -359,7 +372,6 @@ export function normalizeActionV2(
 
   return {
     action,
-    changed: canonicalJson(action) !== canonicalJson(input),
     warnings: [...new Set(warnings)],
     conflicts: [...new Set(conflicts)],
   };
@@ -404,7 +416,7 @@ export function classifyAction(
       return false;
     },
   );
-  const action = normalizeActionV2(input, { hasDerivedBlockers }).action;
+  const action = normalizeAction(input, { hasDerivedBlockers }).action;
   const lifecycle = action.lifecycle ?? lifecycleFromLegacyStatus(action.status);
   if (lifecycle === "done") {
     return { action, view: "completed", blockers: [], leased: false };
@@ -429,7 +441,7 @@ export function classifyAction(
     if (edge.type === "requires") {
       const dependency = actionMap.get(edge.targetActionId);
       const dependencyLifecycle = dependency
-        ? normalizeActionV2(dependency).action.lifecycle
+        ? normalizeAction(dependency).action.lifecycle
         : undefined;
       if (dependencyLifecycle !== "done") {
         blockers.push({
@@ -467,7 +479,7 @@ export function classifyAction(
         : edge.sourceActionId;
     const other = actionMap.get(otherId);
     const otherLifecycle = other
-      ? normalizeActionV2(other).action.lifecycle
+      ? normalizeAction(other).action.lifecycle
       : undefined;
     if (other && otherLifecycle === "active") {
       blockers.push({

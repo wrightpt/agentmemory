@@ -90,7 +90,7 @@ function projectIdentitySet(
   );
 }
 
-function setsOverlap(left: Set<string>, right: Set<string>): boolean {
+function setsOverlap<T>(left: ReadonlySet<T>, right: ReadonlySet<T>): boolean {
   for (const value of left) {
     if (right.has(value)) return true;
   }

@@ -1620,7 +1620,7 @@ function optionalStrictDate(
       `${field} must contain a calendar-valid RFC3339 timestamp`,
     );
   }
-  const parsed = Date.parse(value);
+  const parsed = Date.parse(value as string);
   if (!Number.isFinite(parsed)) {
     throw new LessonInputError(`${field} must be a valid RFC3339 timestamp`);
   }

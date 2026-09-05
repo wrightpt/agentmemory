@@ -6,6 +6,7 @@ import type {
   CommitLink,
   SessionSummary,
   ProviderConfig,
+  Routine,
 } from "../types.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV, generateId } from "../state/schema.js";
@@ -21,7 +22,7 @@ import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
 import { MAX_FILES_UPPER_BOUND } from "../functions/replay.js";
 import { logger } from "../logger.js";
-import { selectSessionPage } from "../functions/session-list.js";
+import { selectSessionPage, type SessionPage } from "../functions/session-list.js";
 import { triggerDetached } from "../utils/trigger-detached.js";
 import { parseLessonSaveInput } from "../functions/lesson-model.js";
 import { parseLessonRecallInput } from "../functions/lesson-retrieval.js";
@@ -48,6 +49,14 @@ type Response = {
   status_code: number;
   headers?: Record<string, string>;
   body: unknown;
+};
+
+type SessionListResponse = Omit<SessionPage, "sessions"> & {
+  sessions: Array<
+    Omit<SessionPage["sessions"][number], "summary"> & {
+      summary?: Session["summary"] | SessionSummary;
+    }
+  >;
 };
 
 type LessonRequestAccess =
@@ -174,7 +183,7 @@ function sessionContextFields(body: Record<string, unknown>): Partial<HookPayloa
 }
 
 function parseObserveRequest(
-  req: ApiRequest<HookPayload>,
+  req: ApiRequest<unknown>,
 ): { payload: HookPayload } | { error: Response } {
   const body = (req.body ?? {}) as Record<string, unknown>;
   const hookType = asNonEmptyString(body.hookType);
@@ -349,7 +358,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::health", 
-    async (req: ApiRequest): Promise<Response> => {
+    async (_req: ApiRequest): Promise<Response> => {
       const health = await getLatestHealth(kv);
       const llmExecutionState = getLlmExecutionState(provider);
       const functionMetrics = metricsStore
@@ -1074,7 +1083,7 @@ export function registerApiTriggers(
         return { status_code: 400, body: { error: "limit must be a positive integer" } };
       }
       try {
-        const page = selectSessionPage(agentSessions, {
+        const page: SessionListResponse = selectSessionPage(agentSessions, {
           limit: rawLimit,
           cursor: asNonEmptyString(req.query_params?.["cursor"]) ?? undefined,
           project: asNonEmptyString(req.query_params?.["project"]) ?? undefined,
@@ -3345,7 +3354,7 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction("api::routine-create",
-    async (req: ApiRequest): Promise<Response> => {
+    async (req: ApiRequest<Partial<Routine>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       if (!req.body?.name || !req.body?.steps) {

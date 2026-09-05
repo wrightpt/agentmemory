@@ -23,6 +23,7 @@ import {
 import {
   ActionNormalizationError,
   ActionRevisionConflictError,
+  type ActionStoreSnapshot,
   deleteAction,
   persistActionEdgeUnlocked,
   persistActionUnlocked,
@@ -108,6 +109,23 @@ interface ActionUpdateInput {
 }
 
 export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
+  let cachedActionListSnapshot: ActionStoreSnapshot | null = null;
+  const readActionListSnapshot = (): Promise<ActionStoreSnapshot> =>
+    withActionStoreLock(async () => {
+      const state = await recoverActionStoreUnlocked(kv);
+      if (cachedActionListSnapshot?.state.revision === state.revision) {
+        return cachedActionListSnapshot;
+      }
+      // A failed read is not an empty collection. Publish the revision cache
+      // only after both authoritative reads succeed so the next call can retry.
+      const [actions, edges] = await Promise.all([
+        kv.list<Action>(KV.actions),
+        kv.list<ActionEdge>(KV.actionEdges),
+      ]);
+      cachedActionListSnapshot = { state, actions, edges, events: [] };
+      return cachedActionListSnapshot;
+    });
+
   sdk.registerFunction("mem::action-create", async (data: ActionCreateInput) => {
     const validationError = validateCreateInput(data);
     if (validationError) return { success: false, error: validationError };
@@ -327,7 +345,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
           }
           const edge: ActionEdge = {
             id: generateId("ae"),
-            type: data.type,
+            type: data.type as ActionEdge["type"],
             sourceActionId: data.sourceActionId,
             targetActionId: data.targetActionId,
             createdAt: new Date().toISOString(),
@@ -390,10 +408,10 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
     }
     try {
       const [snapshot, checkpoints, sentinels, leases] = await Promise.all([
-        readActionStoreSnapshot(kv),
-        kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
-        kv.list<Sentinel>(KV.sentinels).catch(() => []),
-        kv.list<Lease>(KV.leases).catch(() => []),
+        readActionListSnapshot(),
+        kv.list<Checkpoint>(KV.checkpoints),
+        kv.list<Sentinel>(KV.sentinels),
+        kv.list<Lease>(KV.leases),
       ]);
       return selectActionPage(snapshot, checkpoints, sentinels, leases, data);
     } catch (error) {
