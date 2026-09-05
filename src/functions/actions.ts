@@ -116,9 +116,11 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       if (cachedActionListSnapshot?.state.revision === state.revision) {
         return cachedActionListSnapshot;
       }
+      // A failed read is not an empty collection. Publish the revision cache
+      // only after both authoritative reads succeed so the next call can retry.
       const [actions, edges] = await Promise.all([
-        kv.list<Action>(KV.actions).catch(() => []),
-        kv.list<ActionEdge>(KV.actionEdges).catch(() => []),
+        kv.list<Action>(KV.actions),
+        kv.list<ActionEdge>(KV.actionEdges),
       ]);
       cachedActionListSnapshot = { state, actions, edges, events: [] };
       return cachedActionListSnapshot;
@@ -407,9 +409,9 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
     try {
       const [snapshot, checkpoints, sentinels, leases] = await Promise.all([
         readActionListSnapshot(),
-        kv.list<Checkpoint>(KV.checkpoints).catch(() => []),
-        kv.list<Sentinel>(KV.sentinels).catch(() => []),
-        kv.list<Lease>(KV.leases).catch(() => []),
+        kv.list<Checkpoint>(KV.checkpoints),
+        kv.list<Sentinel>(KV.sentinels),
+        kv.list<Lease>(KV.leases),
       ]);
       return selectActionPage(snapshot, checkpoints, sentinels, leases, data);
     } catch (error) {
