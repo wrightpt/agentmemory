@@ -2,6 +2,7 @@
 
 import {
   createServer as createNodeServer,
+  type IncomingHttpHeaders,
   type IncomingMessage,
   type Server as NodeServer,
   type ServerResponse,
@@ -79,7 +80,7 @@ function parseAllowedOrigins(raw: string): string[] {
 
 function normalizeOptions(options: McpHttpOptions = {}): Required<
   Omit<McpHttpOptions, "backend">
-> & { backend: McpHttpBackend } {
+> & { backend: McpHttpBackend | null } {
   const host = options.host ?? (
     resolveEnvOrEmpty("AGENTMEMORY_MCP_HTTP_HOST") || DEFAULT_HOST
   );
@@ -108,16 +109,36 @@ function normalizeOptions(options: McpHttpOptions = {}): Required<
     token,
     allowedOrigins,
     allowRemote,
-    backend: options.backend ?? createProxyBackend(),
+    backend: options.backend ?? null,
   };
 }
 
-function engineHeaders(): Record<string, string> {
+function engineHeaders(
+  identity: Record<string, string> = {},
+): Record<string, string> {
   const secret = resolveEnvOrEmpty("AGENTMEMORY_SECRET");
   return {
     "content-type": "application/json",
     ...(secret ? { authorization: `Bearer ${secret}` } : {}),
     ...callerIdentityHeaders(),
+    ...identity,
+  };
+}
+
+/**
+ * Per-request caller identity forwarded through the shared bridge. Only the
+ * attribution pair is honored; arbitrary header pass-through stays closed.
+ */
+function requestIdentityHeaders(
+  headers: IncomingHttpHeaders,
+): Record<string, string> {
+  const first = (value: string | string[] | undefined): string | undefined =>
+    Array.isArray(value) ? value[0] : value;
+  const agentId = first(headers["x-agentmemory-agent-id"])?.trim();
+  const callerToken = first(headers["x-agentmemory-caller-token"])?.trim();
+  return {
+    ...(agentId ? { "x-agentmemory-agent-id": agentId } : {}),
+    ...(callerToken ? { "x-agentmemory-caller-token": callerToken } : {}),
   };
 }
 
@@ -131,7 +152,9 @@ function outboundCredential(): string {
 export function createProxyBackend(options: {
   baseUrl?: string;
   fetchImpl?: typeof fetch;
+  identity?: Record<string, string>;
 } = {}): McpHttpBackend {
+  const identity = options.identity ?? {};
   const baseUrl = (
     options.baseUrl ?? (
       resolveEnvOrEmpty("AGENTMEMORY_URL") || DEFAULT_ENGINE_URL
@@ -151,7 +174,7 @@ export function createProxyBackend(options: {
     guardBackendRequest();
     const response = await fetchImpl(`${baseUrl}${path}`, {
       ...init,
-      headers: { ...(init.headers ?? {}), ...engineHeaders() },
+      headers: { ...(init.headers ?? {}), ...engineHeaders(identity) },
       signal: AbortSignal.timeout(BACKEND_TIMEOUT_MS),
     });
     if (!response.ok) {
@@ -171,7 +194,7 @@ export function createProxyBackend(options: {
       try {
         const response = await fetchImpl(`${baseUrl}/agentmemory/livez`, {
           method: "GET",
-          headers: engineHeaders(),
+          headers: engineHeaders(identity),
           signal: AbortSignal.timeout(2_000),
         });
         return response.ok;
@@ -304,7 +327,8 @@ export function createMcpHttpHandler(
     const url = new URL(request.url ?? "/", "http://localhost");
 
     if (url.pathname === "/healthz") {
-      const upstream = await options.backend.health();
+      const backend = options.backend ?? createProxyBackend();
+      const upstream = await backend.health();
       sendJson(response, upstream ? 200 : 503, {
         status: upstream ? "ok" : "degraded",
         transport: "streamable-http",
@@ -346,7 +370,9 @@ export function createMcpHttpHandler(
       return;
     }
 
-    const protocol = createProtocolServer(options.backend);
+    const backend = options.backend ??
+      createProxyBackend({ identity: requestIdentityHeaders(request.headers) });
+    const protocol = createProtocolServer(backend);
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });

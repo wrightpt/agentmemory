@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AddressInfo } from "node:net";
-import type { Server as NodeServer } from "node:http";
+import { createServer as createNodeServer, type Server as NodeServer } from "node:http";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
@@ -276,5 +276,69 @@ describe("AgentMemory Streamable HTTP transport", () => {
     await expect(backend.listTools()).rejects.toThrow(
       "403 Forbidden; code=lesson_access_denied error=lesson access denied",
     );
+  });
+});
+
+describe("per-request agent attribution", () => {
+  it("merges proxy backend identity into engine request headers", async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify({ tools: [] })),
+    );
+    const backend = createProxyBackend({
+      baseUrl: "http://127.0.0.1:3111",
+      fetchImpl: fetchImpl as typeof fetch,
+      identity: { "x-agentmemory-agent-id": "codex" },
+    });
+
+    await backend.listTools();
+
+    const headers = (fetchImpl.mock.calls[0]?.[1] as RequestInit).headers as
+      Record<string, string>;
+    expect(headers["x-agentmemory-agent-id"]).toBe("codex");
+  });
+
+  it("forwards a client X-AgentMemory-Agent-Id header to the engine per request", async () => {
+    // Fake engine that records attribution headers per call.
+    const seen: Array<Record<string, string>> = [];
+    const engine = await new Promise<NodeServer>((resolve) => {
+      const server = createNodeServer((req, res) => {
+        seen.push({ ...req.headers });
+        if (req.url?.endsWith("/tools")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ tools: [] }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({ content: [{ type: "text", text: "ok" }] }),
+        );
+      });
+      server.listen(0, "127.0.0.1", () => resolve(server));
+    });
+    servers.push(engine);
+    const enginePort = (engine.address() as AddressInfo).port;
+
+    // Real engine URL (no injected backend) so the handler must construct a
+    // per-request proxy backend from incoming headers.
+    process.env.AGENTMEMORY_URL = `http://127.0.0.1:${enginePort}`;
+    const server = await startMcpHttpServer({ host: "127.0.0.1", port: 0 });
+    servers.push(server);
+    const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+    const client = new Client({ name: "attribution-test", version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${baseUrl}/mcp`),
+      { requestInit: { headers: { "X-AgentMemory-Agent-Id": "kimi" } } },
+    );
+    await client.connect(transport);
+    await client.listTools();
+    await client.callTool({ name: "memory_next", arguments: {} });
+    await client.close();
+    delete process.env.AGENTMEMORY_URL;
+
+    expect(seen.length).toBeGreaterThan(0);
+    for (const headers of seen) {
+      expect(headers["x-agentmemory-agent-id"]).toBe("kimi");
+    }
   });
 });
