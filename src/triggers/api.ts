@@ -2304,6 +2304,27 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/audit", http_method: "GET" },
   });
 
+  sdk.registerFunction("api::maintenance-stale-delete", async (req: ApiRequest) => {
+    const authErr = checkAuth(req, secret);
+    if (authErr) return authErr;
+    const body = req.body as Record<string, unknown> | undefined;
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return { status_code: 400, body: { success: false, error: "invalid_stale_delete_request" } };
+    }
+    const result = await sdk.trigger({
+      function_id: "mem::maintenance-stale-delete",
+      payload: {
+        protocol: body.protocol, kind: body.kind, id: body.id,
+        expectedFingerprint: body.expectedFingerprint, cutoff: body.cutoff,
+      },
+    });
+    return { status_code: 200, body: result };
+  });
+  sdk.registerTrigger({
+    type: "http", function_id: "api::maintenance-stale-delete",
+    config: { api_path: "/agentmemory/maintenance/stale-delete", http_method: "POST" },
+  });
+
   sdk.registerFunction("api::governance-delete", 
     async (
       req: ApiRequest<{ memoryIds: string[]; reason?: string }>,

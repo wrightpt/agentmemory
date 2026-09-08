@@ -66,6 +66,7 @@ import { registerGraphFunction } from "./functions/graph.js";
 import { registerConsolidationPipelineFunction } from "./functions/consolidation-pipeline.js";
 import { registerTeamFunction } from "./functions/team.js";
 import { registerGovernanceFunction } from "./functions/governance.js";
+import { registerStaleCleanupFunction } from "./functions/stale-cleanup.js";
 import { registerSnapshotFunction } from "./functions/snapshot.js";
 import { registerActionsFunction } from "./functions/actions.js";
 import { registerFrontierFunction } from "./functions/frontier.js";
@@ -328,6 +329,7 @@ async function main() {
   }
 
   registerGovernanceFunction(sdk, kv);
+  registerStaleCleanupFunction(sdk, kv);
 
   registerActionsFunction(sdk, kv);
   registerFrontierFunction(sdk, kv);
@@ -572,7 +574,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 143 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 144 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,
