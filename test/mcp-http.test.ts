@@ -297,6 +297,44 @@ describe("per-request agent attribution", () => {
     expect(headers["x-agentmemory-agent-id"]).toBe("codex");
   });
 
+  it("enforces the bridge tool allowlist for restricted profiles", async () => {
+    const prevMode = process.env.AGENTMEMORY_TOOLS;
+    process.env.AGENTMEMORY_TOOLS = "workstation";
+    try {
+      const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/tools")) {
+          return new Response(
+            JSON.stringify({
+              tools: [
+                { name: "memory_next" },
+                { name: "memory_compress_file" },
+              ],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({ content: [{ type: "text", text: "ok" }] }),
+          { status: 200 },
+        );
+      });
+      const backend = createProxyBackend({
+        baseUrl: "http://127.0.0.1:3111",
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      });
+
+      const listed = await backend.listTools();
+      expect(listed.tools.map((tool) => tool.name)).toEqual(["memory_next"]);
+      await expect(
+        backend.callTool("memory_compress_file", {}),
+      ).rejects.toThrow("not permitted by this AgentMemory bridge");
+    } finally {
+      if (prevMode === undefined) delete process.env.AGENTMEMORY_TOOLS;
+      else process.env.AGENTMEMORY_TOOLS = prevMode;
+    }
+  });
+
   it("forwards a client X-AgentMemory-Agent-Id header to the engine per request", async () => {
     // Fake engine that records attribution headers per call.
     const seen: Array<Record<string, string>> = [];

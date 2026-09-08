@@ -23,6 +23,11 @@ import {
   callerIdentityHeaders,
   resolveEnvOrEmpty,
 } from "./rest-proxy.js";
+import {
+  LLM_BACKED_TOOLS,
+  getAllTools,
+  getVisibleTools,
+} from "./tools-registry.js";
 import { upstreamHttpError } from "./http-error.js";
 import { createPlaintextCredentialGuard } from "./plaintext-credential.js";
 
@@ -30,6 +35,44 @@ const DEFAULT_ENGINE_URL = "http://127.0.0.1:3111";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 3114;
 const BACKEND_TIMEOUT_MS = 15_000;
+
+/** Mirrors the standalone shim's client-side tool allowlist so a shared
+ * bridge can run a restricted profile (e.g. workstation-llm) without
+ * changing the engine's own surface. */
+function visibleToolNames(): Set<string> {
+  const mode = (process.env["AGENTMEMORY_TOOLS"] || "all").trim();
+  if (!["all", "core", "workstation", "workstation-llm"].includes(mode)) {
+    const requested = new Set(
+      mode.split(",").map((name) => name.trim()).filter(Boolean),
+    );
+    const disabled = new Set(
+      (process.env["AGENTMEMORY_DISABLED_TOOLS"] || "")
+        .split(",")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    );
+    const noLlm = process.env["AGENTMEMORY_DISABLE_LLM_TOOLS"] === "true";
+    return new Set(
+      getAllTools()
+        .filter(
+          (tool) =>
+            requested.has(tool.name) &&
+            !disabled.has(tool.name) &&
+            !(noLlm && LLM_BACKED_TOOLS.has(tool.name)),
+        )
+        .map((tool) => tool.name),
+    );
+  }
+  return new Set(getVisibleTools().map((tool) => tool.name));
+}
+
+function assertToolVisible(toolName: string): void {
+  if (!visibleToolNames().has(toolName)) {
+    throw new Error(
+      `Tool ${toolName} is not permitted by this AgentMemory bridge's tool allowlist`,
+    );
+  }
+}
 
 export interface McpHttpBackend {
   health: () => Promise<boolean>;
@@ -47,7 +90,7 @@ export interface McpHttpOptions {
   token?: string;
   allowedOrigins?: string[];
   allowRemote?: boolean;
-  backend?: McpHttpBackend;
+  backend?: McpHttpBackend | null;
 }
 
 function positivePort(value: string | undefined, fallback: number): number {
@@ -211,9 +254,14 @@ export function createProxyBackend(options: {
       ) {
         throw new Error("AgentMemory returned an invalid tools/list payload");
       }
-      return { tools: (result as { tools: Tool[] }).tools };
+      const allowed = visibleToolNames();
+      const tools = (result as { tools: Tool[] }).tools.filter(
+        (tool) => allowed.has(tool.name),
+      );
+      return { tools };
     },
     async callTool(name, args) {
+      assertToolVisible(name);
       const result = await request("/agentmemory/mcp/call", {
         method: "POST",
         body: JSON.stringify({ name, arguments: args }),
