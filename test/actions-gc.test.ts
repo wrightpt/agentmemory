@@ -7,6 +7,10 @@ vi.mock("../src/logger.js", () => ({
 import { registerActionsFunction } from "../src/functions/actions.js";
 import type { Action, ActionEdge, ActionEvent, AuditEntry } from "../src/types.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
+import {
+  listActionEvents,
+  listAuditEntries,
+} from "../src/state/partitioned-ledgers.js";
 
 const DAY_MS = 86_400_000;
 
@@ -60,8 +64,8 @@ describe("mem::action-gc", () => {
     expect(result.candidates.sort()).toEqual(["old-cancelled", "old-done"]);
     expect(result.deleted).toEqual([]);
     expect(await kv.list("mem:actions")).toHaveLength(6);
-    expect(await kv.list("mem:action-events")).toHaveLength(0);
-    expect(await kv.list("mem:audit")).toHaveLength(0);
+    expect(await listActionEvents(kv)).toHaveLength(0);
+    expect(await listAuditEntries(kv)).toHaveLength(0);
   });
 
   it("deletes only old terminal, edge-free actions and audits one batched row", async () => {
@@ -78,12 +82,12 @@ describe("mem::action-gc", () => {
       expect(await kv.get("mem:actions", kept)).not.toBeNull();
     }
 
-    const events = await kv.list<ActionEvent>("mem:action-events");
+    const events = await listActionEvents(kv);
     expect(events).toHaveLength(2);
     expect(events.every((event) => event.type === "deleted")).toBe(true);
     expect(events.every((event) => event.actor === "test-gc")).toBe(true);
 
-    const audit = await kv.list<AuditEntry>("mem:audit");
+    const audit = await listAuditEntries(kv);
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
       operation: "action_delete",

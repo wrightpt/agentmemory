@@ -913,6 +913,14 @@ export interface ActionEvent {
   after?: Action | ActionEdge;
 }
 
+export interface ActionEventLocation {
+  schemaVersion: 1;
+  eventId: string;
+  actionId: string;
+  timestamp: string;
+  scope: string;
+}
+
 export interface ActionCollectionState {
   schemaVersion: 2;
   revision: number;
@@ -920,6 +928,8 @@ export interface ActionCollectionState {
   pending?: {
     revision: number;
     eventId: string;
+    /** Exact partition for crash recovery; absent on legacy pending markers. */
+    eventScope?: string;
   };
 }
 

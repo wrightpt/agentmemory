@@ -18,7 +18,22 @@ agentmemory is a persistent memory system for AI coding agents, built on iii-eng
 
 ## Workstation Deployment
 
-On the workstation the global package (`npm ls -g @agentmemory/agentmemory`) is a **symlink to this repo's checkout**, so a deploy is: `npm run build`, then `systemctl --user restart agentmemory.service`. The health sentinel (`agentmemory_health_sentinel.sh`, 15-min timer) verifies the running buildId/source revision against `agent-workspace-config/agentmemory-lock.json` and canaries the actions write path every run.
+The workstation currently uses a **packaged directory**, pinned by
+`agent-workspace-config/agentmemory-lock.json`. Building a checkout does not
+deploy it. Verify the exact source commit and package digest with
+`scripts/agentmemory_deployment.py` in agent-workspace-config, then use the
+approved package/unit activation procedure. The health sentinel checks the
+live revision, lock, deployment marker and cached artifact, and canaries the
+actions write path. Its checkout-HEAD/build-mtime checks apply only when the
+installed package is actually a symlink. Recheck the installation before acting.
+
+For iii CPU/RSS incidents, read
+[`docs/recipes/iii-copy-amplification.md`](docs/recipes/iii-copy-amplification.md).
+The file adapter clones and serializes each dirty collection on a persistence
+flush. A small row update can therefore rewrite a large historical ledger.
+New ledgers use partitions; readers retain both layouts. Once partitioned
+writes have occurred, an old binary is not a safe ordinary rollback: use
+`AGENTMEMORY_LEDGER_WRITE_MODE=legacy` with partition-aware code retained.
 
 ## Consistency Rules
 **When adding or removing MCP tools, you MUST update ALL of the following:**

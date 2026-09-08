@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StateKV } from "../src/state/kv.js";
 import { KV } from "../src/state/schema.js";
 import { MAINTENANCE_REFERENCE_SCOPES } from "../src/state/maintenance-barrier.js";
+import { isAuditPartitionScope, listAuditEntries } from "../src/state/partitioned-ledgers.js";
 import { registerStaleCleanupFunction } from "../src/functions/stale-cleanup.js";
 import { fingerprint, MIN_IDLE_MS, STALE_DELETE_PROTOCOL } from "../src/functions/stale-cleanup-policy.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
@@ -36,6 +37,7 @@ function fixture() {
     let result: unknown;
     if (call.function_id === "state::get") result = structuredClone(store.get(scope)?.get(key!));
     else if (call.function_id === "state::list") result = structuredClone([...store.get(scope)?.values() ?? []]);
+    else if (call.function_id === "state::list_groups") result = { groups: [...store.keys()] };
     else {
       writes.push(call);
       if (call.function_id === "state::set") {
@@ -62,7 +64,8 @@ function fixture() {
 
 afterEach(() => vi.unstubAllEnvs());
 
-describe("conditional stale deletion", () => {
+describe.each(["legacy", "partitioned"])("conditional stale deletion with %s audit storage", mode => {
+  beforeEach(() => vi.stubEnv("AGENTMEMORY_LEDGER_WRITE_MODE", mode));
   it("reports capability without touching state", async () => {
     const f = fixture();
     const result = await f.sdk.trigger("mem::maintenance-stale-delete", { protocol: STALE_DELETE_PROTOCOL, kind: "capabilities" });
@@ -76,8 +79,11 @@ describe("conditional stale deletion", () => {
     expect(await f.run()).toMatchObject({ outcome: "deleted", deleted: 1, id: "mem_one" });
     expect(await f.kv.get(KV.memories, "mem_one")).toBeNull();
     expect(await f.kv.get(KV.accessLog, "mem_one")).toBeNull();
-    const audit = await f.kv.list<{ details: { phase: string } }>(KV.audit);
-    expect(audit.map(row => row.details.phase)).toEqual(["intent", "completed"]);
+    const audit = await listAuditEntries(f.kv);
+    expect(audit.map(row => row.details?.phase)).toEqual(["intent", "completed"]);
+    const auditScopes = [...f.store.keys()].filter(scope => scope === KV.audit || isAuditPartitionScope(scope));
+    expect(auditScopes).toHaveLength(1);
+    expect(mode === "legacy" ? auditScopes[0] === KV.audit : isAuditPartitionScope(auditScopes[0])).toBe(true);
   });
 
   it("deletes only terminal old orphan leases", async () => {
@@ -166,7 +172,8 @@ describe("conditional stale deletion", () => {
       const f = fixture();
       f.hooks.before = async call => {
         if (failure === "inventory" && call.function_id === "state::list") throw new Error("inventory unavailable");
-        if (failure === "audit" && call.function_id === "state::set" && call.payload.scope === KV.audit) throw new Error("audit unavailable");
+        if (failure === "audit" && call.function_id === "state::set"
+          && (call.payload.scope === KV.audit || isAuditPartitionScope(call.payload.scope))) throw new Error("audit unavailable");
       };
       await expect(f.run()).rejects.toThrow(`${failure} unavailable`);
       expect(await f.kv.get(KV.memories, "mem_one")).not.toBeNull();
@@ -208,8 +215,8 @@ describe("conditional stale deletion", () => {
     await entered.promise;
     const writer = expect(f.secondKv.set(KV.memories, "mem_one", { ...memory(), project: "repo" })).rejects.toThrow("maintenance_write_conflict");
     release.resolve(); await deletion; await writer;
-    const audit = await f.kv.list<{ details: { phase: string } }>(KV.audit);
-    expect(audit.map(row => row.details.phase)).toEqual(["intent"]);
+    const audit = await listAuditEntries(f.kv);
+    expect(audit.map(row => row.details?.phase)).toEqual(["intent"]);
     expect(f.kv.maintenanceBarrier.needsReconciliation).toBe(true);
     expect(await f.kv.get(KV.memories, "mem_one")).toBeNull();
   });
