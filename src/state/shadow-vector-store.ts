@@ -114,6 +114,7 @@ export class ShadowVectorStore implements PersistableLocalVectorStore {
   private drainPromise: Promise<void> | null = null;
   private reconcilePromise: Promise<boolean> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private failedSearch: { query: Float32Array; options: VectorSearchOptions } | null = null;
   private stopped = false;
 
   private reconciliations = 0;
@@ -340,11 +341,19 @@ export class ShadowVectorStore implements PersistableLocalVectorStore {
       this.overlapSum += overlapAtK;
       this.remoteLatencySumMs += latency;
       this.lastRemoteSuccessAt = new Date().toISOString();
-      if (!this.needsReconcile) this.state = "healthy";
+      if (!this.stopped && !this.needsReconcile && this.state !== "reconciling") {
+        this.failedSearch = null;
+        this.clearRetry();
+        this.state = "healthy";
+      }
       return { local, remote, overlapAtK };
     } catch (error) {
       this.sampledSearchFailures++;
-      if (!this.needsReconcile) this.state = "degraded";
+      if (!this.stopped && !this.needsReconcile && this.state !== "reconciling") {
+        this.state = "degraded";
+        this.failedSearch = structuredClone({ query, options });
+        this.scheduleRetry();
+      }
       this.recordFailure(error);
       throw error;
     }
@@ -399,6 +408,7 @@ export class ShadowVectorStore implements PersistableLocalVectorStore {
       this.lastReconciledAt = new Date().toISOString();
       this.lastRemoteSuccessAt = this.lastReconciledAt;
       this.lastFailure = null;
+      this.failedSearch = null;
       this.needsReconcile = false;
       this.state = "healthy";
       return true;
@@ -421,7 +431,12 @@ export class ShadowVectorStore implements PersistableLocalVectorStore {
     if (this.retryMs <= 0 || this.retryTimer || this.stopped) return;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.reconcile();
+      if (this.needsReconcile) {
+        void this.reconcile();
+      } else if (this.failedSearch && !this.stopped) {
+        const { query, options } = this.failedSearch;
+        void this.compareSearch(query, options).catch(() => {});
+      }
     }, this.retryMs);
     this.retryTimer.unref();
   }
@@ -452,6 +467,7 @@ export class ShadowVectorStore implements PersistableLocalVectorStore {
     await this.flush(timeoutMs);
     this.stopped = true;
     this.clearRetry();
+    this.failedSearch = null;
     this.state = "stopped";
   }
 
