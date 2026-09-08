@@ -23,6 +23,10 @@ import type {
 import { parseImportedLesson } from "../src/functions/lesson-model.js";
 import { projectRelationshipId } from "../src/functions/project-relationships.js";
 import { KV } from "../src/state/schema.js";
+import {
+  actionEventLocationScope,
+  listAuditEntries,
+} from "../src/state/partitioned-ledgers.js";
 
 function mockKV() {
   const store = new Map<string, Map<string, unknown>>();
@@ -92,6 +96,7 @@ function mockKV() {
       const entries = store.get(scope);
       return entries ? (Array.from(entries.values()) as T[]) : [];
     },
+    listGroups: async (): Promise<string[]> => [...store.keys()],
     failNext(
       operation: "set" | "delete",
       scope: string,
@@ -1152,7 +1157,7 @@ describe("Export/Import Functions", () => {
       strategy: "replace",
     })) as { success: boolean; lessons: number };
     const restored = await kv.list<Lesson>("mem:lessons");
-    const audits = await kv.list<AuditEntry>("mem:audit");
+    const audits = await listAuditEntries(kv);
 
     expect(result).toMatchObject({ success: true, lessons: 1 });
     expect(restored).toEqual([
@@ -1219,7 +1224,7 @@ describe("Export/Import Functions", () => {
       ]),
       strategy: "merge",
     })) as { success: boolean; error: string };
-    const audits = await kv.list<AuditEntry>("mem:audit");
+    const audits = await listAuditEntries(kv);
 
     expect(result).toMatchObject({
       success: false,
@@ -1566,6 +1571,48 @@ describe("Export/Import Functions", () => {
       JSON.parse(JSON.stringify(exported.actions)),
     );
     expect(reExported.actionEvents).toEqual(exported.actionEvents);
+
+    const location = await freshKv.get<{ scope: string }>(
+      actionEventLocationScope(event.id),
+      event.id,
+    );
+    expect(location?.scope).toMatch(/^mem:action-events:import:b\d{2}$/);
+    const eventScope = location!.scope;
+    expect(await freshKv.get("mem:action-events", event.id)).toBeNull();
+    expect(await freshKv.get(eventScope, event.id)).toEqual(event);
+
+    const conflicting = (await freshSdk.trigger("mem::import", {
+      exportData: {
+        ...exported,
+        actionEvents: [
+          { ...event, timestamp: "2026-08-17T06:00:00.000Z" },
+        ],
+      },
+      strategy: "merge",
+    })) as { success: boolean; error?: string };
+    expect(conflicting.success).toBe(false);
+    expect(conflicting.error).toContain("Action event ID conflict");
+
+    const emptied = (await freshSdk.trigger("mem::import", {
+      exportData: {
+        ...exported,
+        actions: [],
+        actionEvents: [],
+        actionSnapshot: {
+          schemaVersion: 2,
+          revision: 10,
+          actionCount: 0,
+          edgeCount: 0,
+          eventCount: 0,
+        },
+      },
+      strategy: "replace",
+    })) as { success: boolean };
+    expect(emptied.success).toBe(true);
+    expect(await freshKv.get(eventScope, event.id)).toBeNull();
+    expect(
+      await freshKv.get(actionEventLocationScope(event.id), event.id),
+    ).toBeNull();
   });
 
   it("normalizes actions from an old export before persistence", async () => {

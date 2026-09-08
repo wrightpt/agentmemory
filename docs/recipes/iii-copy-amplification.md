@@ -1,0 +1,246 @@
+# iii copy amplification and ledger partitions
+
+Updated 2026-09-05. The strongest supported lead for the write-related CPU and
+memory pressure is whole-collection copying in iii's file-backed state adapter.
+This is a demonstrated amplification mechanism; it is not proof that all of the
+live service's multi-gigabyte RSS comes from one leak.
+
+## What had already been done
+
+At 08:02 UTC the live service reported source
+`67cf4f71aa1503d161b4a4ab60906621db1e0c8f`, version `0.9.27` and build
+`workstation-deepseek-llm-v2`. That revision includes the Pi Astra action-read
+repair: eliminate unused full-action change-detection serialization and surface
+authoritative read failures instead of caching empty success. It preserves the
+earlier action-list snapshot cache. The configured provider was already
+`resilient(openai)` with model `glm-5.3`; provider restoration and persistence
+pressure are separate issues.
+
+An earlier, unfinished `partition-hot-ledgers` worktree already implemented the
+basic daily audit/monthly action-event partition design, on older base
+`67cea61`. This integration preserves that work and rebases it onto `67cf4f7`.
+It adds history integrity regressions, explicit read-error handling and a
+compatible write-mode rollback. Attribution belongs to those separate pieces;
+there is no evidence that nobody else identified the mechanism.
+
+Pi's independent review then caught a scale compatibility failure in candidate
+`e9faed4`: spreading a 160,000-row legacy audit into `Array.push` exceeded the
+JavaScript argument limit. The 20 smaller partition tests still passed.
+Activation was held; the integration reproduced the failure and incorporated
+Pi's iterative append fix and count/ID-hash regression. This also avoids the
+temporary mapped array. Neither the earlier `dab9b8c` nor `e9faed4` package was
+activated by this integration.
+
+## Mechanism
+
+The captured iii source, `iii-builtin-kv.rs`, shows:
+
+1. A row mutation marks its collection dirty. Flushes can coalesce mutations;
+   it is inaccurate to claim every API write immediately flushes the file.
+2. On the configured five-second persistence cycle, `save_loop` clones the
+   entire dirty collection (`store.get(&index).cloned()`, lines 273-275).
+3. `persist_index_to_disk` serializes that clone into a JSON string, then an
+   additional archived byte buffer (lines 154-155), writes a temporary file,
+   and renames it over the collection file.
+
+Thus a small append to a large audit or action-event ledger can allocate and
+serialize its entire accumulated history. Repeated cycles cause work far larger
+than the changed row. iii's loaded in-memory state and allocator behavior add
+separate residency costs. RSS is not the same thing as live allocated objects.
+
+Local source evidence:
+`/home/cp/shared/pi-astra-max-benchmark-20260905-KL5O4e/evidence/iii-builtin-kv.rs`.
+The synthetic tests used iii binary SHA-256
+`03a2d645c16dc9502fb6a694bb2b16465f6772cbe7c65baa15e3adbf3f021bb7`.
+
+The live seven-sample window at 08:10-08:11 UTC also observed the legacy audit
+file grow by only 824 bytes while its roughly 99.5 MB file was rewritten twice.
+iii's aggregate process write-byte counter grew about 197.6 MiB across all
+collections during that window. This is natural-traffic corroboration, not an
+isolated attribution of every written byte to audit. See `predeploy.jsonl` in
+the integration evidence directory.
+
+## Controlled evidence
+
+Pi's isolated comparison used the same 8,192 synthetic action rows with
+41.444 MiB logical JSON, once in one collection and once in 256 collections.
+No production records or services were used for the workload.
+
+| Metric | One collection | 256 collections |
+| --- | ---: | ---: |
+| Final idle RSS | 574.55 MiB | 140.79 MiB |
+| Cold reload RSS | 129.82 MiB | 130.19 MiB |
+| Peak resident high-water mark | 784.30 MiB | 140.79 MiB |
+| Persistence bytes per measured update cycle | 83.08 MiB | 1.31 MiB |
+| First-generation process CPU | 6,090 ms | 3,880 ms |
+
+All six original cases reported zero RPC failures and preserved their expected
+state manifests after restart. However, the flat case's resident high-water
+mark exceeded its 768 MiB budget while sampled RSS missed the peak. The author
+flagged and corrected that guard; this case is evidence, not a claim that every
+resource limit passed. No larger optional stress run should be justified by it.
+
+The table supports the copy-amplification lead and smaller write collections.
+It does not predict this integration's exact savings: the production design
+uses 64 action-ID buckets per month, rather than the experiment's 256 row
+buckets, and leaves historical collections loaded. Cold reload RSS was nearly
+unchanged. The subsequent, separately instrumented 4,096-row / 20.7 MiB fixture
+settled at 281.9 MiB RSS. glibc reported 265.8 MiB of arena space: 184.2 MiB free
+and 81.6 MiB still allocated. Cold reload used 73.9 MiB RSS and about 57.6 MiB
+allocated arena space. This confirms a substantial free-but-retained component,
+while leaving roughly 24 MiB more allocated arena memory than the cold baseline.
+The smaller instrumented run is diagnostic, not a paired performance result.
+No iii RPC or invocation errors were reproduced in these experiments.
+
+Authoritative experiment files:
+
+- `/home/cp/shared/pi-astra-max-benchmark-20260905-KL5O4e/followup-iii-pressure/evidence/comparison.json`
+- The adjacent `PLAN_AMENDMENT.md` and `evidence/resource-audit.json` document
+  the resource-guard limitation and the bounded follow-up.
+- `REPORT.md` and `allocator-summary.json` in that follow-up directory record
+  the completed allocator discrimination and its limits.
+
+## Repair and integrity guarantees
+
+`src/state/partitioned-ledgers.ts` centralizes storage discovery and reads:
+
+- New audit writes use `mem:audit:day:YYYY-MM-DD` in UTC.
+- Online action events use `mem:action-events:month:YYYY-MM:bNN`, with 64 stable
+  SHA-256 action-ID buckets. Each action's events stay together within a month.
+- Imported events use 64 fixed `mem:action-events:import:bNN` buckets, so
+  untrusted historical timestamps do not create unbounded calendar partitions.
+- Small event-ID locators have their own 64 buckets. They retain global ID
+  conflict detection even when an import changes an event's action or date.
+  A failed direct lookup falls back to partition discovery: because iii flushes
+  files independently, a crash can leave a durable event without its derived
+  locator. A locator miss must never prove that an event ID is unused.
+- Pending commits record their exact event scope. Recovery works across a
+  restart or write-mode change; interrupted locator/event/projection writes
+  remain covered by tests.
+- Legacy and partitioned histories remain readable and deduplicated by event
+  ID. A creation or migration event alone cannot justify skipping legacy
+  history: imports and write-mode rollback can put later events there.
+- Import/export and explicit GC use actual storage locations. Read/discovery
+  failures do not silently become an empty successful history or permission to
+  overwrite an existing event identity.
+
+This redirects future writes. It does not migrate/delete old memories, change
+the default `LocalVectorStore`, remove structured actions/leases/sessions, or
+replace iii. Older adapters without `listGroups` retain legacy writes.
+
+## Compatible rollback
+
+`AGENTMEMORY_LEDGER_WRITE_MODE` accepts `partitioned` (default) or `legacy`.
+An invalid value fails before writing. Reads always support both layouts.
+
+After new-format writes, do not reinstall `67cf4f7` or an earlier binary as an
+ordinary rollback: it cannot read the partitioned history. Retain this reader
+and set `AGENTMEMORY_LEDGER_WRITE_MODE=legacy` in the service environment, then
+perform the same graceful worker-first restart and revision/health checks.
+This reintroduces the old write amplification but preserves access to records
+from both layouts. Returning to `partitioned` also preserves intervening legacy
+events. The mode-switch regression exercises both directions.
+
+An unrelated binary regression needs a forward fix or a rebuilt rollback
+artifact retaining these readers. Restoring old stored data would discard new
+writes and requires a separately diagnosed corruption recovery; it is not a
+routine performance rollback.
+
+## Validation and deployment record
+
+Integration evidence is kept at
+`/home/cp/shared/agentmemory-ledger-integration-20260905`.
+The original patch and its file hashes were preserved before integration;
+the original worktree was not edited. Seven added safety tests initially failed
+against that patch. Those cases now pass, with rollback and invalid-mode cases
+added afterward. Lost-locator recovery and Pi's large-ledger regression bring
+the final full suite to 1,919 passing tests in 183 files, recorded in
+`full-suite-scale-fixed.log`.
+`npm run build` passed. `tsc --noEmit` reported the same 40 pre-existing
+diagnostics as the Pi source baseline, with no added diagnostic after ignoring
+line-number movement. Another independently owned task is addressing them.
+
+`benchmark/verify-ledger-persistence.mts` also passed against a private iii
+process: 69 synthetic events and two audits survived two restarts, imported
+event identity lookup, legacy-write rollback and reactivation. All three owned
+engine processes exited. A follow-up also removed a locator before persistence
+and verified the surviving imported event after reload. The result and private
+file store are in `engine-locator-smoke`.
+This validates persistence after the configured flush interval; it does not add
+an fsync acknowledgement or an ACID transaction across iii collection files.
+
+Tests ran with an isolated network namespace and private memory-state/temp
+directories, retaining the original HOME value. An initial `/dev/null`
+permission failure was corrected in the sandbox, not by weakening tests.
+
+Source preparation, artifact publication, activation and live verification are
+separate states. Consult the exact lock, deployment marker, live `/health`
+revision and the integration's deployment record before declaring it deployed.
+Building this checkout alone has no effect on the installed package.
+
+### Unhealthy first activation and rebuild responsiveness
+
+The `3a45a7d` package, including Pi's iterative append fix, was installed at
+09:15 UTC on 2026-09-05. Initial health probes passed briefly, but subsequent
+five-second `/agentmemory/livez` and `/agentmemory/health` requests timed out.
+The deployment recorder failed its health check and retained the previous
+`67cf4f7` marker. Automatic recovery restarted the service repeatedly. This is
+an installed but unhealthy rollout, not a successful runtime verification.
+Pi independently reported the same timeouts at 09:26-09:28 UTC; Pi performed
+no deployment or restart.
+
+The surviving index rebuild barrier correctly forces rebuilding after an
+incomplete rebuild. The boot path starts rebuilding without awaiting it, but
+that alone does not keep the JavaScript event loop responsive. Its local ONNX
+embedding calls can block the thread, and the old 32-item batch loop had no
+explicit event-loop yield. A private, network-isolated probe of the installed
+cached model took about 437 ms for one synthetic item with zero 100 ms timer
+heartbeats during that call (`local-embedding-single.log`). This establishes a
+blocking mechanism; it does not establish that it explains every live timeout.
+
+The follow-up uses a one-item default rebuild batch for the local provider and
+yields with `setImmediate` after each flush. Remote defaults and explicit batch
+overrides remain supported. Four regression cases reproduce the old behavior
+and verify batch sizing and servicing pending work before the next batch. The
+barrier remains intact until both complete indexes are persisted; no partial
+snapshot is accepted to make startup appear successful. Final runtime status
+must come from the subsequent deployment record and sustained live probes.
+
+Pi's additional private cutover validation passed all 1,919 tests and build
+for `e9faed4` plus the identical append fix. Across cutover, locator loss,
+legacy-write rollback and reactivation, whole-record hashes and counts
+preserved 111 events and 16 audits. Legacy files were byte-identical during
+partition-only writes, and all three owned engines exited. Evidence:
+`/home/cp/shared/pi-astra-max-benchmark-20260905-KL5O4e/ledger-repair-validation/evidence/cutover/result.json`.
+These integrity results do not supersede the unhealthy live observations.
+
+The rebuild follow-up passed `npm test -- --maxWorkers=2`: 1,923 tests in
+184 files (`full-suite-rebuild-responsive.log`), with the same 40 baseline
+typecheck diagnostics. At 09:39 UTC, before installing that follow-up, the
+existing `3a45a7d` process became responsive again. Its health response showed
+low event-loop lag and 1,827 local vectors. This recovery must not be attributed
+to the follow-up patch, which was not yet installed; it also does not erase the
+earlier multi-minute startup failures.
+
+## Runtime acceptance and remaining limits
+
+Use natural traffic for the live soak. Record process start times, interval CPU,
+RSS/PSS/private dirty memory, process write-byte deltas, invocation/error
+counters, action-list latency, and metadata for legacy/new ledger files. Check
+revision continuity, event history and sentinel write/read/cancel behavior.
+Health 200 or a small V8 heap alone does not establish memory health.
+
+Require new appends to create/update small partition files while the old
+monolithic ledgers stop changing, except during explicit legacy mode or a
+separately requested import/GC. Compare comparable activity intervals; a fresh
+restart's lower RSS alone is not evidence of a sustained fix. Record startup,
+5/15/30/60 minutes and later 6/24-hour observations as they actually occur.
+
+Remaining concerns include historical boot rehydration, allocator retention,
+other large collections, outstanding invocation accounting and bursty hot
+partitions. Daily/monthly partitioning bounds history per period, not bytes
+under arbitrary traffic. Export/full-history reads still materialize records.
+Unknown event IDs require partition lookups, so very large imports need a
+separate bounded performance check; correctness takes precedence over treating
+a missing derived locator as authoritative absence.
+Do not declare the whole incident resolved until these measurements support it.

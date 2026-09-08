@@ -17,6 +17,7 @@ import { generateId } from "../state/schema.js";
 import { selectSessionPage } from "../functions/session-list.js";
 import type { Memory, Session } from "../types.js";
 import type { StateKV } from "../state/kv.js";
+import { listAuditEntries } from "../state/partitioned-ledgers.js";
 import { memoryToObservation } from "../state/memory-utils.js";
 import {
   applyRetrievalPolicy,
@@ -712,11 +713,11 @@ async function handleLocal(
     }
 
     case "memory_audit": {
-      const entries = await kvInstance.list("mem:audit");
+      const entries = await listAuditEntries(kvInstance);
       const limit = v.limit ?? 50;
       return textResponse(
         {
-          entries: (entries as Array<Record<string, unknown>>).slice(0, limit),
+          entries: entries.slice(0, limit),
         },
         true,
       );

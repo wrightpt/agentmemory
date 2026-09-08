@@ -44,10 +44,20 @@ export const KV = {
   teamUsers: (teamId: string, userId: string) =>
     `mem:team:${teamId}:users:${userId}`,
   teamProfile: (teamId: string) => `mem:team:${teamId}:profile`,
+  // Legacy monolithic ledgers remain readable but are no longer written. iii's
+  // file KV clones and serializes an entire dirty scope every five seconds, so
+  // append-only rows go to bounded partitions instead.
   audit: "mem:audit",
+  auditPartition: (utcDay: string) => `mem:audit:day:${utcDay}`,
   actions: "mem:actions",
   actionEdges: "mem:action-edges",
   actionEvents: "mem:action-events",
+  actionEventsPartition: (utcMonth: string, bucket: string) =>
+    `mem:action-events:month:${utcMonth}:${bucket}`,
+  actionEventsImportPartition: (bucket: string) =>
+    `mem:action-events:import:${bucket}`,
+  actionEventLocations: (bucket: string) =>
+    `mem:action-event-locations:${bucket}`,
   actionState: "mem:action-state",
   inputIntents: "mem:input-intents",
   leases: "mem:leases",

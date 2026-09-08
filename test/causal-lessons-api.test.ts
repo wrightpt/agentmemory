@@ -18,6 +18,7 @@ import type {
   Lesson,
 } from "../src/types.js";
 import { mockKV, mockSdk } from "./helpers/mocks.js";
+import { listAuditEntries } from "../src/state/partitioned-ledgers.js";
 
 function evidence(commit = "a".repeat(40)) {
   return {
@@ -363,7 +364,7 @@ describe("causal lesson REST and MCP boundaries", () => {
       lessons: Array<{ lessonId: string }>;
       retrieval: { usedMode: string };
     };
-    const audits = await kv.list<AuditEntry>("mem:audit");
+    const audits = await listAuditEntries(kv);
     const recallAudits = audits.filter(
       (entry) => entry.operation === "lesson_recall",
     );

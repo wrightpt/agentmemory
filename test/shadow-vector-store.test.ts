@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { LocalVectorStore, type LocalVectorEntry } from "../src/state/vector-store.js";
 import {
   ShadowVectorStore,
@@ -8,6 +8,8 @@ import {
 class FakeRemote implements ShadowRemoteVectorStore {
   points = new Map<string, LocalVectorEntry>();
   failReset = false;
+  failSearch = false;
+  resets = 0;
   resetGate: Promise<void> | null = null;
   searchGate: Promise<void> | null = null;
   upsertGate: Promise<void> | null = null;
@@ -17,6 +19,7 @@ class FakeRemote implements ShadowRemoteVectorStore {
   async search() {
     this.searches++;
     if (this.searchGate) await this.searchGate;
+    if (this.failSearch) throw new Error("qdrant search timed out");
     return [...this.points.values()]
       .sort((a, b) => a.obsId.localeCompare(b.obsId))
       .map((entry, index) => ({
@@ -43,6 +46,7 @@ class FakeRemote implements ShadowRemoteVectorStore {
   }
 
   async resetCollection() {
+    this.resets++;
     if (this.resetGate) await this.resetGate;
     if (this.failReset) throw new Error("qdrant unavailable");
     this.points.clear();
@@ -54,6 +58,83 @@ function vector(...values: number[]): Float32Array {
 }
 
 describe("ShadowVectorStore", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("recovers a timed-out sample without new traffic or rebuilding the mirror", async () => {
+    vi.useFakeTimers();
+    const local = new LocalVectorStore();
+    local.add("obs-local", "session-1", vector(1, 0));
+    const remote = new FakeRemote();
+    const shadow = new ShadowVectorStore(local, remote, { retryMs: 50, sampleRate: 0 });
+    await shadow.reconcile();
+    remote.failSearch = true;
+    await expect(shadow.compareSearch(vector(1, 0))).rejects.toThrow("timed out");
+    expect(shadow.search(vector(1, 0))[0].obsId).toBe("obs-local");
+    expect(shadow.diagnostics()).toMatchObject({ state: "degraded", needsReconcile: false });
+
+    remote.failSearch = false;
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(shadow.diagnostics()).toMatchObject({
+      state: "healthy", sampledSearchFailures: 1, sampledSearchSuccesses: 1,
+    });
+    expect(remote.searches).toBe(2);
+    expect(remote.resets).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await shadow.shutdown();
+  });
+
+  it("keeps failed search retries bounded and cancels them on shutdown", async () => {
+    vi.useFakeTimers();
+    const remote = new FakeRemote();
+    const shadow = new ShadowVectorStore(new LocalVectorStore(), remote, { retryMs: 50 });
+    await shadow.reconcile();
+    remote.failSearch = true;
+    await expect(shadow.compareSearch(vector(1, 0))).rejects.toThrow("timed out");
+    await vi.advanceTimersByTimeAsync(150);
+    expect(remote.searches).toBe(4);
+    expect(vi.getTimerCount()).toBe(1);
+    expect(remote.resets).toBe(1);
+    await shadow.shutdown();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(remote.searches).toBe(4);
+    expect(shadow.diagnostics().state).toBe("stopped");
+  });
+
+  it("copies the failed search filter and query for read-only recovery", async () => {
+    vi.useFakeTimers();
+    const remote = new FakeRemote();
+    const search = vi.spyOn(remote, "search");
+    const shadow = new ShadowVectorStore(new LocalVectorStore(), remote, { retryMs: 50 });
+    await shadow.reconcile();
+    const query = vector(1, 0);
+    const options = { limit: 2, filter: { projectIds: ["agentmemory"] } };
+    remote.failSearch = true;
+    await expect(shadow.compareSearch(query, options)).rejects.toThrow("timed out");
+    query[0] = 99;
+    options.filter.projectIds[0] = "other-project";
+    remote.failSearch = false;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(search).toHaveBeenLastCalledWith(vector(1, 0), {
+      limit: 2, filter: { projectIds: ["agentmemory"] },
+    });
+    await shadow.shutdown();
+  });
+
+  it.each([false, true])("does not revive a stopped shadow after an in-flight search (failure=%s)", async (failSearch) => {
+    const remote = new FakeRemote();
+    const shadow = new ShadowVectorStore(new LocalVectorStore(), remote, { retryMs: 50 });
+    await shadow.reconcile();
+    let release!: () => void;
+    remote.searchGate = new Promise<void>((resolve) => { release = resolve; });
+    remote.failSearch = failSearch;
+    const comparison = shadow.compareSearch(vector(1, 0)).catch(() => null);
+    await shadow.shutdown();
+    release();
+    await comparison;
+    expect(shadow.diagnostics().state).toBe("stopped");
+  });
+
   it("preserves local search and persistence when the remote is unavailable", async () => {
     const local = new LocalVectorStore();
     const remote = new FakeRemote();

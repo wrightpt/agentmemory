@@ -249,22 +249,22 @@ export async function vectorIndexAddBatchGuarded(
   return { ok, fail }
 }
 
-// Embed-batch size for rebuild. Each item is one /v1/embeddings call's
-// `input` array element; the provider sees the whole batch as one HTTP
-// round-trip. 32 fits comfortably under typical per-request token budgets
-// (32 × ~110 tok/item ≈ 3.5k tokens) and gets close to per-call
-// throughput for GPU-backed endpoints (vLLM, Triton, etc.). Override via
-// REBUILD_EMBED_BATCH_SIZE for endpoints that prefer smaller/larger
-// batches. Set to 1 to fall back to the legacy per-item path.
+// Remote providers benefit from batching HTTP requests. Local native inference
+// can block the JS thread even through an async API, so bound its default work
+// to one item before yielding to health requests and other pending I/O.
+// REBUILD_EMBED_BATCH_SIZE remains an explicit operator override.
 const DEFAULT_REBUILD_EMBED_BATCH = 32
 const REBUILD_SOURCE_READ_ATTEMPTS = 3
 const OBSERVATION_SCOPE_PREFIX = 'mem:obs:'
 
 function getRebuildEmbedBatchSize(): number {
+  const defaultSize = currentEmbeddingProvider?.name === 'local'
+    ? 1
+    : DEFAULT_REBUILD_EMBED_BATCH
   const raw = process.env.REBUILD_EMBED_BATCH_SIZE
-  if (!raw) return DEFAULT_REBUILD_EMBED_BATCH
+  if (!raw) return defaultSize
   const n = parseInt(raw, 10)
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_REBUILD_EMBED_BATCH
+  return Number.isFinite(n) && n > 0 ? n : defaultSize
 }
 
 async function listForRebuild<T>(
@@ -375,6 +375,9 @@ async function performRebuildIndex(kv: StateKV): Promise<number> {
     if (pending.length === 0) return
     await vectorIndexAddBatchGuarded(pending)
     pending.length = 0
+    // Awaiting already-resolved provider/store promises only drains microtasks.
+    // Give timers and sockets a turn before starting another inference batch.
+    await new Promise<void>((resolve) => setImmediate(resolve))
   }
   const enqueue = async (job: EmbedJob): Promise<void> => {
     pending.push(job)
