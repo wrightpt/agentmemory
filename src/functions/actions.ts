@@ -317,7 +317,6 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
           error: `type must be one of: ${VALID_EDGE_TYPES.join(", ")}`,
         };
       }
-
       try {
         return await withActionStoreLock(async () => {
           await recoverActionStoreUnlocked(kv);

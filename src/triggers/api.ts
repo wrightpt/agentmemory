@@ -185,7 +185,7 @@ function sessionContextFields(body: Record<string, unknown>): Partial<HookPayloa
 function parseObserveRequest(
   req: ApiRequest<unknown>,
 ): { payload: HookPayload } | { error: Response } {
-  const body = (req.body ?? {}) as Record<string, unknown>;
+  const body = (req.body ?? {}) as unknown as Record<string, unknown>;
   const hookType = asNonEmptyString(body.hookType);
   const sessionId = asNonEmptyString(body.sessionId);
   const project = asNonEmptyString(body.project);
@@ -3378,7 +3378,8 @@ export function registerApiTriggers(
     async (req: ApiRequest<Partial<Routine>>): Promise<Response> => {
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
-      if (!req.body?.name || !req.body?.steps) {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (!body.name || !body.steps) {
         return {
           status_code: 400,
           body: { error: "name and steps are required" },
