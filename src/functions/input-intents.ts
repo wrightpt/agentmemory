@@ -225,7 +225,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
       const immutable = {
         idempotencyKey,
         targetSession,
-        sourceSession,
+        sourceSession: sourceSession ?? undefined,
         payloadRef,
         payloadSha256,
         payloadBytes,
@@ -468,7 +468,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
         !claimToken ||
         !outcomes.includes(data.outcome) ||
         (data.errorCode !== undefined && !errorCode) ||
-        (errorCode !== undefined && !ERROR_CODE.test(errorCode)) ||
+        (errorCode && !ERROR_CODE.test(errorCode)) ||
         notBefore === null
       ) {
         return { success: false, error: "invalid_settlement" };
@@ -605,7 +605,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
         !intentId ||
         !actor ||
         !SESSION_REF.test(actor) ||
-        (reason !== undefined && !ERROR_CODE.test(reason)) ||
+        (reason && !ERROR_CODE.test(reason)) ||
         (data.reason !== undefined && !reason)
       ) {
         return { success: false, error: "invalid_cancel_request" };
