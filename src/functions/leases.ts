@@ -1,4 +1,5 @@
 import type { ISdk } from "iii-sdk";
+import { actionProject, getWorkAuthority } from "../state/work-authority.js";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
@@ -252,6 +253,8 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
       let expired = 0;
 
       for (const lease of leases) {
+        const ownedAction = await kv.get<Action>(KV.actions, lease.actionId);
+        if (ownedAction && await getWorkAuthority(kv, actionProject(ownedAction))) continue;
         if (
           lease.status === "active" &&
           new Date(lease.expiresAt).getTime() <= now

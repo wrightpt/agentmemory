@@ -30,6 +30,7 @@ import type {
 import { normalizeAccessLog } from "./access-tracker.js";
 import { KV } from "../state/schema.js";
 import { StateKV } from "../state/kv.js";
+import { fencedProjects } from "../state/work-authority.js";
 import {
   deleteActionEventLocation,
   getActionEvent,
@@ -388,6 +389,12 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       }
       const strategy = requestedStrategy ?? "merge";
       const importData = data.exportData;
+      // A generic restore must not resurrect a retired task authority. Restore
+      // the engine backup (including work-authority records) under operator
+      // control instead. Reject before changing any other imported collection.
+      if ((await fencedProjects(kv)).length) {
+        return { success: false, error: "work_authority_restore_requires_review" };
+      }
 
       const supportedVersions = new Set(["0.3.0", "0.4.0", "0.5.0", "0.6.0", "0.6.1", "0.7.0", "0.7.2", "0.7.3", "0.7.4", "0.7.5", "0.7.6", "0.7.7", "0.7.9", "0.8.0", "0.8.1", "0.8.2", "0.8.3", "0.8.4", "0.8.5", "0.8.6", "0.8.7", "0.8.8", "0.8.9", "0.8.10", "0.8.11", "0.8.12", "0.8.13", "0.9.0", "0.9.1", "0.9.2", "0.9.3", "0.9.4", "0.9.5", "0.9.6", "0.9.7", "0.9.8", "0.9.9", "0.9.10", "0.9.11", "0.9.12", "0.9.13", "0.9.14", "0.9.15", "0.9.16", "0.9.17", "0.9.18", "0.9.19", "0.9.20", "0.9.21", "0.9.22", "0.9.23", "0.9.24", "0.9.25", "0.9.26", "0.9.27"]);
       if (!supportedVersions.has(importData.version)) {
@@ -1078,6 +1085,7 @@ export function registerExportImportFunction(sdk: ISdk, kv: StateKV): void {
       }
 
       await withActionStoreLock(async () => {
+        if ((await fencedProjects(kv)).length) throw new Error("work_authority_restore_requires_review");
         // Imported event timestamps are untrusted and may span arbitrary
         // centuries. Fixed hash buckets bound scope cardinality and make a
         // retry deterministic even if a locator write did not persist.

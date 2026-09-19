@@ -941,6 +941,26 @@ export interface ActionSnapshot {
   eventCount: number;
 }
 
+export interface WorkAuthority {
+  protocol: 'work-authority/v1';
+  projectId: string;
+  phase: 'frozen' | 'beads';
+  generation: number;
+  planDigest: string;
+  prefix: string;
+  sourceDigest: string;
+  sourceRevision: number;
+  selectedIds: string[];
+  deferredIds: string[];
+  heldClaimIds: string[];
+  frozenAt: string;
+  actor: string;
+  committedAt?: string;
+  receiptDigest?: string;
+  mapping?: Array<{ sourceActionId: string; beadId: string }>;
+  deferredTrackingId?: string;
+}
+
 export interface ActionBlocker {
   type:
     | "manual"

@@ -1,0 +1,59 @@
+{
+  "active_goal": "Selective importer and project cutover, then one bounded Shell worker",
+  "agentmemory_label": {
+    "cwd": "/home/cp/.config/superpowers/worktrees/agentmemory/beads-authority-fence",
+    "projectId": "agentmemory",
+    "repoRoot": "/home/cp/repos/agent-infra/agentmemory",
+    "scopeType": "repo",
+    "status": "awaiting-activation",
+    "tags": "worktree:beads-authority-fence, branch:feat/beads-authority-fence",
+    "task_slug": "beads-authority-fence",
+    "topic": "beads-control-plane"
+  },
+  "branch": "feat/beads-authority-fence",
+  "dirty_files": [
+    "M docs/recipes/work-authority-cutover.md",
+    " M scripts/work-authority-fixture.ts",
+    " M src/functions/work-authority.ts",
+    " M src/triggers/api.ts",
+    " M test/work-authority.test.ts"
+  ],
+  "generated_at_utc": "2026-09-19T09:41:04+00:00",
+  "git_status": [
+    "## feat/beads-authority-fence...origin/main [ahead 1]",
+    " M docs/recipes/work-authority-cutover.md",
+    " M scripts/work-authority-fixture.ts",
+    " M src/functions/work-authority.ts",
+    " M src/triggers/api.ts",
+    " M test/work-authority.test.ts"
+  ],
+  "hazards": [
+    "Explicit user restriction forbids systemd installation/restart and Shell restart without separate activation authorization. Preserve protected deploy worktree and all sessions. No live authority switch or batch has run."
+  ],
+  "last_validation": [
+    "npm test: 2006 passed across 186 files; npx tsc --noEmit passed; native importer pilot-04: 15 assertions passed."
+  ],
+  "latest_commit": "70866b7 (HEAD -> feat/beads-authority-fence) feat(work): fence AgentMemory task writes during project cutover",
+  "next_actions": [
+    "Review local commits and verified package, obtain the reserved activation authorization, then refresh exact source revisions before cutover and the two-task batch."
+  ],
+  "recent_commits": [
+    "70866b7 (HEAD -> feat/beads-authority-fence) feat(work): fence AgentMemory task writes during project cutover",
+    "d97f8b6 (origin/main, origin/HEAD, main) Merge pull request #50 from wrightpt/wrightpt/chore/ci-typecheck-gate",
+    "aaaf17b (origin/wrightpt/chore/ci-typecheck-gate, wrightpt/chore/ci-typecheck-gate) ci: add tsc --noEmit typecheck gate",
+    "6eab23f Merge pull request #49 from wrightpt/wrightpt/fix/typescript-strict-errors",
+    "358878c (origin/wrightpt/fix/typescript-strict-errors, wrightpt/fix/typescript-strict-errors) fix(types): resolve 40 strict TypeScript errors"
+  ],
+  "remote_origin": "https://github.com/wrightpt/agentmemory.git",
+  "repo": "/home/cp/.config/superpowers/worktrees/agentmemory/beads-authority-fence",
+  "repo_name": "beads-authority-fence",
+  "schema": "agent-handoff.v1",
+  "source_docs": [
+    "AGENTS.md",
+    "README.md",
+    "docs/AGENT_HANDOFF.md"
+  ],
+  "summary": "Implemented per-project task writer fence, metadata snapshots and resumable freeze/commit protocol. History is preserved; unrelated projects retain AgentMemory authority. The live endpoint is absent, so activation is still required.",
+  "upstream": "origin/main",
+  "working_tree": "dirty"
+}

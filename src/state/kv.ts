@@ -1,5 +1,6 @@
 import type { ISdk } from 'iii-sdk'
 import { maintenanceBarrierFor } from './maintenance-barrier.js'
+import { assertWorkMutation } from './work-authority.js'
 
 export class StateKV {
   constructor(private sdk: ISdk) {}
@@ -19,10 +20,13 @@ export class StateKV {
   }
 
   async set<T = unknown>(scope: string, key: string, value: T): Promise<T> {
-    return this.maintenanceBarrier.mutate(scope, key, value, () => this.sdk.trigger<{ scope: string; key: string; value: T }, T>({
-      function_id: 'state::set',
-      payload: { scope, key, value },
-    }))
+    return this.maintenanceBarrier.mutate(scope, key, value, async () => {
+      await assertWorkMutation(this, scope, key, value)
+      return this.sdk.trigger<{ scope: string; key: string; value: T }, T>({
+        function_id: 'state::set',
+        payload: { scope, key, value },
+      })
+    })
   }
 
   async update<T = unknown>(
@@ -30,20 +34,26 @@ export class StateKV {
     key: string,
     ops: Array<{ type: string; path: string; value?: unknown }>,
   ): Promise<T> {
-    return this.maintenanceBarrier.mutate(scope, key, ops, () => this.sdk.trigger<
-      { scope: string; key: string; ops: Array<{ type: string; path: string; value?: unknown }> },
-      T
-    >({
-      function_id: 'state::update',
-      payload: { scope, key, ops },
-    }))
+    return this.maintenanceBarrier.mutate(scope, key, ops, async () => {
+      await assertWorkMutation(this, scope, key, ops, true)
+      return this.sdk.trigger<
+        { scope: string; key: string; ops: Array<{ type: string; path: string; value?: unknown }> },
+        T
+      >({
+        function_id: 'state::update',
+        payload: { scope, key, ops },
+      })
+    })
   }
 
   async delete(scope: string, key: string): Promise<void> {
-    return this.maintenanceBarrier.mutate(scope, key, undefined, () => this.sdk.trigger<{ scope: string; key: string }, void>({
-      function_id: 'state::delete',
-      payload: { scope, key },
-    }))
+    return this.maintenanceBarrier.mutate(scope, key, undefined, async () => {
+      await assertWorkMutation(this, scope, key, undefined)
+      return this.sdk.trigger<{ scope: string; key: string }, void>({
+        function_id: 'state::delete',
+        payload: { scope, key },
+      })
+    })
   }
 
   async list<T = unknown>(scope: string): Promise<T[]> {
