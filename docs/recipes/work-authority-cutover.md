@@ -44,6 +44,19 @@ Legacy JSON exports alone do not contain sufficient cutover control evidence.
 Do not downgrade to a pre-fence runtime after freezing a project: that would
 restore an unchecked writer. Recovery must retain the fence implementation.
 
+The native iii file adapter acknowledges writes before its asynchronous disk
+flush. A successful transition response alone is not a persistence receipt.
+For the first live cutover, publish the reviewed freeze separately, verify its
+control record in the native store, and restart the engine through its normal
+ordered systemd procedure. Re-read and compare the phase, generation and plan
+digest before resuming that same import plan. Repeat the persistence and
+restart check after commit, comparing the receipt digest and complete mapping
+as well. Keep imports deferred and worker admission disabled until both checks
+pass; retain their receipts with the native state backup. This operational gate
+qualifies the actual engine, while the synthetic fixture does not prove native
+iii crash durability. Never treat a missing or changed record after restart as
+permission to recreate legacy task authority.
+
 Validation: `npm test` and `npx tsc --noEmit`. `test/work-authority.test.ts`
 uses the real StateKV/barrier with engine-faithful clone/undefined semantics,
 including restart, concurrent-writer, claim, raw-write, history and quarantine
