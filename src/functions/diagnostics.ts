@@ -1,4 +1,5 @@
 import type { ISdk } from "iii-sdk";
+import { actionProject, getWorkAuthority } from "../state/work-authority.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
@@ -71,6 +72,7 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         const actionMap = new Map(actions.map((a) => [a.id, a]));
 
         for (const action of actions) {
+          if (await getWorkAuthority(kv, actionProject(action))) continue;
           if (action.status === "active") {
             const hasActiveLease = leases.some(
               (l) =>
@@ -165,6 +167,8 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         let leaseIssues = 0;
 
         for (const lease of leases) {
+          const ownedAction = actions.find(a => a.id === lease.actionId);
+          if (ownedAction && await getWorkAuthority(kv, actionProject(ownedAction))) continue;
           if (
             lease.status === "active" &&
             new Date(lease.expiresAt).getTime() <= now
@@ -791,6 +795,7 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         const actionMap = new Map(actions.map((a) => [a.id, a]));
 
         for (const action of actions) {
+          if (await getWorkAuthority(kv, actionProject(action))) continue;
           if (action.status === "blocked") {
             const deps = allEdges.filter(
               (e) => e.sourceActionId === action.id && e.type === "requires",
@@ -939,6 +944,8 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         const actionIds = new Set(actions.map((a) => a.id));
 
         for (const lease of leases) {
+          const ownedAction = actions.find(a => a.id === lease.actionId);
+          if (ownedAction && await getWorkAuthority(kv, actionProject(ownedAction))) continue;
           if (
             lease.status === "active" &&
             new Date(lease.expiresAt).getTime() <= now

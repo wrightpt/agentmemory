@@ -59,6 +59,7 @@ export const KV = {
   actionEventLocations: (bucket: string) =>
     `mem:action-event-locations:${bucket}`,
   actionState: "mem:action-state",
+  workAuthority: "mem:work-authority",
   inputIntents: "mem:input-intents",
   leases: "mem:leases",
   routines: "mem:routines",

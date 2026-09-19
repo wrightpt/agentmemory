@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { assertActionAuthority, assertWorkMutation } from "../state/work-authority.js";
 import type { StateKV } from "../state/kv.js";
 import { withKeyedLock } from "../state/keyed-mutex.js";
 import { KV, generateId } from "../state/schema.js";
@@ -131,6 +132,7 @@ export async function persistActionUnlocked(
     throw new ActionNormalizationError(normalization.conflicts);
   }
   const action = normalization.action;
+  await assertActionAuthority(kv, before, action);
   const timestamp = new Date().toISOString();
   const event: ActionEvent = {
     schemaVersion: ACTION_SCHEMA_VERSION,
@@ -170,6 +172,7 @@ export async function deleteAction(
     const state = await recoverActionStoreUnlocked(kv);
     const before = await kv.get<Action>(KV.actions, actionId);
     if (!before) return { deleted: false, state };
+    await assertActionAuthority(kv, before);
     const event: ActionEvent = {
       schemaVersion: ACTION_SCHEMA_VERSION,
       id: generateId("aev"),
@@ -216,6 +219,7 @@ export async function persistActionEdgeUnlocked(
     options.before === undefined
       ? await kv.get<ActionEdge>(KV.actionEdges, edge.id)
       : options.before;
+  await assertWorkMutation(kv, KV.actionEdges, edge.id, edge);
   const event: ActionEvent = {
     schemaVersion: ACTION_SCHEMA_VERSION,
     id: generateId("aev"),
@@ -242,6 +246,7 @@ export async function deleteActionEdge(
     const state = await recoverActionStoreUnlocked(kv);
     const before = await kv.get<ActionEdge>(KV.actionEdges, edgeId);
     if (!before) return { deleted: false, state };
+    await assertWorkMutation(kv, KV.actionEdges, edgeId, undefined);
     const event: ActionEvent = {
       schemaVersion: ACTION_SCHEMA_VERSION,
       id: generateId("aev"),

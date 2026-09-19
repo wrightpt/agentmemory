@@ -1,6 +1,7 @@
 import type { ISdk } from "iii-sdk";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
+import { actionProject, fencedProjects } from "../state/work-authority.js";
 import type {
   ActionBlocker,
   ActionReadinessView,
@@ -50,7 +51,9 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
         now,
       };
       const index = buildActionViewIndex(viewContext);
+      const excludedProjects = await fencedProjects(kv);
       const frontier = snapshot.actions
+        .filter(action => !excludedProjects.includes(actionProject(action)))
         .filter(
           (action) =>
             !data.project || matchesActionProject(action, data.project),
@@ -85,6 +88,7 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
         totalActions: snapshot.actions.length,
         totalUnblocked: frontier.length,
         revision: snapshot.state.revision,
+        historicalProjects: excludedProjects,
       };
     },
   );
@@ -100,6 +104,7 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
           totalActions: number;
           totalUnblocked: number;
           revision: number;
+          historicalProjects?: string[];
         }
       >({
         function_id: "mem::frontier",
@@ -118,7 +123,10 @@ export function registerFrontierFunction(sdk: ISdk, kv: StateKV): void {
         return {
           success: true,
           suggestion: null,
-          message: "No actionable work found",
+          message: result.historicalProjects?.length
+            ? "No actionable AgentMemory work; frozen or migrated projects require the Work API"
+            : "No actionable work found",
+          ...(result.historicalProjects?.length ? { historicalProjects: result.historicalProjects } : {}),
           totalActions: result.totalActions || 0,
           totalUnblocked: 0,
           revision: result.revision,

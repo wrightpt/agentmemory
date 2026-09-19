@@ -3211,6 +3211,27 @@ export function registerApiTriggers(
     },
   });
 
+  sdk.registerFunction("api::work-authority-get", async (req: ApiRequest): Promise<Response> => {
+    const denied = checkAuth(req, secret);
+    if (denied) return denied;
+    const body = await sdk.trigger({ function_id: "mem::work-authority-get",
+      payload: { projectId: req.query_params?.["projectId"] } });
+    return { status_code: 200, body };
+  });
+  sdk.registerTrigger({ type: "http", function_id: "api::work-authority-get",
+    config: { api_path: "/agentmemory/work-authority", http_method: "GET" } });
+  sdk.registerFunction("api::work-authority-transition", async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+    const denied = checkAuth(req, secret);
+    if (denied) return denied;
+    const body = await sdk.trigger({ function_id: "mem::work-authority-transition",
+      payload: pickDefinedFields(req.body ?? {}, ["protocol", "operation", "projectId", "planDigest",
+        "sourceDigest", "generation", "selectedIds", "deferredIds", "heldClaimIds", "prefix", "mapping",
+        "receiptDigest", "deferredTrackingId", "actor"]) });
+    return { status_code: 200, body };
+  });
+  sdk.registerTrigger({ type: "http", function_id: "api::work-authority-transition",
+    config: { api_path: "/agentmemory/work-authority", http_method: "POST" } });
+
   sdk.registerFunction("api::action-get", 
     async (req: ApiRequest<{ actionId: string }>): Promise<Response> => {
       const authErr = checkAuth(req, secret);

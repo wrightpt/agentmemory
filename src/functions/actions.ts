@@ -12,6 +12,7 @@ import type {
   Sentinel,
 } from "../types.js";
 import { recordAudit } from "./audit.js";
+import { assertActionAuthority, fencedProjects, getWorkAuthority } from "../state/work-authority.js";
 import {
   isActionApprovalState,
   isActionLifecycle,
@@ -138,6 +139,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
           if (!parent) {
             return { success: false, error: "parent action not found" };
           }
+          await assertActionAuthority(kv, parent);
         }
 
         const now = new Date().toISOString();
@@ -166,6 +168,9 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
                   ? `gate not found: ${requestedEdge.targetActionId}`
                   : `target action not found: ${requestedEdge.targetActionId}`,
             };
+          }
+          if (requestedEdge.type !== "gated_by") {
+            await assertActionAuthority(kv, await kv.get<Action>(KV.actions, requestedEdge.targetActionId));
           }
           pendingEdges.push({
             id: generateId("ae"),
@@ -412,7 +417,10 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
         kv.list<Sentinel>(KV.sentinels),
         kv.list<Lease>(KV.leases),
       ]);
-      return selectActionPage(snapshot, checkpoints, sentinels, leases, data);
+      const excludedProjects = data.view && !["completed", "cancelled"].includes(data.view)
+        ? await fencedProjects(kv) : [];
+      const page = selectActionPage(snapshot, checkpoints, sentinels, leases, { ...data, excludedProjects });
+      return excludedProjects.length ? { ...page, historicalProjects: excludedProjects } : page;
     } catch (error) {
       if (error instanceof ActionQueryError) {
         return { success: false, error: error.code, message: error.message };
@@ -435,6 +443,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       try {
         const limit = Math.min(requestedLimit, MAX_ACTION_GRAPH_ACTIONS);
         const snapshot = await readActionStoreSnapshot(kv);
+        const historicalProjects = await fencedProjects(kv);
         const rankedActions = [...snapshot.actions].sort(compareGraphActions);
         const selectedActions = rankedActions.slice(0, limit);
         const selectedIds = new Set(selectedActions.map((action) => action.id));
@@ -449,7 +458,10 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
         return {
           success: true,
           revision: snapshot.state.revision,
-          actions: selectedActions.map(projectActionForGraph),
+          actions: selectedActions.map(action => ({ ...projectActionForGraph(action),
+            authority: historicalProjects.includes(action.projectId || action.project || "workstation")
+              ? "historical-agentmemory" : "agentmemory" })),
+          historicalProjects,
           actionEdges: selectedEdges.map(projectActionEdgeForGraph),
           totalActions: snapshot.actions.length,
           totalEdges: snapshot.edges.length,
@@ -497,6 +509,7 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       children,
       events,
       revision: snapshot.state.revision,
+      workAuthority: await getWorkAuthority(kv, action.projectId || action.project || "workstation"),
     };
   });
 
@@ -529,7 +542,9 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
             edge.targetActionId,
           ]),
         );
+        const historicalProjects = await fencedProjects(kv);
         const isCollectable = (action: Action): boolean =>
+          !historicalProjects.includes(action.projectId || action.project || "workstation") &&
           (action.lifecycle === "done" || action.lifecycle === "cancelled") &&
           Date.parse(action.updatedAt) < cutoff &&
           !edgeEndpoints.has(action.id);
@@ -594,6 +609,7 @@ async function propagateCompletionUnlocked(
     if (!action || action.lifecycle === "done" || action.lifecycle === "cancelled") {
       continue;
     }
+    if (await getWorkAuthority(kv, action.projectId || action.project || "workstation")) continue;
     const lifecycle =
       action.lifecycle ?? (action.status === "active" ? "active" : "pending");
     if (lifecycle !== "pending") continue;

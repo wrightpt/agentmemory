@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { KV } from "./schema.js";
+import { WorkAuthorityError } from "./work-authority.js";
 
 export const MAINTENANCE_REFERENCE_SCOPES = [
   KV.memories, KV.actions, KV.lessons, KV.relations,
@@ -7,7 +8,7 @@ export const MAINTENANCE_REFERENCE_SCOPES = [
 ] as const;
 
 const guardedScopes = new Set<string>([
-  ...MAINTENANCE_REFERENCE_SCOPES, KV.accessLog, KV.leases,
+  ...MAINTENANCE_REFERENCE_SCOPES, KV.accessLog, KV.leases, KV.actionEdges,
 ]);
 
 interface Commit {
@@ -51,7 +52,10 @@ export class MaintenanceBarrier {
     this.writers++;
     this.revision++;
     try { return await operation(); }
-    catch (error) { this.uncertainWrite = true; throw error; }
+    catch (error) {
+      if (!(error instanceof WorkAuthorityError)) this.uncertainWrite = true;
+      throw error;
+    }
     finally { this.writers--; this.revision++; }
   }
 

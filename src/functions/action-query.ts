@@ -20,6 +20,8 @@ const DEFAULT_ACTION_LIMIT = 50;
 const MAX_ACTION_LIMIT = 500;
 
 export interface ActionListOptions {
+  /** Internal projection fence; never accepted from a remote client. */
+  excludedProjects?: string[];
   status?: string;
   project?: string;
   parentId?: string;
@@ -65,6 +67,7 @@ export function selectActionPage(
 ): ActionPage {
   const limit = normalizedLimit(options.limit);
   const filter = actionFilterFingerprint({
+    ...(options.excludedProjects?.length ? { excludedProjects: options.excludedProjects } : {}),
     status: options.status,
     project: options.project,
     parentId: options.parentId,
@@ -131,6 +134,7 @@ export function selectActionPage(
     )
     .filter((item) => {
       const action = item.action;
+      if (options.excludedProjects?.includes(action.projectId || action.project || "workstation")) return false;
       if (options.status && action.status !== options.status) return false;
       if (options.project && !matchesActionProject(action, options.project)) {
         return false;
