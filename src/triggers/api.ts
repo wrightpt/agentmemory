@@ -3215,7 +3215,7 @@ export function registerApiTriggers(
     const denied = checkAuth(req, secret);
     if (denied) return denied;
     const body = await sdk.trigger({ function_id: "mem::work-authority-get",
-      payload: { projectId: req.query_params?.["projectId"] } });
+      payload: { projectId: req.query_params?.["projectId"], includeSnapshot: req.query_params?.["includeSnapshot"] === "true" } });
     return { status_code: 200, body };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::work-authority-get",

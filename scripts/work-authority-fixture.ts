@@ -52,7 +52,7 @@ const server = http.createServer(async (req, res) => {
     let result;
     if (url.pathname === '/agentmemory/work-authority') {
       result = await sdk.trigger({ function_id: req.method === 'GET' ? 'mem::work-authority-get' : 'mem::work-authority-transition',
-        payload: req.method === 'GET' ? { projectId: url.searchParams.get('projectId') } : JSON.parse(data) });
+        payload: req.method === 'GET' ? { projectId: url.searchParams.get('projectId'), includeSnapshot: url.searchParams.get('includeSnapshot') === 'true' } : JSON.parse(data) });
     } else if (url.pathname === '/fixture/old-client') {
       result = await sdk.trigger({ function_id: 'mem::action-create', payload: { projectId, title: 'Must be fenced', actor: 'legacy' } });
     } else { res.writeHead(404).end(); return; }

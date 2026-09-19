@@ -32,7 +32,7 @@ function harness(store = new Map<string, Map<string, any>>()) {
   const call = (id: string, data: any = {}): Promise<any> => sdk.trigger(`mem::${id}`, data);
   const projectId = 'agent-workspace-config';
   const create = (data = {}) => call('action-create', { title: 'Curated implementation', projectId, actor: 'codex', ...data });
-  const read = () => call('work-authority-get', { projectId });
+  const read = () => call('work-authority-get', { projectId, includeSnapshot: true });
   const freeze = async (selectedIds: string[], overrides = {}) => {
     const source = await read();
     return call('work-authority-transition', { protocol: 'work-authority/v1', operation: 'freeze',
@@ -43,6 +43,13 @@ function harness(store = new Map<string, Map<string, any>>()) {
 }
 
 describe('project authority cutover', () => {
+  it('ordinary authority reads never scan historical collections', async () => {
+    const h = harness();
+    await h.create();
+    const list = vi.spyOn(h.kv, 'list');
+    expect(await h.call('work-authority-get', { projectId: h.projectId })).toMatchObject({ phase: 'agentmemory' });
+    expect(list).not.toHaveBeenCalled();
+  });
   it('freezes exact source scope, rejects old writes, keeps history and unrelated work', async () => {
     const h = harness();
     const { action } = await h.create();

@@ -37,13 +37,13 @@ async function snapshot(kv: StateKV, projectId: string) {
 }
 
 export function registerWorkAuthorityFunction(sdk: ISdk, kv: StateKV) {
-  sdk.registerFunction('mem::work-authority-get', async (data: { projectId?: string }) => {
+  sdk.registerFunction('mem::work-authority-get', async (data: { projectId?: string; includeSnapshot?: boolean }) => {
     if (!isCanonicalProjectId(data?.projectId)) return { success: false, error: 'invalid_project_id' };
     return withActionStoreLock(async () => {
       const authority = await getWorkAuthority(kv, data.projectId!);
       return { success: true, protocol: 'work-authority/v1', projectId: data.projectId,
         phase: authority?.phase || 'agentmemory', generation: authority?.generation || 0,
-        authority, snapshot: await snapshot(kv, data.projectId!) };
+        authority, ...(data.includeSnapshot === true ? { snapshot: await snapshot(kv, data.projectId!) } : {}) };
     });
   });
 

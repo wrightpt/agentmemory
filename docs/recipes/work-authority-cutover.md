@@ -6,8 +6,10 @@ AgentMemory preserves historical actions and continues to own memory. This
 boundary is provider neutral and does not require DSH or an active Kimi subscription.
 
 The authenticated REST endpoint `GET /agentmemory/work-authority?projectId=...`
-returns `work-authority/v1`, the current phase/generation and a complete bounded
-metadata snapshot. Full historical descriptions and terminal content are not
+returns `work-authority/v1` and the current phase/generation with a single KV
+read. Add `includeSnapshot=true` for a complete bounded metadata snapshot when
+planning a cutover. Ordinary Work API reads never scan the action/edge/lease
+collections. Full historical descriptions and terminal content are not
 returned. The snapshot digest covers exact source records and graph edges.
 `POST /agentmemory/work-authority` accepts whitelisted transition fields only.
 
