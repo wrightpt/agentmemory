@@ -25,6 +25,7 @@ import { logger } from "../logger.js";
 import { selectSessionPage, type SessionPage } from "../functions/session-list.js";
 import { triggerDetached } from "../utils/trigger-detached.js";
 import { parseLessonSaveInput } from "../functions/lesson-model.js";
+import { registerFindingApi } from "./findings.js";
 import { parseLessonRecallInput } from "../functions/lesson-retrieval.js";
 import { normalizeSessionContextValues } from "../functions/session-context-values.js";
 import {
@@ -249,6 +250,7 @@ export function registerApiTriggers(
   provider?: ResilientProvider,
   providerConfig?: Pick<ProviderConfig, "provider" | "model">,
 ): void {
+  registerFindingApi(sdk, (req) => checkAuth(req, secret));
   sdk.registerFunction(
     "middleware::api-auth",
     async (input: {

@@ -20,6 +20,21 @@ import type {
 export const LESSON_SCHEMA_VERSION = 1 as const;
 export const MAX_LESSON_EVIDENCE_REFS = 8;
 
+export function isSharedFindingLesson(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.prototype.hasOwnProperty.call(record, "sharedFinding") ||
+    isSharedFindingLessonId(record.id) ||
+    (Array.isArray(record.idAliases) &&
+      record.idAliases.some(isSharedFindingLessonId))
+  );
+}
+
+export function isSharedFindingLessonId(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith("lsn_fnd_");
+}
+
 const MAX_MECHANISM_ID_LENGTH = 128;
 const MAX_MECHANISM_ALIASES = 8;
 const MAX_CLAIM_LENGTH = 500;
@@ -139,6 +154,7 @@ type LessonParseOptions = {
   source?: "crystal" | "manual" | "consolidation";
   allowSourceMetadata?: boolean;
   allowLegacyGitVerificationMigration?: boolean;
+  allowSharedFinding?: boolean;
 };
 
 class LessonInputError extends Error {}
@@ -149,6 +165,11 @@ export function parseLessonSaveInput(
 ): LessonInputParseResult {
   try {
     const record = requireRecord(raw, "lesson");
+    if (isSharedFindingLesson(record) && !options.allowSharedFinding) {
+      throw new LessonInputError(
+        "shared findings require the verified findings admission API",
+      );
+    }
     const content = requiredString(record.content, "content");
     const context = optionalString(record.context, "context") ?? "";
     const project = optionalString(record.project, "project");
@@ -407,6 +428,7 @@ export function normalizeLesson(lesson: Lesson): NormalizedLesson {
       allowTerminalLifecycle: true,
       allowImplicitWorktreeScope: true,
       allowLegacyGitVerificationMigration: true,
+      allowSharedFinding: true,
     },
   );
   if (!parsed.success && structuredMarkers) {
@@ -568,6 +590,11 @@ export function parseImportedLesson(
   | { success: false; error: string } {
   try {
     const record = requireRecord(raw, "lesson");
+    if (isSharedFindingLesson(record)) {
+      throw new LessonInputError(
+        "shared findings cannot be restored through generic lesson import",
+      );
+    }
     const sourceId = requiredString(
       record.id,
       "lesson.id",
@@ -782,6 +809,7 @@ export function sameLessonContradictionScope(
 }
 
 export function lessonCanonicalId(lesson: Lesson): string {
+  if (isSharedFindingLesson(lesson)) return lesson.id;
   const parsed = parseLessonSaveInput(
     { ...lesson, lifecycle: deriveLifecycle(lesson) },
     {
@@ -1659,6 +1687,7 @@ function hasStructuredLessonMarkers(
     "reviewAfter",
     "contradictedByLessonIds",
     "contentFingerprint",
+    "sharedFinding",
   ].some((field) => record[field] !== undefined);
 }
 

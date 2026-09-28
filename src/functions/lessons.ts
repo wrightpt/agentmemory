@@ -14,6 +14,7 @@ import { withLessonLocks } from "./lesson-locks.js";
 import {
   LESSON_SCHEMA_VERSION,
   isLessonListable,
+  isSharedFindingLesson,
   isLessonRecallable,
   lessonCanonicalId,
   lessonContentFingerprint,
@@ -146,10 +147,11 @@ async function validateContradictionRelations(
   return null;
 }
 
-async function correctLesson(
+export async function correctLesson(
   kv: StateKV,
   data: LessonCorrectionData,
   mode: LessonCorrectionMode,
+  authorizeShared?: (lesson: Lesson) => boolean | Promise<boolean>,
 ) {
   const accessContext = lessonAccessContextFromPayload(data.accessContext);
   const lessonId = data.lessonId?.trim();
@@ -202,9 +204,12 @@ async function correctLesson(
       return correctionFailure("lesson_not_found", "lesson not found");
     }
 
+    const readable = isSharedFindingLesson(lesson)
+      ? await authorizeShared?.(lesson) === true
+      : canReadLesson(lesson, accessContext);
+    if (!readable) return accessFailure(mode);
     const normalizedLesson = normalizeLesson(lesson);
     if (
-      !canReadLesson(lesson, accessContext) ||
       !canWriteLessonScope(
         normalizedLesson.scope,
         normalizedLesson.sensitivity,
@@ -262,7 +267,9 @@ async function correctLesson(
           "replacement lesson not found",
         );
       }
-      if (!canReadLesson(replacement, accessContext)) {
+      if (!(isSharedFindingLesson(replacement)
+        ? await authorizeShared?.(replacement) === true
+        : canReadLesson(replacement, accessContext))) {
         return accessFailure("replacement read");
       }
       if (!isLessonRecallable(replacement)) {
@@ -369,6 +376,9 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
             );
           }
 
+          if (existing && isSharedFindingLesson(existing)) {
+            return accessFailure("save protected finding");
+          }
           if (existing && !isLessonListable(existing)) {
             return correctionFailure(
               "lesson_deleted",
@@ -609,8 +619,8 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
       );
       const storedLessons = await kv.list<Lesson>(KV.lessons);
       let lessons = storedLessons
-        .filter(isLessonListable)
         .filter((lesson) => canReadLesson(lesson, accessContext))
+        .filter(isLessonListable)
         .map((lesson) => toLessonReadModel(lesson))
         .filter((lesson) => lesson.confidence >= minConfidence);
 
@@ -656,6 +666,9 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
 
       return withLessonLocks([data.lessonId], async () => {
         const lesson = await kv.get<Lesson>(KV.lessons, data.lessonId);
+        if (lesson && isSharedFindingLesson(lesson)) {
+          return accessFailure("strengthen");
+        }
         if (!lesson || !isLessonListable(lesson)) {
           return { success: false, error: "lesson not found" };
         }
@@ -712,7 +725,7 @@ export function registerLessonsFunctions(sdk: ISdk, kv: StateKV): void {
       const now = Date.now();
       const timestamp = new Date().toISOString();
       const outcomes = await Promise.all(
-        lessons.map((listedLesson) =>
+        lessons.filter((lesson) => !isSharedFindingLesson(lesson)).map((listedLesson) =>
           withLessonLocks([listedLesson.id], async () => {
             const lesson = await kv.get<Lesson>(KV.lessons, listedLesson.id);
             if (!lesson || lesson.deleted) return null;

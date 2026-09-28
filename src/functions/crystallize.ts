@@ -151,22 +151,20 @@ export function registerCrystallizeFunction(
         data.accessContext,
       );
       let crystals = await kv.list<Crystal>(KV.crystals);
-      if (accessContext.mode === "enforce") {
-        try {
-          const lessonIndex = buildLessonAccessIndex(
-            await kv.list<Lesson>(KV.lessons),
-          );
-          crystals = crystals.filter((crystal) =>
-            canReadCrystal(crystal, lessonIndex, accessContext),
-          );
-        } catch {
-          return {
-            success: false,
-            code: "lesson_state_unavailable",
-            error: "crystal access is unavailable",
-            crystals: [],
-          };
-        }
+      try {
+        const lessonIndex = buildLessonAccessIndex(
+          await kv.list<Lesson>(KV.lessons),
+        );
+        crystals = crystals.filter((crystal) =>
+          canReadCrystal(crystal, lessonIndex, accessContext),
+        );
+      } catch {
+        return {
+          success: false,
+          code: "lesson_state_unavailable",
+          error: "crystal access is unavailable",
+          crystals: [],
+        };
       }
 
       if (data.project) {
@@ -201,21 +199,19 @@ export function registerCrystallizeFunction(
       const accessContext = lessonAccessContextFromPayload(
         data.accessContext,
       );
-      if (accessContext.mode === "enforce") {
-        try {
-          const lessonIndex = buildLessonAccessIndex(
-            await kv.list<Lesson>(KV.lessons),
-          );
-          if (!canReadCrystal(crystal, lessonIndex, accessContext)) {
-            return { success: false, error: "crystal not found" };
-          }
-        } catch {
-          return {
-            success: false,
-            code: "lesson_state_unavailable",
-            error: "crystal access is unavailable",
-          };
+      try {
+        const lessonIndex = buildLessonAccessIndex(
+          await kv.list<Lesson>(KV.lessons),
+        );
+        if (!canReadCrystal(crystal, lessonIndex, accessContext)) {
+          return { success: false, error: "crystal not found" };
         }
+      } catch {
+        return {
+          success: false,
+          code: "lesson_state_unavailable",
+          error: "crystal access is unavailable",
+        };
       }
 
       return { success: true, crystal };

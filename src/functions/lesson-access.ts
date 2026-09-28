@@ -15,7 +15,11 @@ import type {
   LessonScopeRing,
   LessonSensitivity,
 } from "../types.js";
-import { normalizeLesson } from "./lesson-model.js";
+import {
+  isSharedFindingLesson,
+  isSharedFindingLessonId,
+  normalizeLesson,
+} from "./lesson-model.js";
 
 const MAX_CALLER_TOKEN_LENGTH = 4096;
 const MAX_POLICY_FILE_BYTES = 256 * 1024;
@@ -119,7 +123,7 @@ function normalizeMode(value: unknown): LessonAccessMode {
 }
 
 export function getLessonAccessMode(): LessonAccessMode {
-  return normalizeMode(getEnvVar("AGENTMEMORY_LESSON_ACCESS_MODE"));
+  return normalizeMode(process.env.AGENTMEMORY_LESSON_ACCESS_MODE ?? getEnvVar("AGENTMEMORY_LESSON_ACCESS_MODE"));
 }
 
 function normalizePrincipalKind(value: unknown): LessonPrincipalKind {
@@ -398,9 +402,8 @@ export function resolveLessonBoundaryAccess(
 
   let policy: LessonCallerPolicy;
   try {
-    const policyPath =
-      options.policyPath ??
-      getEnvVar("AGENTMEMORY_LESSON_CALLER_POLICY_FILE");
+    const policyPath = options.policy ? undefined :
+      options.policyPath ?? getEnvVar("AGENTMEMORY_LESSON_CALLER_POLICY_FILE");
     policy = options.policy
       ? parseLessonCallerPolicy(options.policy)
       : policyPath && isAbsolute(policyPath)
@@ -557,6 +560,7 @@ export function canReadLesson(
   lesson: Lesson,
   context: LessonAccessContext,
 ): boolean {
+  if (isSharedFindingLesson(lesson)) return false;
   if (context.mode === "classify") return true;
   const normalized = normalizeLesson(lesson);
   return (
@@ -614,8 +618,13 @@ export function buildLessonAccessIndex(
 ): LessonAccessIndex {
   const index: LessonAccessIndex = new Map();
   for (const lesson of lessons) {
-    const normalized = normalizeLesson(lesson);
-    for (const id of [normalized.id, ...normalized.idAliases]) {
+    const normalized = isSharedFindingLesson(lesson)
+      ? lesson
+      : normalizeLesson(lesson);
+    const aliases = Array.isArray(normalized.idAliases)
+      ? normalized.idAliases.filter((id) => typeof id === "string")
+      : [];
+    for (const id of [normalized.id, ...aliases]) {
       const existing = index.get(id);
       if (existing && existing.id !== normalized.id) {
         throw new Error(`multiple lessons claim access identity ${id}`);
@@ -631,6 +640,13 @@ export function canReadLessonSourceIds(
   index: LessonAccessIndex,
   context: LessonAccessContext,
 ): boolean {
+  if (
+    sourceLessonIds?.some(
+      (id) => isSharedFindingLessonId(id) || isSharedFindingLesson(index.get(id)),
+    )
+  ) {
+    return false;
+  }
   if (context.mode === "classify") return true;
   if (!sourceLessonIds || sourceLessonIds.length === 0) return true;
   return sourceLessonIds.every((id) => {
@@ -644,6 +660,15 @@ export function canReadCrystal(
   index: LessonAccessIndex,
   context: LessonAccessContext,
 ): boolean {
+  if (
+    !canReadLessonSourceIds(crystal.sourceLessonIds, index, context) ||
+    (crystal.lessons ?? []).some(
+      (value) =>
+        isSharedFindingLessonId(value) || isSharedFindingLesson(index.get(value)),
+    )
+  ) {
+    return false;
+  }
   if (context.mode === "classify") return true;
   if (crystal.sourceLessonIds && crystal.sourceLessonIds.length > 0) {
     const lessonValues = crystal.lessons ?? [];
@@ -688,7 +713,6 @@ export function canReadInsight(
   crystalIndex: CrystalAccessIndex,
   context: LessonAccessContext,
 ): boolean {
-  if (context.mode === "classify") return true;
   if (
     !canReadLessonSourceIds(
       insight.sourceLessonIds,
@@ -700,6 +724,7 @@ export function canReadInsight(
   }
   return (insight.sourceCrystalIds ?? []).every((id) => {
     const crystal = crystalIndex.get(id);
+    if (!crystal && context.mode === "classify") return true;
     return (
       crystal !== undefined &&
       canReadCrystal(crystal, lessonIndex, context)

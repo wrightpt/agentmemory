@@ -8,9 +8,10 @@ import {
 import { logger } from "../logger.js";
 import {
   buildLessonAccessIndex,
-  canReadLesson,
+  canReadLessonSourceIds,
   lessonAccessContextFromPayload,
 } from "./lesson-access.js";
+import { isSharedFindingLessonId } from "./lesson-model.js";
 
 // Audit coverage policy (issue #125).
 //
@@ -122,39 +123,43 @@ export async function queryAudit(
   const accessContext = lessonAccessContextFromPayload(
     filter?.accessContext,
   );
-  if (accessContext.mode === "enforce") {
-    const ordinaryEntries = entries.filter(
-      (entry) => !isLessonRelatedAuditEntry(entry),
-    );
-    const lessonEntries = entries.filter(isLessonRelatedAuditEntry);
-    if (lessonEntries.length > 0) {
-      try {
-        const lessons = await kv.list<Lesson>(KV.lessons);
-        const lessonIndex = buildLessonAccessIndex(lessons);
-        const readableLessonEntries = lessonEntries.filter((entry) => {
-          const referencedIds = lessonAuditReferenceIds(entry);
-          if (referencedIds.length === 0) return false;
-          try {
-            return referencedIds.every((id) => {
-              const lesson = lessonIndex.get(id);
-              return lesson !== undefined &&
-                canReadLesson(lesson, accessContext);
-            });
-          } catch {
-            return false;
-          }
-        });
-        const readableEntries = new Set(readableLessonEntries);
-        entries = entries.filter(
-          (entry) =>
-            !isLessonRelatedAuditEntry(entry) ||
-            readableEntries.has(entry),
-        );
-      } catch {
-        // An unavailable or malformed authoritative lesson index cannot prove
-        // any lesson audit row is readable. Preserve unrelated audit rows.
-        entries = ordinaryEntries;
-      }
+  const ordinaryEntries = entries.filter(
+    (entry) => !isLessonRelatedAuditEntry(entry),
+  );
+  const lessonEntries = entries.filter(isLessonRelatedAuditEntry);
+  if (lessonEntries.length > 0) {
+    try {
+      const lessons = await kv.list<Lesson>(KV.lessons);
+      const lessonIndex = buildLessonAccessIndex(lessons);
+      const readableLessonEntries = lessonEntries.filter((entry) => {
+        const referencedIds = lessonAuditReferenceIds(entry);
+        if (referencedIds.length === 0) {
+          return (
+            accessContext.mode === "classify" &&
+            !entry.functionId.startsWith("mem::finding-") &&
+            !entry.functionId.startsWith("mem::shared-finding")
+          );
+        }
+        try {
+          return canReadLessonSourceIds(
+            referencedIds,
+            lessonIndex,
+            accessContext,
+          );
+        } catch {
+          return false;
+        }
+      });
+      const readableEntries = new Set(readableLessonEntries);
+      entries = entries.filter(
+        (entry) =>
+          !isLessonRelatedAuditEntry(entry) ||
+          readableEntries.has(entry),
+      );
+    } catch {
+      // An unavailable or malformed authoritative lesson index cannot prove
+      // any lesson audit row is readable. Preserve unrelated audit rows.
+      entries = ordinaryEntries;
     }
   }
 
@@ -206,9 +211,12 @@ const LESSON_AUDIT_OPERATIONS = new Set<AuditEntry["operation"]>([
 
 function isLessonRelatedAuditEntry(entry: AuditEntry): boolean {
   if (LESSON_AUDIT_OPERATIONS.has(entry.operation)) return true;
+  if (entry.targetIds?.some(isSharedFindingLessonId)) return true;
   if (
     typeof entry.functionId === "string" &&
     (entry.functionId.startsWith("mem::lesson-") ||
+      entry.functionId.startsWith("mem::finding-") ||
+      entry.functionId.startsWith("mem::shared-finding") ||
       entry.functionId.startsWith("mem::import:lessons"))
   ) {
     return true;

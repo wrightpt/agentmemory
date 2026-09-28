@@ -31,6 +31,7 @@ import {
   SESSION_CONTEXT_STRING_FIELDS,
 } from "./session-context-values.js";
 import { captureRetrievalAttribution } from "../state/provenance.js";
+import { containsFindingCapture, FINDING_CAPTURE_EXCLUDED } from "../findings/capture.js";
 
 const SESSION_CONTEXT_FIELDS = ["project", "cwd", ...SESSION_CONTEXT_STRING_FIELDS] as const;
 
@@ -65,6 +66,10 @@ export function registerObserveFunction(
 ): void {
   sdk.registerFunction("mem::observe", 
     async (payload: HookPayload) => {
+
+      if (containsFindingCapture(payload)) {
+        return { success: true, skipped: true, reason: FINDING_CAPTURE_EXCLUDED };
+      }
 
       if (
         !payload?.sessionId ||

@@ -25,6 +25,7 @@ import {
   canReadInsight,
   canReadLesson,
   lessonAccessContextFromPayload,
+  systemLessonAccessContext,
   type CrystalAccessIndex,
   type LessonAccessContext,
   type LessonAccessIndex,
@@ -240,9 +241,6 @@ async function filterReadableInsights(
       insights: [];
     }
 > {
-  if (accessContext.mode === "classify") {
-    return { success: true, insights };
-  }
   try {
     const [lessons, crystals] = await Promise.all([
       kv.list<Lesson>(KV.lessons),
@@ -311,8 +309,8 @@ export function registerReflectFunctions(
         crystalIndex = buildCrystalAccessIndex(crystals);
         for (const lesson of lessons) {
           if (
-            isLessonRecallable(lesson) &&
-            canReadLesson(lesson, accessContext)
+            canReadLesson(lesson, accessContext) &&
+            isLessonRecallable(lesson)
           ) {
             activeLessons.push(toLessonReadModel(lesson));
           }
@@ -656,7 +654,13 @@ export function registerReflectFunctions(
 
   sdk.registerFunction("mem::insight-decay-sweep", 
     async () => {
-      const items = await kv.list<Insight>(KV.insights);
+      const readable = await filterReadableInsights(
+        kv,
+        await kv.list<Insight>(KV.insights),
+        systemLessonAccessContext(),
+      );
+      if (!readable.success) return readable;
+      const items = readable.insights;
       let decayed = 0;
       let softDeleted = 0;
       const now = Date.now();

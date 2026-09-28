@@ -17,6 +17,7 @@ import {
   type LessonAccessContext,
 } from "./lesson-access.js";
 import {
+  isSharedFindingLesson,
   normalizeLessonStructuredFacets,
   toLessonReadModel,
 } from "./lesson-model.js";
@@ -277,7 +278,9 @@ export function selectLessonRecallCandidates(
     ...(input.project ? [input.project] : []),
     ...(input.projects ?? []),
   ]);
-  const normalized = storedLessons.map((lesson) => toLessonReadModel(lesson));
+  const normalized = storedLessons
+    .filter((lesson) => !isSharedFindingLesson(lesson))
+    .map((lesson) => toLessonReadModel(lesson));
   if (new Set(normalized.map((lesson) => lesson.id)).size !== normalized.length) {
     throw new Error("lesson_state_unavailable");
   }

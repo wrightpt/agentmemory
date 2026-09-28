@@ -1253,6 +1253,7 @@ export interface LessonComputedFlags {
 }
 
 export interface Lesson {
+  sharedFinding?: import("./findings/types.js").SharedFinding;
   id: string;
   identityKind?: "canonical" | "legacy-prose";
   idAliases?: string[];
@@ -1293,6 +1294,9 @@ export interface Lesson {
   contradictedByLessonIds?: string[];
   contentFingerprint?: string;
 }
+
+export type LessonFindingEvidenceRecord = import("./findings/types.js").FindingEvidenceRecord;
+export type LessonFindingSnapshot = import("./findings/types.js").FindingSnapshot;
 
 export interface NormalizedLesson extends Lesson {
   schemaVersion: 1;

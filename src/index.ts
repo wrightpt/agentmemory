@@ -87,6 +87,7 @@ import { registerFacetsFunction } from "./functions/facets.js";
 import { registerVerifyFunction } from "./functions/verify.js";
 import { registerCascadeFunction } from "./functions/cascade.js";
 import { registerLessonsFunctions } from "./functions/lessons.js";
+import { registerFindingsFunctions } from "./findings/service.js";
 import { registerObsidianExportFunction } from "./functions/obsidian-export.js";
 import { registerReflectFunctions } from "./functions/reflect.js";
 import { registerWorkingMemoryFunctions } from "./functions/working-memory.js";
@@ -350,6 +351,7 @@ async function main() {
   registerFacetsFunction(sdk, kv);
   registerVerifyFunction(sdk, kv);
   registerLessonsFunctions(sdk, kv);
+  registerFindingsFunctions(sdk, kv);
   registerObsidianExportFunction(sdk, kv);
   registerReflectFunctions(sdk, kv, provider);
   registerWorkingMemoryFunctions(sdk, kv, config.tokenBudget);
@@ -576,7 +578,7 @@ async function main() {
     `Ready. ${embeddingProvider ? "Triple-stream (BM25+Vector+Graph)" : "BM25+Graph"} search active.`,
   );
   bootLog(
-    `REST API: 146 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
+    `REST API: 151 endpoints at http://localhost:${config.restPort}/agentmemory/*`,
   );
   bootLog(
     `MCP surface (opt-in via \`npx @agentmemory/mcp\`): ${getAllTools().length} tools · 6 resources · 3 prompts`,

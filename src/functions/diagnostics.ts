@@ -13,6 +13,10 @@ import { hasExplicitNonDependencyGate } from "./actions.js";
 import { stripMemoryReferences } from "../state/memory-utils.js";
 import { isLessonListable } from "./lesson-model.js";
 import {
+  buildCrystalAccessIndex,
+  buildLessonAccessIndex,
+  canReadCrystal,
+  canReadInsight,
   canReadLesson,
   lessonAccessContextFromPayload,
 } from "./lesson-access.js";
@@ -515,7 +519,6 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         for (const lesson of lessons) {
           try {
             if (
-              lessonAccessContext.mode === "enforce" &&
               !canReadLesson(lesson, lessonAccessContext)
             ) {
               continue;
@@ -668,8 +671,44 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      if (categories.includes("crystals")) {
-        const crystals = await kv.list<Crystal>(KV.crystals);
+      let readableCrystals: Crystal[] | undefined;
+      let readableInsights: Insight[] | undefined;
+      if (categories.includes("crystals") || categories.includes("insights")) {
+        try {
+          const [lessons, crystals, insights] = await Promise.all([
+            kv.list<Lesson>(KV.lessons),
+            kv.list<Crystal>(KV.crystals),
+            categories.includes("insights")
+              ? kv.list<Insight>(KV.insights)
+              : Promise.resolve([] as Insight[]),
+          ]);
+          const accessContext = lessonAccessContextFromPayload(data.accessContext);
+          const lessonIndex = buildLessonAccessIndex(lessons);
+          const crystalIndex = buildCrystalAccessIndex(crystals);
+          readableCrystals = crystals.filter((crystal) =>
+            canReadCrystal(crystal, lessonIndex, accessContext),
+          );
+          readableInsights = insights.filter((insight) =>
+            canReadInsight(insight, lessonIndex, crystalIndex, accessContext),
+          );
+        } catch {
+          readableCrystals = undefined;
+          readableInsights = undefined;
+          for (const category of ["crystals", "insights"]) {
+            if (!categories.includes(category)) continue;
+            checks.push({
+              name: `${category}-projection-unavailable`,
+              category,
+              status: "fail",
+              message: "Diagnostics are unavailable because authoritative lesson access could not be resolved",
+              fixable: false,
+            });
+          }
+        }
+      }
+
+      if (categories.includes("crystals") && readableCrystals) {
+        const crystals = readableCrystals;
         let crystalIssues = 0;
         for (const c of crystals) {
           if (typeof c.narrative !== "string" || c.narrative.trim().length === 0) {
@@ -694,8 +733,8 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
         }
       }
 
-      if (categories.includes("insights")) {
-        const insights = await kv.list<Insight>(KV.insights);
+      if (categories.includes("insights") && readableInsights) {
+        const insights = readableInsights;
         let insightIssues = 0;
         for (const i of insights) {
           if (

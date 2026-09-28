@@ -8,6 +8,8 @@ vi.mock("../src/logger.js", () => ({
 
 import { getAllTools } from "../src/mcp/tools-registry.js";
 import { VERSION } from "../src/version.js";
+import { registerApiTriggers } from "../src/triggers/api.js";
+import { mockKV, mockSdk } from "./helpers/mocks.js";
 
 const ROOT = join(import.meta.dirname, "..");
 
@@ -16,8 +18,11 @@ function readText(relativePath: string): string {
 }
 
 function countRestApiEndpoints(): number {
-  const src = readText("src/triggers/api.ts");
-  return Array.from(src.matchAll(/api_path:\s*["`]/g)).length;
+  const sdk = mockSdk();
+  registerApiTriggers(sdk as never, mockKV() as never);
+  return sdk.registerTrigger.mock.calls.filter(([trigger]) =>
+    trigger.type === "http" && typeof trigger.config?.api_path === "string",
+  ).length;
 }
 
 describe("Consistency checks", () => {
