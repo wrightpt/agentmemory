@@ -120,8 +120,8 @@ export function registerContextFunction(
       const relevantLessons = lessons
         .filter(
           (lesson) =>
-            isLessonRecallable(lesson) &&
             canReadLesson(lesson, accessContext) &&
+            isLessonRecallable(lesson) &&
             (!lesson.project || lesson.project === data.project),
         )
         .map((lesson) => toLessonReadModel(lesson))

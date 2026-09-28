@@ -72,6 +72,8 @@ export const KV = {
   sentinels: "mem:sentinels",
   crystals: "mem:crystals",
   lessons: "mem:lessons",
+  lessonEvidence: "mem:lessons:evidence",
+  lessonSnapshots: "mem:lessons:snapshots",
   insights: "mem:insights",
   graphEdgeHistory: "mem:graph:edge-history",
   enrichedChunks: (sessionId: string) => `mem:enriched:${sessionId}`,

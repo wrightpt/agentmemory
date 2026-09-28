@@ -17,6 +17,7 @@ import { safeAudit } from "./audit.js";
 import { buildSyntheticCompression } from "./compress-synthetic.js";
 import { getSearchIndex } from "./search.js";
 import { logger } from "../logger.js";
+import { containsFindingCapture, FINDING_CAPTURE_EXCLUDED } from "../findings/capture.js";
 import {
   buildLessonAccessIndex,
   canReadCrystal,
@@ -158,7 +159,7 @@ async function deriveCrystalAndLessons(
 
   try {
     const existingCrystal = await kv.get<Crystal>(KV.crystals, crystalId);
-    if (existingCrystal && accessContext.mode === "enforce") {
+    if (existingCrystal) {
       try {
         const lessonIndex = buildLessonAccessIndex(
           await kv.list<Lesson>(KV.lessons),
@@ -195,10 +196,11 @@ function isRawShape(o: unknown): o is RawObservation {
 async function loadObservations(
   kv: StateKV,
   sessionId: string,
-): Promise<RawObservation[]> {
+): Promise<RawObservation[] | null> {
   const rows = await kv.list<RawObservation | CompressedObservation>(
     KV.observations(sessionId),
   );
+  if (containsFindingCapture(rows)) return null;
   return rows.map((r) => (isRawShape(r) ? r : rawFromCompressed(r as CompressedObservation)));
 }
 
@@ -269,6 +271,9 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
       }
       const session = await kv.get<Session>(KV.sessions, data.sessionId);
       const observations = await loadObservations(kv, data.sessionId);
+      if (observations === null || containsFindingCapture(session)) {
+        return { success: false, error: FINDING_CAPTURE_EXCLUDED };
+      }
       const timeline = projectTimeline(observations);
       return { success: true, timeline, session };
     },
@@ -276,10 +281,14 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
 
   sdk.registerFunction(
     "mem::replay::sessions",
-    async (): Promise<{ success: true; sessions: Session[] }> => {
-      const sessions = await kv.list<Session>(KV.sessions);
+    async (): Promise<{ success: true; sessions: Session[]; skipped?: { count: number; reason: string } }> => {
+      const all = await kv.list<Session>(KV.sessions);
+      const sessions = all.filter((session) => !containsFindingCapture(session));
       sessions.sort((a, b) => (b.startedAt || "").localeCompare(a.startedAt || ""));
-      return { success: true, sessions };
+      return {
+        success: true, sessions,
+        ...(all.length === sessions.length ? {} : { skipped: { count: all.length - sessions.length, reason: FINDING_CAPTURE_EXCLUDED } }),
+      };
     },
   );
 
@@ -302,6 +311,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
           traversalCapped: boolean;
           maxFiles: number;
           maxFilesUpperBound: number;
+          skipped?: { count: number; reason: string };
         }
       | { success: false; error: string }
     > => {
@@ -369,6 +379,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
 
       const sessionIds: string[] = [];
       let observationCount = 0;
+      let excludedFindings = 0;
       const accessContext = lessonAccessContextFromPayload(
         data.accessContext,
       );
@@ -387,6 +398,10 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
           continue;
         }
 
+        if (containsFindingCapture(text)) {
+          excludedFindings++;
+          continue;
+        }
         const parsed = parseJsonlText(text, generateId("sess"));
         if (parsed.observations.length === 0) continue;
 
@@ -463,16 +478,18 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
         );
       }
 
-      await safeAudit(kv, "import", "mem::replay::import-jsonl", sessionIds, {
-        source: "jsonl",
-        path: abs,
-        files: files.length,
-        observations: observationCount,
-      });
+      if (sessionIds.length > 0 || excludedFindings === 0) {
+        await safeAudit(kv, "import", "mem::replay::import-jsonl", sessionIds, {
+          source: "jsonl",
+          path: abs,
+          files: files.length - excludedFindings,
+          observations: observationCount,
+        });
+      }
 
       return {
         success: true,
-        imported: files.length,
+        imported: files.length - excludedFindings,
         sessionIds,
         observations: observationCount,
         discovered,
@@ -480,6 +497,7 @@ export function registerReplayFunctions(sdk: ISdk, kv: StateKV): void {
         traversalCapped,
         maxFiles,
         maxFilesUpperBound: MAX_FILES_UPPER_BOUND,
+        ...(excludedFindings === 0 ? {} : { skipped: { count: excludedFindings, reason: FINDING_CAPTURE_EXCLUDED } }),
       };
     },
   );

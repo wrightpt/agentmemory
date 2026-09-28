@@ -1704,7 +1704,9 @@ for retrieval ordering, egress, fallback, and cache invariants.
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-146 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+151 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+
+Task-scoped [verified shared findings](docs/recipes/verified-shared-findings.md) extend causal lessons with source-bound admission, frozen compact snapshots, and controlled evidence expansion. Five `/agentmemory/findings/*` endpoints and `npm run findings -- <command> --input request.json` provide the worker path. This surface always requires enforced caller authentication plus an operator-owned findings policy; absent configuration fails closed. It does not enter ordinary lesson recall or change task ownership, Research Town model access, or research-ontology authority. `npm run findings:pilot` runs an isolated fixture pilot without live services or model calls.
 
 `GET`/`POST /agentmemory/work-authority` provide the selective project cutover
 protocol. Frozen or Beads-owned projects retain readable historical actions;

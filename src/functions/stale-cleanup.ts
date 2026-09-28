@@ -3,6 +3,7 @@ import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
 import { MAINTENANCE_REFERENCE_SCOPES } from "../state/maintenance-barrier.js";
 import { recordAudit } from "./audit.js";
+import { isSharedFindingLesson } from "./lesson-model.js";
 import { flushIndexSave, getSearchIndex, vectorIndexRemove } from "./search.js";
 import {
   STALE_DELETE_PROTOCOL, MIN_IDLE_MS, fingerprint, validRequest, validRows,
@@ -36,7 +37,10 @@ export function registerStaleCleanupFunction(sdk: ISdk, kv: StateKV): void {
       for (const referenceScope of MAINTENANCE_REFERENCE_SCOPES) {
         const maximum = referenceScope === KV.memories ? 5000 : 20000;
         const rows = validRows(await kv.list(referenceScope), maximum);
-        if (rows.some(other => !(referenceScope === KV.memories && other.id === id)
+        // Findings bind registered immutable sources, never memory rows; quoted
+        // source text must not become a membership oracle for protected claims.
+        if (rows.some(other => !(referenceScope === KV.lessons && isSharedFindingLesson(other))
+          && !(referenceScope === KV.memories && other.id === id)
           && JSON.stringify(other).includes(id))) return retained("referenced");
       }
     } else {

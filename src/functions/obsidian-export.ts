@@ -419,16 +419,12 @@ export function registerObsidianExportFunction(
               : [];
             if (exportTypes.has("crystals")) {
               const storedCrystals = await kv.list<Crystal>(KV.crystals);
-              if (accessContext.mode === "enforce") {
-                const lessonIndex = buildLessonAccessIndex(
-                  authoritativeLessons,
-                );
-                crystals = storedCrystals.filter((crystal) =>
-                  canReadCrystal(crystal, lessonIndex, accessContext),
-                );
-              } else {
-                crystals = storedCrystals;
-              }
+              const lessonIndex = buildLessonAccessIndex(
+                authoritativeLessons,
+              );
+              crystals = storedCrystals.filter((crystal) =>
+                canReadCrystal(crystal, lessonIndex, accessContext),
+              );
             }
           } catch {
             return {
@@ -479,8 +475,8 @@ export function registerObsidianExportFunction(
         for (const l of lessons.filter(
           (l): l is Lesson & { id: string } =>
             hasExportId(l) &&
-            isLessonListable(l) &&
-            canReadLesson(l, accessContext),
+            canReadLesson(l, accessContext) &&
+            isLessonListable(l),
         )) {
           const filename = `${sanitize(l.id)}.md`;
           const filepath = join(dirs.lessons, filename);

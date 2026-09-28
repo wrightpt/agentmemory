@@ -109,6 +109,15 @@ describe.each(["legacy", "partitioned"])("conditional stale deletion with %s aud
     expect(await f.kv.get(KV.memories, "mem_one")).not.toBeNull();
   });
 
+  it.each(["mem_one", "unrelated-private-text"])("does not probe protected finding content %s during reference checks", async content => {
+    const f = fixture();
+    const finding = { id: "lsn_fnd_protected", content, sourceIds: [], sharedFinding: { visibility: "post-freeze" } };
+    await f.kv.set(KV.lessons, finding.id, finding);
+    expect(await f.run()).toMatchObject({ outcome: "deleted", deleted: 1, id: "mem_one" });
+    expect(await f.kv.get(KV.memories, "mem_one")).toBeNull();
+    expect(await f.kv.get(KV.lessons, finding.id)).toEqual(finding);
+  });
+
   it.each(["scope", "access", "reference"])("skips a %s writer during the server's final inventory", async change => {
     const f = fixture(); let injected = false;
     f.hooks.after = async call => {
