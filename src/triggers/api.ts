@@ -3228,7 +3228,7 @@ export function registerApiTriggers(
     const body = await sdk.trigger({ function_id: "mem::work-authority-transition",
       payload: pickDefinedFields(req.body ?? {}, ["protocol", "operation", "projectId", "planDigest",
         "sourceDigest", "generation", "selectedIds", "deferredIds", "heldClaimIds", "prefix", "mapping",
-        "receiptDigest", "deferredTrackingId", "actor"]) });
+        "receiptDigest", "deferredTrackingId", "actor", "selectionMode", "sourceRevision"]) });
     return { status_code: 200, body };
   });
   sdk.registerTrigger({ type: "http", function_id: "api::work-authority-transition",
