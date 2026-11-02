@@ -143,22 +143,22 @@ describe('project authority cutover', () => {
   });
 });
 
-async function deferredHarness() {
-  const h = harness(undefined, fixture.projectId);
-  for (const row of fixture.records) await h.kv.set(KV.actions, row.id, row);
+async function deferredHarness(records = fixture.records, projectId = fixture.projectId, prefix = fixture.prefix) {
+  const h = harness(undefined, projectId);
+  for (const row of records) await h.kv.set(KV.actions, row.id, row);
   const source = await h.read();
   const plan = { selectionMode: ZERO_SELECTED_DEFER_ALL, projectId: h.projectId, snapshot: source.snapshot };
   const freezePayload = {
-    protocol: 'work-authority/v1', operation: 'freeze', projectId: h.projectId, prefix: fixture.prefix,
+    protocol: 'work-authority/v1', operation: 'freeze', projectId: h.projectId, prefix,
     generation: 0, selectionMode: ZERO_SELECTED_DEFER_ALL,
     planDigest: createHash('sha256').update(JSON.stringify(plan)).digest('hex'),
     sourceDigest: source.snapshot.sourceDigest, sourceRevision: source.snapshot.sourceRevision,
-    selectedIds: [], deferredIds: fixture.records.map(row => row.id),
-    heldClaimIds: fixture.records.filter(row => row.assignedTo).map(row => row.id),
+    selectedIds: [], deferredIds: records.map(row => row.id).sort(),
+    heldClaimIds: records.filter(row => row.status === 'active' || row.assignedTo).map(row => row.id).sort(),
   };
   const commitPayload = { protocol: 'work-authority/v1', operation: 'commit', projectId: h.projectId,
     generation: 1, selectionMode: ZERO_SELECTED_DEFER_ALL, planDigest: freezePayload.planDigest,
-    receiptDigest: 'b'.repeat(64), mapping: [], deferredTrackingId: 'wsh-triage' };
+    receiptDigest: 'b'.repeat(64), mapping: [], deferredTrackingId: `${prefix}-triage` };
   const transition = (payload: any) => h.call('work-authority-transition', payload);
   return { ...h, source, freezePayload, commitPayload, transition,
     zeroFreeze: (overrides = {}) => transition({ ...freezePayload, ...overrides }),
@@ -458,5 +458,126 @@ describe('explicit zero-selected defer-all cutover', () => {
       .toMatchObject({ status_code: 200, body: { success: true, authority: { selectionMode: ZERO_SELECTED_DEFER_ALL } } });
     expect(trigger).toHaveBeenCalledWith({ function_id: 'mem::work-authority-transition', payload: h.freezePayload });
     expect(await run(h.commitPayload)).toMatchObject({ body: { success: true, authority: { phase: 'beads', mapping: [] } } });
+  });
+});
+
+const qmaRecord = {
+  ...fixture.records[0],
+  id: 'act_mvqhx5k4_c76dfa133c5a', projectId: 'quant-market-api', project: 'quant-market-api',
+  title: 'Synthetic QMA blocked history', description: 'Synthetic fixture; no live source content.',
+  status: 'blocked', lifecycle: 'pending', blockedReason: 'Synthetic external qualification hold',
+  assignedTo: 'wsh:shared-auto-launch-interactive-codex-a4b940a9e0-c863b68b3dbf2808',
+};
+const qmaHarness = () => deferredHarness([qmaRecord], qmaRecord.projectId, 'qma');
+
+describe('QMA writer fence', () => {
+  it('preserves blocked held history and the reviewed revision after unrelated work advances', async () => {
+    const h = await qmaHarness();
+    const frozen = await h.zeroFreeze();
+    expect(frozen).toMatchObject({ success: true, authority: {
+      generation: 1, sourceRevision: h.freezePayload.sourceRevision,
+      selectedIds: [], deferredIds: [qmaRecord.id], heldClaimIds: [qmaRecord.id],
+    } });
+    expect(await h.create({ projectId: 'unrelated' })).toMatchObject({ success: true });
+    expect((await h.read()).snapshot.sourceRevision).toBeGreaterThan(h.freezePayload.sourceRevision);
+    const committed = await h.zeroCommit();
+    expect(committed).toMatchObject({ success: true, authority: {
+      ...frozen.authority, phase: 'beads', generation: 1, mapping: [], deferredTrackingId: 'qma-triage',
+    } });
+    const restarted = harness(h.store, h.projectId);
+    for (const payload of [h.freezePayload, h.commitPayload]) {
+      expect(await restarted.call('work-authority-transition', payload)).toEqual({ ...committed, replayed: true });
+    }
+    expect(await restarted.kv.get(KV.actions, qmaRecord.id)).toEqual(qmaRecord);
+    expect(await restarted.call('frontier', { project: h.projectId })).toMatchObject({ frontier: [] });
+    expect(await restarted.call('action-update', { actionId: qmaRecord.id, status: 'pending', assignedTo: '' }))
+      .toMatchObject({ success: false, error: 'work_authority_read_only' });
+  });
+
+  it.each([
+    { protocol: ['work-authority/v1'] }, { projectId: ['quant-market-api'] },
+    { operation: ['freeze'] }, { generation: false }, { sourceRevision: true },
+    { sourceRevision: Number.MAX_SAFE_INTEGER + 1 }, { selectionMode: null },
+    { selectedIds: [qmaRecord.id], deferredIds: [] },
+  ])('rejects malformed QMA REST envelope %j without publishing authority', async overrides => {
+    const h = await qmaHarness();
+    registerApiTriggers(h.sdk as never, h.kv, 'fixture-secret');
+    const before = structuredClone(h.store);
+    expect(await h.sdk.trigger('api::work-authority-transition', {
+      headers: { authorization: 'Bearer fixture-secret' }, body: { ...h.freezePayload, ...overrides },
+    })).toMatchObject({ body: { success: false } });
+    expect(h.store).toEqual(before);
+  });
+
+  for (const phase of ['frozen', 'beads']) {
+    it.each([false, 0, ''])(`refuses a falsy persisted ${phase} authority: %j`, async corruption => {
+      const h = await qmaHarness();
+      await h.zeroFreeze();
+      if (phase === 'beads') await h.zeroCommit();
+      h.store.get(KV.workAuthority)!.set(h.projectId, corruption);
+      const restarted = harness(h.store, h.projectId);
+      const before = structuredClone(h.store);
+      await expect(restarted.read()).rejects.toThrow('work_authority_invalid');
+      expect(await restarted.call('work-authority-transition', h.freezePayload))
+        .toMatchObject({ success: false, error: 'work_authority_invalid' });
+      expect(await restarted.call('work-authority-transition', h.commitPayload))
+        .toMatchObject({ success: false, error: 'work_authority_invalid' });
+      await expect(restarted.kv.set(KV.actions, qmaRecord.id, { ...qmaRecord, status: 'active' }))
+        .rejects.toThrow('work_authority_invalid');
+      expect(h.store).toEqual(before);
+    });
+
+    it.each(['rollback', 'unfreeze'])(`refuses %s from ${phase} without reopening legacy writes`, async operation => {
+      const h = await qmaHarness();
+      await h.zeroFreeze();
+      if (phase === 'beads') await h.zeroCommit();
+      const before = structuredClone(h.store);
+      expect(await h.zeroCommit({ operation }))
+        .toMatchObject({ success: false, error: 'invalid_authority_transition' });
+      expect(h.store).toEqual(before);
+      expect(await h.create()).toMatchObject({ success: false, error: 'work_authority_read_only' });
+    });
+  }
+
+  it.each(['assignedTo', 'blockedReason'])('refuses QMA %s drift at commit and replay', async field => {
+    const h = await qmaHarness();
+    await h.zeroFreeze();
+    h.store.get(KV.actions)!.get(qmaRecord.id)[field] = '';
+    for (const payload of [h.commitPayload, h.freezePayload]) {
+      expect(await h.transition(payload)).toMatchObject({ success: false, error: 'source_changed_or_leased' });
+    }
+    expect(await h.kv.get(KV.workAuthority, h.projectId)).toMatchObject({ phase: 'frozen', generation: 1 });
+  });
+
+  it('serializes concurrent identical transitions and rejects a competing plan', async () => {
+    const h = await qmaHarness();
+    const freezes = await Promise.all([h.zeroFreeze(), h.zeroFreeze(), h.zeroFreeze({ planDigest: 'c'.repeat(64) })]);
+    expect(freezes.map(result => [result.success, result.replayed])).toEqual([[true, false], [true, true], [false, undefined]]);
+    expect(freezes[2].error).toBe('authority_plan_conflict');
+    const commits = await Promise.all([h.zeroCommit(), h.zeroCommit()]);
+    expect(commits.map(result => result.replayed)).toEqual([false, true]);
+    expect(await listAuditEntries(h.kv)).toHaveLength(2);
+    expect(await h.kv.get(KV.actions, qmaRecord.id)).toEqual(qmaRecord);
+  });
+
+  it('rechecks a queued new action after the freeze write completes', async () => {
+    const h = await qmaHarness();
+    const set = h.kv.set.bind(h.kv);
+    let entered!: () => void, release!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const spy = vi.spyOn(h.kv, 'set').mockImplementation(async (scope, key, value) => {
+      if (scope === KV.workAuthority) { entered(); await resume; }
+      return set(scope, key, value);
+    });
+    const freeze = h.zeroFreeze();
+    await started;
+    const queued = h.kv.set(KV.actions, 'act_queued', { ...qmaRecord, id: 'act_queued' });
+    const refused = expect(queued).rejects.toThrow('work_authority_read_only');
+    release();
+    expect(await freeze).toMatchObject({ success: true });
+    await refused;
+    spy.mockRestore();
+    expect(await h.kv.get(KV.actions, 'act_queued')).toBeNull();
   });
 });

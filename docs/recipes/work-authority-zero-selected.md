@@ -99,8 +99,10 @@ freeze; replay retains the original revision and compares the project digest.
 Replays add no audit entries and cannot rewrite or reopen authority.
 
 Malformed stored zero-mode scope or receipts reject reads/transitions and
-prevent historical writes. Source drift or conflicting receipts keep the fence
-in place. A failed/uncertain storage write requires reconciliation; a synthetic
+prevent historical writes. Only the normalized `null` store result means absent
+authority; persisted `false`, `0`, and empty strings are corruption and reject
+reads, transitions and historical writes. Source drift or conflicting receipts
+keep the fence in place. A failed/uncertain storage write requires reconciliation; a synthetic
 restart test demonstrates replay against the retained store, not crash
 durability of the native iii file adapter. The existing native backup,
 persistence and activation gates in [work-authority-cutover.md](work-authority-cutover.md)

@@ -44,7 +44,7 @@ export const actionProject = (action: Partial<Action>) => action.projectId || ac
 
 export async function getWorkAuthority(kv: StateKV, projectId: string): Promise<WorkAuthority | null> {
   const row = await kv.get<WorkAuthority>(KV.workAuthority, projectId);
-  if (row && (row.protocol !== 'work-authority/v1' || row.projectId !== projectId
+  if (row !== null && (row.protocol !== 'work-authority/v1' || row.projectId !== projectId
     || !['frozen', 'beads'].includes(row.phase) || !Number.isSafeInteger(row.generation)
     || ((row.selectionMode !== undefined || (Array.isArray(row.selectedIds) && !row.selectedIds.length))
       && !validDeferredOnlyAuthority(row)))) {
