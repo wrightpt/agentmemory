@@ -3,7 +3,7 @@ import type { ISdk } from 'iii-sdk';
 import type { StateKV } from '../state/kv.js';
 import { KV } from '../state/schema.js';
 import type { Action, ActionEdge, Lease, WorkAuthority } from '../types.js';
-import { actionProject, getWorkAuthority } from '../state/work-authority.js';
+import { actionProject, getWorkAuthority, isDeferredOnlyScope, ZERO_SELECTED_DEFER_ALL } from '../state/work-authority.js';
 import { recoverActionStoreUnlocked, withActionStoreLock } from './action-store.js';
 import { isCanonicalProjectId } from './action-model.js';
 import { recordAudit } from './audit.js';
@@ -13,7 +13,7 @@ const ID = /^act_[a-zA-Z0-9_]+$/;
 const digest = (data: unknown): string => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 function fail(code: string): never { throw new Error(code); }
 
-async function snapshot(kv: StateKV, projectId: string) {
+async function snapshot(kv: StateKV, projectId: string, strictLeases = false) {
   const state = await recoverActionStoreUnlocked(kv);
   const all = await kv.list<Action>(KV.actions);
   const projectActions = all.filter(a => actionProject(a) === projectId);
@@ -32,8 +32,25 @@ async function snapshot(kv: StateKV, projectId: string) {
   })).sort((a, b) => a.id.localeCompare(b.id));
   const projectIds = new Set(projectActions.map(a => a.id));
   const activeLeases = (await kv.list<Lease>(KV.leases)).filter(l => projectIds.has(l.actionId)
-    && l.status === 'active' && Date.parse(l.expiresAt) > Date.now()).map(l => l.actionId).sort();
+    && ((l.status === 'active' && (Date.parse(l.expiresAt) > Date.now()
+      || (strictLeases && !Number.isFinite(Date.parse(l.expiresAt)))))
+      || (strictLeases && !['active', 'expired', 'released'].includes(l.status)))).map(l => l.actionId).sort();
   return { records, edges, activeLeases, sourceRevision: state.revision, sourceDigest: digest({ records, edges }) };
+}
+
+async function withVerifiedDeferredSource<T>(kv: StateKV, authority: WorkAuthority, operation: () => Promise<T>) {
+  const writeRevision = kv.maintenanceBarrier.snapshot();
+  const source = await snapshot(kv, authority.projectId, true);
+  if (source.sourceDigest !== authority.sourceDigest || source.activeLeases.length) fail('source_changed_or_leased');
+  if (JSON.stringify(source.records.map(row => row.id).sort()) !== JSON.stringify(authority.deferredIds)
+    || JSON.stringify(source.records.filter(row => row.status === 'active' || row.assignedTo).map(row => row.id).sort())
+      !== JSON.stringify(authority.heldClaimIds)) fail('authority_scope_conflict');
+  const result = await kv.maintenanceBarrier.tryCommit(writeRevision, async invalidate => {
+    for (const row of source.records) invalidate(row.id);
+    return operation();
+  });
+  if (!result.committed) fail('source_concurrent_write');
+  return result.value;
 }
 
 export function registerWorkAuthorityFunction(sdk: ISdk, kv: StateKV) {
@@ -50,34 +67,49 @@ export function registerWorkAuthorityFunction(sdk: ISdk, kv: StateKV) {
   sdk.registerFunction('mem::work-authority-transition', async (data: {
     protocol?: string; operation?: string; projectId?: string; planDigest?: string;
     sourceDigest?: string; generation?: number; selectedIds?: string[]; deferredIds?: string[];
-    heldClaimIds?: string[];
+    heldClaimIds?: string[]; selectionMode?: string; sourceRevision?: number;
     prefix?: string; mapping?: Array<{ sourceActionId: string; beadId: string }>;
     receiptDigest?: string; deferredTrackingId?: string; actor?: string;
   }) => {
     try {
       if (data?.protocol !== 'work-authority/v1' || !isCanonicalProjectId(data.projectId)
         || !HASH.test(data.planDigest || '') || !Number.isSafeInteger(data.generation)
+        || (data.selectionMode !== undefined && data.selectionMode !== ZERO_SELECTED_DEFER_ALL)
         || !['freeze', 'commit'].includes(data.operation || '')) fail('invalid_authority_transition');
       const projectId = data.projectId!;
       return await withActionStoreLock(async () => {
         await recoverActionStoreUnlocked(kv);
         const authority = await getWorkAuthority(kv, projectId);
+        const deferredOnly = data.selectionMode === ZERO_SELECTED_DEFER_ALL;
+        if (deferredOnly && typeof data.planDigest !== 'string') fail('invalid_authority_transition');
+        if (authority && deferredOnly !== (authority.selectionMode === ZERO_SELECTED_DEFER_ALL)) fail('authority_selection_mode_conflict');
         if (data.operation === 'freeze') {
+          if (deferredOnly && (data.generation !== 0
+            || typeof data.sourceDigest !== 'string' || typeof data.prefix !== 'string'
+            || !isDeferredOnlyScope(data.selectedIds, data.deferredIds, data.heldClaimIds)
+            || !Number.isSafeInteger(data.sourceRevision) || data.sourceRevision! < 0)) fail('invalid_freeze_scope');
           if (authority) {
             if (authority.planDigest !== data.planDigest) fail('authority_plan_conflict');
+            if (deferredOnly) {
+              if (authority.sourceDigest !== data.sourceDigest || authority.sourceRevision !== data.sourceRevision
+                || authority.prefix !== data.prefix || JSON.stringify(authority.deferredIds) !== JSON.stringify(data.deferredIds)
+                || JSON.stringify(authority.heldClaimIds) !== JSON.stringify(data.heldClaimIds)) fail('authority_scope_conflict');
+              return withVerifiedDeferredSource(kv, authority, async () => ({ success: true, authority, replayed: true }));
+            }
             return { success: true, authority, replayed: true };
           }
           if (data.generation !== 0 || !HASH.test(data.sourceDigest || '')
             || !/^[a-z][a-z0-9]{1,7}$/.test(data.prefix || '')
-            || !Array.isArray(data.selectedIds) || !data.selectedIds.length || data.selectedIds.length > 32
+            || !Array.isArray(data.selectedIds) || (!data.selectedIds.length && !deferredOnly) || data.selectedIds.length > 32
             || !Array.isArray(data.deferredIds) || data.deferredIds.length > 1000
             || [...data.selectedIds, ...data.deferredIds].some(id => !ID.test(id))
             || new Set([...data.selectedIds, ...data.deferredIds]).size !== data.selectedIds.length + data.deferredIds.length) {
             fail('invalid_freeze_scope');
           }
           const writeRevision = kv.maintenanceBarrier.snapshot();
-          const source = await snapshot(kv, projectId);
+          const source = await snapshot(kv, projectId, deferredOnly);
           if (source.sourceDigest !== data.sourceDigest || source.activeLeases.length) fail('source_changed_or_leased');
+          if (deferredOnly && source.sourceRevision !== data.sourceRevision) fail('source_revision_conflict');
           const heldClaims = source.records.filter(row => row.status === 'active' || row.assignedTo).map(row => row.id).sort();
           // A historical assignment is not an active lease. It may be held for
           // triage only when the reviewed plan names it explicitly; never admit
@@ -97,6 +129,7 @@ export function registerWorkAuthorityFunction(sdk: ISdk, kv: StateKV) {
           const frozen: WorkAuthority = { protocol: 'work-authority/v1', projectId, phase: 'frozen', generation: 1,
             planDigest: data.planDigest!, prefix: data.prefix!, sourceDigest: source.sourceDigest,
             sourceRevision: source.sourceRevision, selectedIds: [...data.selectedIds].sort(),
+            ...(deferredOnly ? { selectionMode: ZERO_SELECTED_DEFER_ALL } : {}),
             deferredIds: [...data.deferredIds].sort(), heldClaimIds: heldClaims,
             frozenAt: new Date().toISOString(), actor: data.actor || 'work-importer' };
           const result = await kv.maintenanceBarrier.tryCommit(writeRevision, async invalidate => {
@@ -110,6 +143,7 @@ export function registerWorkAuthorityFunction(sdk: ISdk, kv: StateKV) {
           return { success: true, authority: result.value, replayed: false };
         }
         if (!authority || authority.planDigest !== data.planDigest || authority.generation !== data.generation) fail('authority_plan_conflict');
+        if (deferredOnly && (typeof data.receiptDigest !== 'string' || typeof data.deferredTrackingId !== 'string')) fail('invalid_import_receipt');
         const beadPattern = new RegExp(`^${authority.prefix}-[a-z0-9]+$`);
         if (!HASH.test(data.receiptDigest || '') || !Array.isArray(data.mapping)
           || data.mapping.length !== authority.selectedIds.length
@@ -121,10 +155,19 @@ export function registerWorkAuthorityFunction(sdk: ISdk, kv: StateKV) {
         if (authority.phase === 'beads') {
           if (authority.receiptDigest !== data.receiptDigest || digest(authority.mapping) !== digest(data.mapping)
             || authority.deferredTrackingId !== data.deferredTrackingId) fail('authority_receipt_conflict');
+          if (deferredOnly) return withVerifiedDeferredSource(kv, authority, async () => ({ success: true, authority, replayed: true }));
           return { success: true, authority, replayed: true };
         }
         const committed: WorkAuthority = { ...authority, phase: 'beads', receiptDigest: data.receiptDigest,
           mapping: data.mapping, deferredTrackingId: data.deferredTrackingId, committedAt: new Date().toISOString() };
+        if (deferredOnly) {
+          return withVerifiedDeferredSource(kv, authority, async () => {
+            await kv.set(KV.workAuthority, projectId, committed);
+            await recordAudit(kv, 'action_update', 'mem::work-authority-transition', committed.selectedIds,
+              { projectId, phase: 'beads', planDigest: committed.planDigest, receiptDigest: committed.receiptDigest });
+            return { success: true, authority: committed, replayed: false };
+          });
+        }
         await kv.set(KV.workAuthority, projectId, committed);
         await recordAudit(kv, 'action_update', 'mem::work-authority-transition', committed.selectedIds,
           { projectId, phase: 'beads', planDigest: committed.planDigest, receiptDigest: committed.receiptDigest });

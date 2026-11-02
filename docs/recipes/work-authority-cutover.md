@@ -27,6 +27,12 @@ always prevents freezing the project. Source observation and fence publication
 use the action-store lock and existing maintenance barrier; an outstanding
 writer aborts the transition.
 
+For a reviewed cutover with no selected work, the explicit versioned
+[`zero-selected-defer-all/v1` contract](work-authority-zero-selected.md) retains
+every open record as deferred with no source-to-Bead task mapping. Empty
+selection is otherwise still rejected. This opt-in does not alter the existing
+nonempty import path or grant execution authority.
+
 The fence is checked before action events and inside StateKV writes for actions,
 edges and leases. This covers existing MCP/REST clients, raw restore writes,
 claim/release paths and project renames. A rejected write is
