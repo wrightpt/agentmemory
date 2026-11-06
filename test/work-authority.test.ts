@@ -9,7 +9,7 @@ import { registerWorkAuthorityFunction } from '../src/functions/work-authority.j
 import { mockSdk } from './helpers/mocks.js';
 import { createHash } from 'node:crypto';
 import fixture from './fixtures/work-authority-defer-all.json';
-import { ZERO_SELECTED_DEFER_ALL } from '../src/state/work-authority.js';
+import { ZERO_SELECTED_DEFER_ALL, EMPTY_PROJECT_FIRST_ADMISSION } from '../src/state/work-authority.js';
 import { listAuditEntries } from '../src/state/partitioned-ledgers.js';
 import { registerApiTriggers } from '../src/triggers/api.js';
 
@@ -579,5 +579,113 @@ describe('QMA writer fence', () => {
     await refused;
     spy.mockRestore();
     expect(await h.kv.get(KV.actions, 'act_queued')).toBeNull();
+  });
+});
+
+
+describe('explicit empty-project first admission', () => {
+  async function emptyHarness() {
+    const h = harness(undefined, 'whisper-dictation');
+    const source = await h.read();
+    const freeze = { protocol: 'work-authority/v1', operation: 'freeze', projectId: h.projectId,
+      prefix: 'wd', generation: 0, planDigest: 'd'.repeat(64), selectionMode: EMPTY_PROJECT_FIRST_ADMISSION,
+      sourceDigest: source.snapshot.sourceDigest, sourceRevision: source.snapshot.sourceRevision,
+      selectedIds: [], deferredIds: [], heldClaimIds: [] };
+    const commit = { protocol: 'work-authority/v1', operation: 'commit', projectId: h.projectId,
+      generation: 1, planDigest: freeze.planDigest, selectionMode: EMPTY_PROJECT_FIRST_ADMISSION,
+      receiptDigest: 'e'.repeat(64), mapping: [] };
+    return { ...h, freezePayload: freeze, commitPayload: commit };
+  }
+
+  it('fences an actually empty project without creating a task; exact restart replay is inert', async () => {
+    const h = await emptyHarness();
+    expect((await h.read()).snapshot).toMatchObject({ totalRecords: 0, records: [], edges: [], activeLeases: [] });
+    const frozen = await h.call('work-authority-transition', h.freezePayload);
+    expect(frozen).toMatchObject({ success: true, authority: { generation: 1, phase: 'frozen',
+      selectionMode: EMPTY_PROJECT_FIRST_ADMISSION, selectedIds: [], deferredIds: [], heldClaimIds: [] } });
+    expect(await h.create()).toMatchObject({ success: false, error: 'work_authority_read_only' });
+    const unrelated = await h.create({ projectId: 'unrelated' });
+    expect(unrelated.success).toBe(true);
+    const committed = await h.call('work-authority-transition', h.commitPayload);
+    expect(committed).toMatchObject({ success: true, authority: { phase: 'beads', mapping: [], receiptDigest: h.commitPayload.receiptDigest } });
+    expect(committed.authority.deferredTrackingId).toBeUndefined();
+    const before = await listAuditEntries(h.kv);
+    const restarted = harness(h.store, h.projectId);
+    for (const payload of [h.freezePayload, h.commitPayload]) {
+      expect(await restarted.call('work-authority-transition', payload)).toMatchObject({ success: true, replayed: true, authority: committed.authority });
+    }
+    expect(await listAuditEntries(h.kv)).toEqual(before);
+    expect((await restarted.read()).snapshot.totalRecords).toBe(0);
+    await expect(restarted.kv.set(KV.actions, 'act_new', { id: 'act_new', projectId: h.projectId }))
+      .rejects.toThrow('work_authority_read_only');
+  });
+
+  it.each([undefined, ZERO_SELECTED_DEFER_ALL, 'empty-project-first-admission/v2'])(
+    'does not authorize emptiness with another mode: %s', async selectionMode => {
+      const h = await emptyHarness();
+      expect((await h.call('work-authority-transition', { ...h.freezePayload, selectionMode })).success).toBe(false);
+      expect((await h.read()).phase).toBe('agentmemory');
+    });
+
+  it.each(['pending', 'done', 'cancelled'])('rejects any project history: %s', async status => {
+    const h = await emptyHarness();
+    await h.kv.set(KV.actions, 'act_history', { id: 'act_history', projectId: h.projectId, status, lifecycle: status, revision: 1 });
+    const fresh = await h.read();
+    expect(fresh.snapshot.totalRecords).toBe(1);
+    expect(await h.call('work-authority-transition', { ...h.freezePayload,
+      sourceDigest: fresh.snapshot.sourceDigest, sourceRevision: fresh.snapshot.sourceRevision }))
+      .toMatchObject({ success: false, error: 'project_not_empty' });
+  });
+
+  it.each([
+    { selectedIds: ['act_any'] }, { deferredIds: ['act_any'] }, { heldClaimIds: ['act_any'] },
+    { heldClaimIds: undefined }, { selectedIds: null }, { sourceRevision: true }, { generation: 1 },
+  ])('refuses a malformed empty freeze: %j', async change => {
+    const h = await emptyHarness();
+    expect((await h.call('work-authority-transition', { ...h.freezePayload, ...change })).success).toBe(false);
+    expect((await h.read()).phase).toBe('agentmemory');
+  });
+
+  it('requires a fresh initial revision and a settled maintenance writer', async () => {
+    const h = await emptyHarness();
+    await h.create({ projectId: 'other' });
+    expect(await h.call('work-authority-transition', h.freezePayload)).toMatchObject({ success: false, error: 'source_revision_conflict' });
+    const fresh = await h.read();
+    const payload = { ...h.freezePayload, sourceRevision: fresh.snapshot.sourceRevision };
+    let finish!: () => void;
+    const pending = h.kv.maintenanceBarrier.mutate(KV.leases, 'lease', {}, () => new Promise<void>(r => { finish = r; }));
+    expect(await h.call('work-authority-transition', payload)).toMatchObject({ success: false, error: 'source_concurrent_write' });
+    finish(); await pending;
+    expect((await h.call('work-authority-transition', payload)).success).toBe(true);
+  });
+
+  it.each([
+    { deferredTrackingId: 'wd-fake' }, { deferredTrackingId: null },
+    { mapping: [{ sourceActionId: 'act_fake', beadId: 'wd-fake' }] },
+    { selectionMode: undefined }, { selectionMode: ZERO_SELECTED_DEFER_ALL },
+    { receiptDigest: '' }, { generation: 0 },
+  ])('rejects incompatible receipts while retaining the fence: %j', async change => {
+    const h = await emptyHarness();
+    await h.call('work-authority-transition', h.freezePayload);
+    expect((await h.call('work-authority-transition', { ...h.commitPayload, ...change })).success).toBe(false);
+    expect((await h.read()).phase).toBe('frozen');
+    expect(await h.create()).toMatchObject({ success: false, error: 'work_authority_read_only' });
+  });
+
+  it.each(['freeze', 'commit'])('checks history again at %s replay', async operation => {
+    const h = await emptyHarness();
+    await h.call('work-authority-transition', h.freezePayload);
+    await h.call('work-authority-transition', h.commitPayload);
+    h.store.set(KV.actions, new Map([['act_corrupt', { id: 'act_corrupt', projectId: h.projectId, status: 'done', lifecycle: 'done' }]]));
+    expect(await h.call('work-authority-transition', operation === 'freeze' ? h.freezePayload : h.commitPayload))
+      .toMatchObject({ success: false, error: 'project_not_empty' });
+  });
+
+  it('rejects malformed stored empty authority before reads or writes', async () => {
+    const h = await emptyHarness();
+    const frozen = await h.call('work-authority-transition', h.freezePayload);
+    h.store.get(KV.workAuthority)!.set(h.projectId, { ...frozen.authority, deferredIds: ['act_wrong'] });
+    await expect(h.read()).rejects.toThrow('work_authority_invalid');
+    expect(await h.create()).toMatchObject({ success: false, error: 'work_authority_invalid' });
   });
 });

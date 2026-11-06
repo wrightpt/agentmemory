@@ -140,3 +140,30 @@ describe('isolated work-authority transport fixture', () => {
     expect(JSON.parse(await fs.readFile(stateFile, 'utf8'))).toEqual(state);
   }, 20000);
 });
+
+
+  it('persists the empty-project fence and exact receipt across fixture restarts', async () => {
+    const selectionMode = 'empty-project-first-admission/v1';
+    const root = await fixtureRoot(selectionMode);
+    let engine = await start(root);
+    const route = '/agentmemory/work-authority?projectId=whisper-dictation&includeSnapshot=true';
+    const source = await engine.request(route);
+    expect(source.snapshot).toMatchObject({ records: [], totalRecords: 0, activeLeases: [], edges: [] });
+    const freeze = { protocol: 'work-authority/v1', operation: 'freeze', projectId: 'whisper-dictation',
+      prefix: 'wd', generation: 0, planDigest: 'a'.repeat(64), selectionMode,
+      sourceDigest: source.snapshot.sourceDigest, sourceRevision: source.snapshot.sourceRevision,
+      selectedIds: [], deferredIds: [], heldClaimIds: [] };
+    const frozen = await engine.request('/agentmemory/work-authority', freeze);
+    expect(frozen).toMatchObject({ success: true, authority: { phase: 'frozen', generation: 1 } });
+    await stop(engine.child); engine = await start(root);
+    expect(await engine.request('/agentmemory/work-authority', freeze)).toEqual({ ...frozen, replayed: true });
+    expect(await engine.request('/fixture/old-client', {})).toMatchObject({ success: false, error: 'work_authority_read_only' });
+    const commit = { protocol: freeze.protocol, operation: 'commit', projectId: freeze.projectId,
+      generation: 1, planDigest: freeze.planDigest, selectionMode, receiptDigest: 'b'.repeat(64), mapping: [] };
+    const committed = await engine.request('/agentmemory/work-authority', commit);
+    expect(committed).toMatchObject({ success: true, authority: { phase: 'beads', mapping: [] } });
+    await stop(engine.child); engine = await start(root);
+    expect(await engine.request('/agentmemory/work-authority', commit)).toEqual({ ...committed, replayed: true });
+    expect((await engine.request(route)).snapshot).toEqual(source.snapshot);
+    expect(await engine.request('/fixture/old-client', {})).toMatchObject({ success: false, error: 'work_authority_read_only' });
+  }, 20000);

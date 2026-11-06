@@ -32,8 +32,9 @@ const kv = new StateKV(sdk as never);
 registerActionsFunction(sdk as never, kv);
 registerWorkAuthorityFunction(sdk as never, kv);
 const deferredOnly = marker.scenario === 'zero-selected-defer-all/v1';
-if (marker.scenario !== undefined && !deferredOnly) throw new Error('fixture_scenario_invalid');
-const projectId = deferredOnly ? 'workstation-shell' : 'agent-workspace-config';
+const emptyProject = marker.scenario === 'empty-project-first-admission/v1';
+if (marker.scenario !== undefined && !deferredOnly && !emptyProject) throw new Error('fixture_scenario_invalid');
+const projectId = emptyProject ? 'whisper-dictation' : deferredOnly ? 'workstation-shell' : 'agent-workspace-config';
 if (!fs.existsSync(path.join(root, 'source-ids.json'))) {
   const rows = [];
   if (deferredOnly) {
@@ -43,7 +44,7 @@ if (!fs.existsSync(path.join(root, 'source-ids.json'))) {
       await kv.set(KV.actions, row.id, row);
       rows.push({ id: row.id, revision: row.revision, title: row.title });
     }
-  } else {
+  } else if (!emptyProject) {
     for (const title of ['Synthetic digest dedupe', 'Synthetic blocker dedupe', 'Historical triage']) {
       const result = await sdk.trigger({ function_id: 'mem::action-create', payload: { projectId, title, actor: 'fixture' } });
       if (!result.success) throw new Error('fixture_create_failed');

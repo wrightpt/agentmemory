@@ -950,7 +950,7 @@ export interface WorkAuthority {
   prefix: string;
   sourceDigest: string;
   sourceRevision: number;
-  selectionMode?: 'zero-selected-defer-all/v1';
+  selectionMode?: 'zero-selected-defer-all/v1' | 'empty-project-first-admission/v1';
   selectedIds: string[];
   deferredIds: string[];
   heldClaimIds: string[];
