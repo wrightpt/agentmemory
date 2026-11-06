@@ -33,6 +33,10 @@ every open record as deferred with no source-to-Bead task mapping. Empty
 selection is otherwise still rejected. This opt-in does not alter the existing
 nonempty import path or grant execution authority.
 
+An entirely empty project uses the separate explicit
+[`empty-project-first-admission/v1` contract](work-authority-empty-project.md),
+including zero terminal history. It creates no selected task or triage epic.
+
 The fence is checked before action events and inside StateKV writes for actions,
 edges and leases. This covers existing MCP/REST clients, raw restore writes,
 claim/release paths and project renames. A rejected write is
