@@ -10,6 +10,8 @@ Both POST endpoints require a configured `AGENTMEMORY_SECRET` and its Bearer cre
 
 The broker supplies its complete configured imported-project list. Claims and leases are always scanned across all projects, including orphan leases. Session bindings include the exact session, `wsh:<session>`, the legacy `wsh:<first 128 characters>`, and active action `tmux:` tags with both full and truncated names. Any bound nonterminal action or active lease refuses the acquire. Failed, malformed, duplicate or excessive inventories also refuse; there is no empty-result fallback.
 
+Action status, optional action lifecycle, and lease status must be primitive strings in their respective enums. Arrays, objects, null and other non-string values return `closeout_guard_invalid_inventory` before a capability or usable native guard is published, even when a value would stringify to `done`, `cancelled` or `active`. Omitted action lifecycle remains supported; only validated terminal strings can establish a completed historical action binding.
+
 A successful response contains `success`, `protocol`, `guardId`, `requestId`, `session`, `capability`, `expiresAt`, `snapshot`, `evidenceDigest`, `lock`, and `liveFile`. The stable snapshot has this shape:
 
 ```text

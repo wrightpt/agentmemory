@@ -14,7 +14,7 @@ export interface CloseoutGuardRequest {
 export class CloseoutGuardError extends Error {
   constructor(readonly code: string) { super(code); }
 }
-export const guardFail = (code: string): never => { throw new CloseoutGuardError(code); };
+export const guardFail: (code: string) => never = code => { throw new CloseoutGuardError(code); };
 const object = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256;
@@ -22,6 +22,10 @@ const optionalText = (value: unknown): string | null => {
   if (value === undefined || value === '') return null;
   if (!text(value)) guardFail('closeout_guard_invalid_inventory');
   return value as string;
+};
+const enumText = (value: unknown, allowed: readonly string[]): string => {
+  if (typeof value !== 'string' || !allowed.includes(value)) return guardFail('closeout_guard_invalid_inventory');
+  return value;
 };
 const hash = (value: unknown) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const natural = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
@@ -83,30 +87,31 @@ export async function captureGuardSnapshot(kv: StateKV, request: CloseoutGuardRe
     kv.list(KV.actions), kv.list(KV.leases), Promise.all(request.projectIds.map(id => authoritySnapshot(kv, id))),
   ]);
   const actions = validRows(actionRows, 20_000).map(row => {
-    if (!['pending', 'active', 'done', 'blocked', 'cancelled'].includes(String(row.status))
-        || (row.lifecycle !== undefined && !['pending', 'active', 'done', 'cancelled'].includes(String(row.lifecycle)))
-        || (row.revision !== undefined && !natural(row.revision))
-        || (row.lifecycle !== undefined && ['done', 'cancelled'].includes(String(row.status)) !== ['done', 'cancelled'].includes(String(row.lifecycle)))) {
+    const status = enumText(row.status, ['pending', 'active', 'done', 'blocked', 'cancelled']);
+    const lifecycle = row.lifecycle === undefined ? null : enumText(row.lifecycle, ['pending', 'active', 'done', 'cancelled']);
+    if ((row.revision !== undefined && !natural(row.revision))
+        || (lifecycle !== null && ['done', 'cancelled'].includes(status) !== ['done', 'cancelled'].includes(lifecycle))) {
       guardFail('closeout_guard_invalid_inventory');
     }
-    return { id: row.id as string, revision: row.revision ?? null, status: row.status as string,
-      lifecycle: row.lifecycle ?? null, projectId: optionalText(row.projectId) || optionalText(row.project),
+    return { id: row.id as string, revision: row.revision ?? null, status,
+      lifecycle, projectId: optionalText(row.projectId) || optionalText(row.project),
       owner: optionalText(row.owner), assignedTo: optionalText(row.assignedTo), tags: sortedStrings(row.tags, 256) };
   }).sort((a, b) => a.id.localeCompare(b.id));
   const leases = validRows(leaseRows, 20_000).map(row => {
+    const status = enumText(row.status, ['active', 'expired', 'released']);
     const acquired = timestamp(row.acquiredAt), expires = timestamp(row.expiresAt);
     const renewed = row.renewedAt === undefined ? acquired : timestamp(row.renewedAt);
-    if (!text(row.actionId) || !text(row.agentId) || !['active', 'expired', 'released'].includes(String(row.status))
+    if (!text(row.actionId) || !text(row.agentId)
         || ![acquired, expires, renewed].every(Number.isFinite) || expires < acquired || renewed < acquired || renewed > expires) {
       guardFail('closeout_guard_invalid_inventory');
     }
     return { id: row.id as string, actionId: row.actionId as string, agentId: row.agentId as string,
-      status: row.status as string, acquiredAt: row.acquiredAt as string, expiresAt: row.expiresAt as string,
+      status, acquiredAt: row.acquiredAt as string, expiresAt: row.expiresAt as string,
       renewedAt: row.renewedAt ?? null };
   }).sort((a, b) => a.id.localeCompare(b.id));
   const aliases = closeoutAliases(request.session);
   const tags = [`tmux:${request.session}`, `tmux:${request.session.slice(0, 128)}`];
-  const claims = actions.filter(a => !['done', 'cancelled'].includes(String(a.lifecycle || a.status))
+  const claims = actions.filter(a => !['done', 'cancelled'].includes(a.lifecycle ?? a.status)
     && (aliases.includes(a.owner || '') || aliases.includes(a.assignedTo || '') || tags.some(t => a.tags.includes(t))));
   const activeLeases = leases.filter(l => aliases.includes(l.agentId) && l.status === 'active' && timestamp(l.expiresAt) > now);
   if (claims.length || activeLeases.length) guardFail('closeout_guard_session_claimed');

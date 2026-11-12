@@ -135,6 +135,37 @@ describe('closeout write guard', () => {
     expect(f.native.guards[0].live).toEqual([]);
   });
 
+  const invalidEnums = [
+    { label: 'active array', value: ['active'] },
+    { label: 'done array', value: ['done'] },
+    { label: 'cancelled array', value: ['cancelled'] },
+    { label: 'released array', value: ['released'] },
+    { label: 'empty array', value: [] },
+    { label: 'object', value: { status: 'done' } },
+    { label: 'null', value: null },
+    { label: 'number', value: 1 },
+    { label: 'boolean', value: true },
+  ];
+  const invalidEnumRows: Array<{ field: string; label: string; value: unknown }> = ['action status', 'action lifecycle', 'lease status'].flatMap(field =>
+    invalidEnums.map(({ label, value }) => ({ field, label, value })));
+  invalidEnumRows.push(...['action status', 'lease status'].map(field => ({ field, label: 'missing', value: undefined })));
+
+  it.each(invalidEnumRows)('refuses $field with $label before entering the guarded operation', async ({ field, value }) => {
+    const f = fixture(), a = await f.create(), operation = vi.fn();
+    await f.kv.set(KV.actions, a.id, { ...a, status: 'done', lifecycle: 'done', owner: session,
+      ...(field === 'action status' ? { status: value } : field === 'action lifecycle' ? { lifecycle: value } : {}) });
+    if (field === 'lease status') {
+      await f.kv.set(KV.leases, 'lse_one', { id: 'lse_one', actionId: a.id, agentId: `wsh:${session}`, status: value,
+        acquiredAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() });
+    }
+    const result = await f.acquire();
+    if (result.success) { operation(); await f.release(result); }
+    expect(operation).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ success: false, error: 'closeout_guard_invalid_inventory' });
+    expect(result).not.toHaveProperty('capability');
+    expect(f.native.guards[0].live).toEqual([]);
+  });
+
   it('recovers a pending action event before deciding that the session is unclaimed', async () => {
     const f = fixture(), a = await f.create();
     await f.kv.set(KV.actionEvents, 'aev_pending', { id: 'aev_pending', actionId: a.id, entityType: 'action', schemaVersion: 2,
@@ -196,9 +227,11 @@ describe('closeout write guard', () => {
     await f.release(held); await denied;
   });
 
-  it('allows terminal historical bindings and released leases', async () => {
+  it.each(['done', 'cancelled'].flatMap(status => [
+    { status, lifecycle: status }, { status, lifecycle: undefined },
+  ]))('allows terminal historical $status bindings with lifecycle $lifecycle and released leases', async ({ status, lifecycle }) => {
     const f = fixture(), a = await f.create();
-    await f.kv.set(KV.actions, a.id, { ...a, status: 'done', lifecycle: 'done', owner: session, tags: [`tmux:${session}`] });
+    await f.kv.set(KV.actions, a.id, { ...a, status, lifecycle, owner: session, tags: [`tmux:${session}`] });
     await f.kv.set(KV.leases, 'lse_old', { id: 'lse_old', actionId: a.id, agentId: `wsh:${session}`, status: 'released',
       acquiredAt: '2020-01-01T00:00:00Z', expiresAt: '2020-01-01T01:00:00Z' });
     const held = await f.acquire(); expect(held.success).toBe(true); await f.release(held);
