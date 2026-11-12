@@ -2327,6 +2327,24 @@ export function registerApiTriggers(
     config: { api_path: "/agentmemory/maintenance/stale-delete", http_method: "POST" },
   });
 
+  for (const operation of ["acquire", "release"] as const) {
+    sdk.registerFunction(`api::closeout-guard-${operation}`, async (req: ApiRequest) => {
+      const denied = requireConfiguredSecret(secret, "closeout guard") || checkAuth(req, secret);
+      if (denied) return denied;
+      const body = req.body as Record<string, unknown> | undefined;
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return { status_code: 400, body: { success: false, error: "closeout_guard_invalid_request" } };
+      }
+      const payload = operation === "acquire"
+        ? { protocol: body.protocol, requestId: body.requestId, session: body.session, projectIds: body.projectIds }
+        : { protocol: body.protocol, guardId: body.guardId, capability: body.capability };
+      const result = await sdk.trigger({ function_id: `mem::closeout-guard-${operation}`, payload });
+      return { status_code: 200, body: result };
+    });
+    sdk.registerTrigger({ type: "http", function_id: `api::closeout-guard-${operation}`,
+      config: { api_path: `/agentmemory/maintenance/closeout-guard/${operation}`, http_method: "POST" } });
+  }
+
   sdk.registerFunction("api::governance-delete", 
     async (
       req: ApiRequest<{ memoryIds: string[]; reason?: string }>,

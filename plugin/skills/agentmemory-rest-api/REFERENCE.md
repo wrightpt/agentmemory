@@ -83,6 +83,8 @@ The REST API is the primary surface. All paths are under `http://localhost:3111`
 | GET | `/agentmemory/livez` |
 | POST | `/agentmemory/llm/smoke` |
 | POST | `/agentmemory/maintenance/stale-delete` |
+| POST | `/agentmemory/maintenance/closeout-guard/acquire` |
+| POST | `/agentmemory/maintenance/closeout-guard/release` |
 | GET | `/agentmemory/memories` |
 | GET | `/agentmemory/memories/:id` |
 | GET | `/agentmemory/mesh/export` |
