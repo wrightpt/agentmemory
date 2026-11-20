@@ -1736,6 +1736,16 @@ record that is not `ambiguous`, an active claim, and evidence that is missing,
 malformed or not located after the boundary. It never requeues, retries, types,
 re-claims or rewrites earlier audit entries.
 
+`input/reconcile` refuses with `503` until `AGENTMEMORY_SECRET` is actually
+configured. `checkAuth` permits every request when no secret is set, so on an
+engine started without one it is not authentication at all; this is the only way
+out of a terminal `ambiguous` receipt, so it fails closed instead of accepting an
+unauthenticated caller. Configuring that secret is an activation prerequisite for
+the endpoint, and it has to be provisioned for the existing clients at the same
+time, because turning it on makes every other protected endpoint require a
+bearer token too. The endpoint never provisions, relocates or exposes a
+credential itself.
+
 Its outcome is `reconciled`, deliberately not `accepted`: `accepted` means a
 completed canonical exchange was observed at delivery time, which a later read
 cannot establish. The row keeps the prior status, revision, error code,

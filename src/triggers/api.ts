@@ -2954,9 +2954,18 @@ export function registerApiTriggers(
     },
   });
 
+  // `checkAuth` alone is not authentication here: it permits every request when
+  // no `AGENTMEMORY_SECRET` is configured, and the installed engine currently
+  // runs without one. This transition is the only way out of a terminal
+  // `ambiguous` receipt, so it refuses outright until a secret is actually
+  // configured rather than accepting an unauthenticated caller. Provisioning
+  // that secret is an activation prerequisite, not something this endpoint
+  // arranges for itself.
   sdk.registerFunction(
     "api::input-reconcile",
     async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const secretErr = requireConfiguredSecret(secret, "input reconciliation");
+      if (secretErr) return secretErr;
       const authErr = checkAuth(req, secret);
       if (authErr) return authErr;
       const result = (await sdk.trigger({

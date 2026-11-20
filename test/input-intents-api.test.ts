@@ -87,6 +87,10 @@ describe("input intent REST boundaries", () => {
   });
 
   it("whitelists reconcile fields and maps a refusal to 409", async () => {
+    // This endpoint refuses outright without a configured secret, so the
+    // whitelist is exercised through an authenticated request.
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, "configured-secret");
     let received: Record<string, unknown> | undefined;
     sdk.registerFunction("mem::input-reconcile", async (data) => {
       received = data as Record<string, unknown>;
@@ -94,7 +98,7 @@ describe("input intent REST boundaries", () => {
     });
 
     const response = (await sdk.trigger("api::input-reconcile", {
-      headers: {},
+      headers: { authorization: "Bearer configured-secret" },
       body: {
         intentId: "inp_1",
         operationId: "recon-1",
@@ -129,5 +133,53 @@ describe("input intent REST boundaries", () => {
       "providerSessionId",
       "targetSession",
     ]);
+  });
+});
+
+describe("input reconciliation authentication boundary", () => {
+  // `checkAuth` permits every request when no secret is configured, and the
+  // installed engine currently runs without one. The only transition out of a
+  // terminal ambiguous receipt must not be reachable on that basis.
+  it("refuses reconciliation outright when no secret is configured", async () => {
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never);
+    let reached = false;
+    sdk.registerFunction("mem::input-reconcile", async () => {
+      reached = true;
+      return { success: true };
+    });
+
+    const response = (await sdk.trigger("api::input-reconcile", {
+      headers: {},
+      body: { intentId: "inp_1" },
+    })) as { status_code: number; body: { error?: string } };
+
+    expect(response.status_code).toBe(503);
+    expect(response.body.error).toContain("AGENTMEMORY_SECRET");
+    expect(reached).toBe(false);
+  });
+
+  it("still requires a bearer token once a secret is configured", async () => {
+    const sdk = mockSdk();
+    registerApiTriggers(sdk as never, mockKV() as never, "configured-secret");
+    let reached = false;
+    sdk.registerFunction("mem::input-reconcile", async () => {
+      reached = true;
+      return { success: true };
+    });
+
+    const unauthorized = (await sdk.trigger("api::input-reconcile", {
+      headers: {},
+      body: { intentId: "inp_1" },
+    })) as { status_code: number };
+    expect(unauthorized.status_code).toBe(401);
+    expect(reached).toBe(false);
+
+    const authorized = (await sdk.trigger("api::input-reconcile", {
+      headers: { authorization: "Bearer configured-secret" },
+      body: { intentId: "inp_1" },
+    })) as { status_code: number };
+    expect(authorized.status_code).toBe(200);
+    expect(reached).toBe(true);
   });
 });
