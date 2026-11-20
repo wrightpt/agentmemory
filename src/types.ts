@@ -752,6 +752,7 @@ export interface AuditEntry {
     | "input_claim"
     | "input_delivery"
     | "input_settle"
+    | "input_reconcile"
     | "input_cancel"
     | "lease_acquire"
     | "lease_release"
@@ -1015,13 +1016,32 @@ export type InputIntentStatus =
   | "accepted"
   | "ambiguous"
   | "blocked"
-  | "cancelled";
+  | "cancelled"
+  | "reconciled";
 
 export interface InputDeliveryEvidence {
   source: "provider_transcript";
   observedAt: string;
   messageSha256: string;
   transcriptCursor?: string;
+}
+
+// An ambiguous receipt is terminal: it is never redelivered and never
+// retroactively changed. This records that a later evidence-only read proved
+// the delivery after the fact, and keeps what the row said before, so a
+// reconciled outcome can never be mistaken for proof held at delivery time.
+export interface InputReconciliation {
+  source: "evidence_only_reconciliation";
+  operationId: string;
+  reconciledAt: string;
+  priorStatus: InputIntentStatus;
+  priorRevision: number;
+  priorErrorCode?: string;
+  deliveryStartedAt: string;
+  attemptsAtReconciliation: number;
+  providerSessionId: string;
+  providerIncarnation: string;
+  transcriptCursor: string;
 }
 
 export interface InputIntent {
@@ -1048,6 +1068,7 @@ export interface InputIntent {
   settledAt?: string;
   evidence?: InputDeliveryEvidence;
   lastErrorCode?: string;
+  reconciliation?: InputReconciliation;
 }
 
 export interface Routine {

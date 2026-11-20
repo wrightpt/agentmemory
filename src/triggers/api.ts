@@ -2955,6 +2955,44 @@ export function registerApiTriggers(
   });
 
   sdk.registerFunction(
+    "api::input-reconcile",
+    async (req: ApiRequest<Record<string, unknown>>): Promise<Response> => {
+      const authErr = checkAuth(req, secret);
+      if (authErr) return authErr;
+      const result = (await sdk.trigger({
+        function_id: "mem::input-reconcile",
+        payload: pickDefinedFields(
+          (req.body ?? {}) as Record<string, unknown>,
+          [
+            "intentId",
+            "operationId",
+            "expectedRevision",
+            "targetSession",
+            "payloadSha256",
+            "deliveryStartedAt",
+            "providerSessionId",
+            "providerIncarnation",
+            "evidence",
+            "actor",
+          ],
+        ),
+      })) as { success?: boolean };
+      return {
+        status_code: result.success === false ? 409 : 200,
+        body: result,
+      };
+    },
+  );
+  sdk.registerTrigger({
+    type: "http",
+    function_id: "api::input-reconcile",
+    config: {
+      api_path: "/agentmemory/input/reconcile",
+      http_method: "POST",
+    },
+  });
+
+  sdk.registerFunction(
     "api::input-list",
     async (req: ApiRequest): Promise<Response> => {
       const authErr = checkAuth(req, secret);

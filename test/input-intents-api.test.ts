@@ -85,4 +85,49 @@ describe("input intent REST boundaries", () => {
       body: { error: "limit must be a positive integer" },
     });
   });
+
+  it("whitelists reconcile fields and maps a refusal to 409", async () => {
+    let received: Record<string, unknown> | undefined;
+    sdk.registerFunction("mem::input-reconcile", async (data) => {
+      received = data as Record<string, unknown>;
+      return { success: false, error: "input_revision_conflict" };
+    });
+
+    const response = (await sdk.trigger("api::input-reconcile", {
+      headers: {},
+      body: {
+        intentId: "inp_1",
+        operationId: "recon-1",
+        expectedRevision: 4,
+        targetSession: "shared-auto-launch-interactive-claude-a3f2aef00",
+        payloadSha256: "c".repeat(64),
+        deliveryStartedAt: "2026-11-20T05:33:51.294Z",
+        providerSessionId: "7ceff68e-1a36-4819-b576-aeedeb21af20",
+        providerIncarnation: "d".repeat(64),
+        evidence: { source: "provider_transcript" },
+        actor: "wsh:recovery",
+        // None of these may reach the function: a caller must not be able to
+        // name a status, force a claim or assert proof across this boundary.
+        status: "accepted",
+        reconciled: true,
+        claimToken: "ict_forged",
+        workerId: "wsh:forged",
+        content: "must not cross this boundary",
+      },
+    })) as { status_code: number };
+
+    expect(response.status_code).toBe(409);
+    expect(Object.keys(received ?? {}).sort()).toEqual([
+      "actor",
+      "deliveryStartedAt",
+      "evidence",
+      "expectedRevision",
+      "intentId",
+      "operationId",
+      "payloadSha256",
+      "providerIncarnation",
+      "providerSessionId",
+      "targetSession",
+    ]);
+  });
 });
