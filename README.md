@@ -1704,7 +1704,7 @@ for retrieval ordering, egress, fallback, and cache invariants.
 
 <h2 id="api"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/tags/light/section-api.svg"><img src="assets/tags/section-api.svg" alt="API" height="32" /></picture></h2>
 
-151 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
+152 endpoints on port `3111`. The REST API binds to `127.0.0.1` by default. Protected endpoints require `Authorization: Bearer <secret>` when `AGENTMEMORY_SECRET` is set, and mesh sync endpoints require `AGENTMEMORY_SECRET` on both peers.
 
 Task-scoped [verified shared findings](docs/recipes/verified-shared-findings.md) extend causal lessons with source-bound admission, frozen compact snapshots, and controlled evidence expansion. Five `/agentmemory/findings/*` endpoints and `npm run findings -- <command> --input request.json` provide the worker path. This surface always requires enforced caller authentication plus an operator-owned findings policy; absent configuration fails closed. It does not enter ordinary lesson recall or change task ownership, Research Town model access, or research-ontology authority. `npm run findings:pilot` runs an isolated fixture pilot without live services or model calls.
 
@@ -1718,10 +1718,41 @@ Scheduled stale-record deletion uses the versioned [conditional maintenance API]
 
 The operational input ledger uses `/agentmemory/input/intents`,
 `/agentmemory/input/claim`, `/agentmemory/input/start`,
-`/agentmemory/input/settle`, and `/agentmemory/input/cancel`. It stores opaque
-payload references, hashes, delivery leases, and canonical-transcript evidence;
-prompt text remains outside AgentMemory. An expired claim that reached
-`input/start` becomes `ambiguous` and is never automatically redelivered.
+`/agentmemory/input/settle`, `/agentmemory/input/reconcile`, and
+`/agentmemory/input/cancel`. It stores opaque payload references, hashes,
+delivery leases, and canonical-transcript evidence; prompt text remains outside
+AgentMemory. An expired claim that reached `input/start` becomes `ambiguous` and
+is never automatically redelivered.
+
+`input/reconcile` is the one transition out of `ambiguous`, and it proves a
+delivery rather than repeating it. A claim can only be granted to a `queued`
+record and a settlement requires a live claim, so an `ambiguous` row was
+otherwise terminal and kept blocking closeout for its target session. The call
+requires the exact intent, its current revision, the stored payload hash and
+`deliveryStartedAt`, the bound provider session and incarnation, and one
+canonical observation after that delivery boundary whose cursor names the bound
+provider session. It refuses a stale revision, a wrong target or payload, a
+record that is not `ambiguous`, an active claim, and evidence that is missing,
+malformed or not located after the boundary. It never requeues, retries, types,
+re-claims or rewrites earlier audit entries.
+
+`input/reconcile` refuses with `503` until `AGENTMEMORY_SECRET` is actually
+configured. `checkAuth` permits every request when no secret is set, so on an
+engine started without one it is not authentication at all; this is the only way
+out of a terminal `ambiguous` receipt, so it fails closed instead of accepting an
+unauthenticated caller. Configuring that secret is an activation prerequisite for
+the endpoint, and it has to be provisioned for the existing clients at the same
+time, because turning it on makes every other protected endpoint require a
+bearer token too. The endpoint never provisions, relocates or exposes a
+credential itself.
+
+Its outcome is `reconciled`, deliberately not `accepted`: `accepted` means a
+completed canonical exchange was observed at delivery time, which a later read
+cannot establish. The row keeps the prior status, revision, error code,
+delivery timestamps and attempt count under `reconciliation`, together with the
+idempotent `operationId`, so an evidence-only outcome is never mistaken for
+proof held at the time. Repeating the same `operationId` returns the same row;
+a different one against an already reconciled record is refused.
 
 <details>
 <summary>Key endpoints</summary>

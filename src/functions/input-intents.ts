@@ -6,6 +6,7 @@ import type {
   InputDeliveryEvidence,
   InputIntent,
   InputIntentStatus,
+  InputReconciliation,
 } from "../types.js";
 import { recordAudit } from "./audit.js";
 
@@ -43,6 +44,21 @@ type ClaimInput = {
 };
 
 type SettleOutcome = "accepted" | "ambiguous" | "blocked" | "retry";
+
+type ReconcileInput = {
+  intentId: string;
+  operationId: string;
+  expectedRevision: number;
+  targetSession: string;
+  payloadSha256: string;
+  deliveryStartedAt: string;
+  providerSessionId: string;
+  providerIncarnation: string;
+  evidence: unknown;
+  actor?: string;
+};
+
+const PROVIDER_INCARNATION = /^[a-f0-9]{64}$/;
 
 type ImmutableInput = Pick<
   InputIntent,
@@ -142,6 +158,32 @@ function parseEvidence(
     messageSha256: expectedSha256,
     ...(transcriptCursor ? { transcriptCursor } : {}),
   };
+}
+
+// Deliberately stricter than `parseEvidence`. A cursor is mandatory and must
+// name the bound provider session, so the proof identifies one exact occurrence
+// instead of asserting that one exists; and the observation must fall after the
+// delivery boundary this receipt actually recorded. A caller cannot reach a
+// terminal outcome by supplying an actor, a hash or a boolean.
+function parseReconciliationEvidence(
+  value: unknown,
+  expectedSha256: string,
+  deliveryStartedAt: string,
+  providerSessionId: string,
+): InputDeliveryEvidence | null {
+  const evidence = parseEvidence(value, expectedSha256);
+  if (!evidence?.transcriptCursor) return null;
+  if (!evidence.transcriptCursor.startsWith(`${providerSessionId}:`)) return null;
+  if (new Date(evidence.observedAt).getTime() < new Date(deliveryStartedAt).getTime()) {
+    return null;
+  }
+  return evidence;
+}
+
+function claimIsActive(intent: InputIntent, now: number): boolean {
+  if (!intent.claimToken && !intent.claimedBy) return false;
+  const expiresAt = new Date(intent.claimExpiresAt ?? "").getTime();
+  return !Number.isFinite(expiresAt) || expiresAt > now;
 }
 
 async function persistAutomaticTransition(
@@ -536,6 +578,131 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
     },
   );
 
+  // An ambiguous receipt can never be claimed again (`isDue` admits only
+  // `queued`) and so can never be settled, which left a proven delivery blocking
+  // closeout forever. This is the one transition out of it, and it proves the
+  // delivery rather than redoing it: nothing is requeued, retried, typed or
+  // re-claimed, no draft is touched, and no earlier audit entry is rewritten.
+  //
+  // The outcome is `reconciled`, never `accepted`. `accepted` is documented as a
+  // completed canonical exchange observed at delivery time; this operation reads
+  // evidence afterwards and cannot establish that predicate, so it records a
+  // separate terminal outcome and keeps what the row said before.
+  sdk.registerFunction(
+    "mem::input-reconcile",
+    async (data: ReconcileInput) => {
+      const intentId = nonEmpty(data.intentId, 256);
+      const operationId = nonEmpty(data.operationId, 256);
+      const targetSession = nonEmpty(data.targetSession, 256);
+      const providerSessionId = nonEmpty(data.providerSessionId, 256);
+      const providerIncarnation = nonEmpty(data.providerIncarnation, 128);
+      const payloadSha256 = nonEmpty(data.payloadSha256, 64);
+      const deliveryStartedAt = validIso(data.deliveryStartedAt);
+      const actor =
+        data.actor === undefined ? undefined : nonEmpty(data.actor, 256);
+      if (
+        !intentId ||
+        !operationId ||
+        !targetSession ||
+        !providerSessionId ||
+        !SESSION_REF.test(providerSessionId) ||
+        !providerIncarnation ||
+        !PROVIDER_INCARNATION.test(providerIncarnation) ||
+        !payloadSha256 ||
+        !SHA256.test(payloadSha256) ||
+        !deliveryStartedAt ||
+        !Number.isInteger(data.expectedRevision) ||
+        data.expectedRevision < 0 ||
+        (data.actor !== undefined && !actor)
+      ) {
+        return { success: false, error: "invalid_reconciliation" };
+      }
+      return withKeyedLock(`mem:input-intent:${intentId}`, async () => {
+        const intent = await kv.get<InputIntent>(KV.inputIntents, intentId);
+        if (!intent) return { success: false, error: "intent_not_found" };
+        if (intent.reconciliation?.operationId === operationId) {
+          return { success: true, intent, idempotent: true };
+        }
+        if (intent.status === "reconciled") {
+          return { success: false, error: "input_already_reconciled" };
+        }
+        if (intent.status !== "ambiguous") {
+          return { success: false, error: "intent_not_ambiguous" };
+        }
+        if (claimIsActive(intent, Date.now())) {
+          return { success: false, error: "input_claim_active" };
+        }
+        if (intent.revision !== data.expectedRevision) {
+          return { success: false, error: "input_revision_conflict" };
+        }
+        if (intent.targetSession !== targetSession) {
+          return { success: false, error: "input_target_mismatch" };
+        }
+        if (intent.payloadSha256 !== payloadSha256) {
+          return { success: false, error: "input_payload_mismatch" };
+        }
+        if (
+          !intent.deliveryStartedAt ||
+          intent.deliveryStartedAt !== deliveryStartedAt
+        ) {
+          return { success: false, error: "input_delivery_boundary_mismatch" };
+        }
+        const evidence = parseReconciliationEvidence(
+          data.evidence,
+          intent.payloadSha256,
+          intent.deliveryStartedAt,
+          providerSessionId,
+        );
+        if (!evidence?.transcriptCursor) {
+          return {
+            success: false,
+            error: "reconciliation_requires_unique_post_boundary_proof",
+          };
+        }
+        const now = new Date().toISOString();
+        const reconciliation: InputReconciliation = {
+          source: "evidence_only_reconciliation",
+          operationId,
+          reconciledAt: now,
+          priorStatus: intent.status,
+          priorRevision: intent.revision,
+          ...(intent.lastErrorCode
+            ? { priorErrorCode: intent.lastErrorCode }
+            : {}),
+          deliveryStartedAt: intent.deliveryStartedAt,
+          attemptsAtReconciliation: intent.attempts,
+          providerSessionId,
+          providerIncarnation,
+          transcriptCursor: evidence.transcriptCursor,
+        };
+        intent.status = "reconciled";
+        intent.evidence = evidence;
+        intent.reconciliation = reconciliation;
+        intent.settledAt = now;
+        intent.updatedAt = now;
+        intent.revision += 1;
+        await kv.set(KV.inputIntents, intent.id, intent);
+        await recordAudit(
+          kv,
+          "input_reconcile",
+          "mem::input-reconcile",
+          [intent.id],
+          {
+            actor,
+            operationId,
+            priorStatus: reconciliation.priorStatus,
+            priorRevision: reconciliation.priorRevision,
+            priorErrorCode: reconciliation.priorErrorCode,
+            status: intent.status,
+            providerSessionId,
+            evidenceSource: evidence.source,
+          },
+        );
+        return { success: true, intent };
+      });
+    },
+  );
+
   sdk.registerFunction(
     "mem::input-list",
     async (data: {
@@ -557,6 +724,7 @@ export function registerInputIntentsFunction(sdk: ISdk, kv: StateKV): void {
         "ambiguous",
         "blocked",
         "cancelled",
+        "reconciled",
       ];
       const statuses =
         data.statuses === undefined
