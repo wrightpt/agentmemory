@@ -1,4 +1,5 @@
 import type { ISdk } from "iii-sdk";
+import { writeVersionedLease } from "./action-lease-observation.js";
 import { actionProject, getWorkAuthority } from "../state/work-authority.js";
 import type { StateKV } from "../state/kv.js";
 import { KV } from "../state/schema.js";
@@ -1008,7 +1009,7 @@ export function registerDiagnosticsFunction(sdk: ISdk, kv: StateKV): void {
                   return false;
                 }
                 fresh.status = "expired";
-                await kv.set(KV.leases, fresh.id, fresh);
+                await writeVersionedLease(kv, fresh);
                 await recordAudit(kv, "heal", "mem::heal", [fresh.id], {
                   entityType: "lease",
                   reason: "expired-lease",

@@ -1,4 +1,6 @@
 import type { ISdk } from "iii-sdk";
+import { isDeepStrictEqual } from "node:util";
+import { observeActionLease, LeaseObservationError } from "./action-lease-observation.js";
 import type { StateKV } from "../state/kv.js";
 import { KV, generateId } from "../state/schema.js";
 import type {
@@ -476,41 +478,51 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
     },
   );
 
-  sdk.registerFunction("mem::action-get", async (data: { actionId: string }) => {
+  sdk.registerFunction("mem::action-get", async (data: {
+    actionId: string; projectId?: string; includeLeaseObservation?: boolean; leaseOnly?: boolean;
+  }) => {
     if (!data.actionId) {
       return { success: false, error: "actionId is required" };
     }
-    const snapshot = await readActionStoreSnapshot(kv, {
-      includeEvents: true,
-      eventActionId: data.actionId,
-    });
-    const action = snapshot.actions.find((candidate) => candidate.id === data.actionId);
-    if (!action) return { success: false, error: "action not found" };
-    const edges = snapshot.edges.filter(
-      (edge) =>
-        edge.sourceActionId === data.actionId ||
-        edge.targetActionId === data.actionId,
-    );
-    const children = snapshot.actions.filter(
-      (candidate) => candidate.parentId === data.actionId,
-    );
-    const events = snapshot.events
-      .filter((event) => event.actionId === data.actionId)
-      .sort(
-        (left, right) =>
-          left.revision - right.revision ||
-          left.timestamp.localeCompare(right.timestamp) ||
-          left.id.localeCompare(right.id),
+    if ((data.includeLeaseObservation !== undefined && typeof data.includeLeaseObservation !== "boolean")
+        || (data.leaseOnly !== undefined && typeof data.leaseOnly !== "boolean")
+        || (data.leaseOnly && !data.includeLeaseObservation)
+        || (data.includeLeaseObservation && (typeof data.projectId !== "string" || !isCanonicalProjectId(data.projectId)))) {
+      return { success: false, error: "lease_observation_scope_required" };
+    }
+    try {
+      if (data.leaseOnly) {
+        return { success: true, readMode: "lease-only", ...await observeActionLease(kv, data.projectId!, data.actionId) };
+      }
+      const snapshot = await readActionStoreSnapshot(kv, {
+        includeEvents: true,
+        eventActionId: data.actionId,
+      });
+      const action = snapshot.actions.find((candidate) => candidate.id === data.actionId);
+      if (!action) return { success: false, error: "action not found" };
+      const edges = snapshot.edges.filter(
+        (edge) => edge.sourceActionId === data.actionId || edge.targetActionId === data.actionId,
       );
-    return {
-      success: true,
-      action,
-      edges,
-      children,
-      events,
-      revision: snapshot.state.revision,
-      workAuthority: await getWorkAuthority(kv, action.projectId || action.project || "workstation"),
-    };
+      const children = snapshot.actions.filter((candidate) => candidate.parentId === data.actionId);
+      const events = snapshot.events.filter((event) => event.actionId === data.actionId).sort(
+        (left, right) => left.revision - right.revision || left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id),
+      );
+      const result = { success: true, action, edges, children, events, revision: snapshot.state.revision,
+        workAuthority: await getWorkAuthority(kv, action.projectId || action.project || "workstation") };
+      if (!data.includeLeaseObservation) return result;
+      const observed = await observeActionLease(kv, data.projectId!, data.actionId);
+      // The full history and cheap lease cut must describe the same native task.
+      // A lease-only renewal may advance its own version without touching action
+      // revision; an action/authority change never gets silently combined.
+      if (result.revision !== observed.revision || !isDeepStrictEqual(result.action, observed.action)
+          || !isDeepStrictEqual(result.workAuthority, observed.workAuthority)) {
+        return { success: false, error: "lease_observation_action_changed" };
+      }
+      return { ...result, leaseObservation: observed.leaseObservation };
+    } catch (error) {
+      if (!data.includeLeaseObservation) throw error;
+      return { success: false, error: error instanceof LeaseObservationError ? error.code : "lease_observation_unavailable" };
+    }
   });
 
   sdk.registerFunction(
