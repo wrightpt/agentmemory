@@ -29,6 +29,14 @@ on the basis of a creation event or a presumed migration cutoff. A caller asking
 for all history still receives all history. A caller asking for no history or
 one action receives only that mode's events, never a sibling's history.
 
+Even historical rows that violate global event-ID uniqueness retain the old
+solo semantics: scalar history deduplicates only that action's bucket scopes,
+filters the action, and overlays those results on its filtered legacy rows.
+Full-history readers use the original global dedupe. These projections share
+loaded raw rows, not a global dedupe result that could suppress a sibling's
+legacy event. This preserves reads without needing a production history scan
+or a speculative repair of historical data.
+
 Each returned snapshot is cloned for caller isolation. There is no completed
 cache or TTL: a subsequent call always enters a new native observation, even
 if the collection revision is unchanged. Failed cohorts propagate the failure;
@@ -49,7 +57,10 @@ Separate `StateKV` instances do not share a cohort.
 - a native writer queued during one read commits before later readers, which
   observe its new revision/projection/history;
 - pending-journal recovery, read failures, unchanged-revision refresh and
-  isolation between native KV instances.
+  isolation between native KV instances;
+- independent-review F1 cross-action duplicate IDs in mixed scalar/full-history
+  cohorts, and F2 identity-safe removal of an older capped cohort while a newer
+  cohort remains joinable.
 
 The focused tests measure scan counts, not production latency. A lone cold
 read still needs a full action/edge scan and complete applicable event history.

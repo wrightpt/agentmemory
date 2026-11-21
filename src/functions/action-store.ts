@@ -8,8 +8,7 @@ import {
   deleteActionEventLocation,
   getActionEvent,
   isActionEventPartitionScope,
-  listActionEvents,
-  listActionEventsForActions,
+  readActionEventHistories,
   writeActionEvent,
   writeActionEventLocation,
 } from "../state/partitioned-ledgers.js";
@@ -81,7 +80,7 @@ interface PendingSnapshotRead {
   callers: number;
   eventIds: Set<string>;
   allEvents: boolean;
-  promise: Promise<ActionStoreSnapshot>;
+  promise: Promise<ActionStoreSnapshot & { eventHistories: Map<string, ActionEvent[]> }>;
 }
 
 // Only reads waiting to enter the existing native consistency lock may join a
@@ -104,14 +103,12 @@ export async function readActionStoreSnapshot(
     const promise = withActionStoreLock(async () => {
       if (pendingSnapshotReads.get(kv) === created) pendingSnapshotReads.delete(kv);
       const state = await recoverActionStoreUnlocked(kv);
-      const [actions, edges, events] = await Promise.all([
+      const [actions, edges, histories] = await Promise.all([
         kv.list<Action>(KV.actions),
         kv.list<ActionEdge>(KV.actionEdges),
-        created.allEvents ? listActionEvents(kv)
-          : created.eventIds.size ? listActionEventsForActions(kv, [...created.eventIds])
-            : Promise.resolve([] as ActionEvent[]),
+        readActionEventHistories(kv, [...created.eventIds], created.allEvents),
       ]);
-      return { state, actions, edges, events };
+      return { state, actions, edges, events: histories.all, eventHistories: histories.byAction };
     });
     created = { callers: 0, eventIds: new Set(), allEvents: false, promise };
     batch = created;
@@ -123,8 +120,8 @@ export async function readActionStoreSnapshot(
   const snapshot = await batch.promise;
   // Native callers retain their exact prior shape and private mutable results.
   // A scalar reader never receives another cohort member's event history.
-  return structuredClone({ ...snapshot, events: !options.includeEvents ? []
-    : eventId ? snapshot.events.filter(event => event.actionId === eventId) : snapshot.events });
+  return structuredClone({ state: snapshot.state, actions: snapshot.actions, edges: snapshot.edges,
+    events: !options.includeEvents ? [] : eventId ? snapshot.eventHistories.get(eventId)! : snapshot.events });
 }
 
 export async function persistAction(

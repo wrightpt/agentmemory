@@ -4,7 +4,7 @@ import {
 } from "../src/functions/action-store.js";
 import { registerActionsFunction } from "../src/functions/actions.js";
 import {
-  actionEventPartitionScope, actionEventImportPartitionScope,
+  actionEventPartitionScope, actionEventImportPartitionScope, actionEventBucket,
   listActionEventsForAction, listActionEventsForActions,
 } from "../src/state/partitioned-ledgers.js";
 import { KV } from "../src/state/schema.js";
@@ -188,5 +188,48 @@ describe("native action read cohorts", () => {
     held.release(); await held.done;
     expect((await l).actions.map(a => a.id)).toEqual(["a"]);
     expect((await r).actions.map(a => a.id)).toEqual(["b"]);
+  });
+
+  it("preserves solo history for cross-action duplicate IDs regardless of scalar or full-history cohort peers (F1)", async () => {
+    const kv = mockKV();
+    const x = "act_x", y = "act_y";
+    expect(actionEventBucket(x)).not.toBe(actionEventBucket(y));
+    const legacy = event("dup", y, 1), partition = event("dup", x, 2);
+    await kv.set(KV.actionEvents, legacy.id, legacy);
+    await kv.set(actionEventPartitionScope(at, x), partition.id, partition);
+    const solo = await readActionStoreSnapshot(kv as never, { includeEvents: true, eventActionId: y });
+    expect(solo.events).toEqual([legacy]);
+    const reads = countReads(kv), held = await heldLock();
+    const calls = [
+      readActionStoreSnapshot(kv as never, { includeEvents: true, eventActionId: y }),
+      readActionStoreSnapshot(kv as never, { includeEvents: true, eventActionId: x }),
+      readActionStoreSnapshot(kv as never, { includeEvents: true }),
+    ];
+    held.release(); await held.done;
+    const [ys, xs, full] = await Promise.all(calls);
+    expect(ys.events).toEqual(solo.events);
+    expect(xs.events).toEqual([partition]);
+    expect(full.events).toEqual([partition]); // full-history's original global precedence
+    expect(Object.keys(ys).sort()).toEqual(["actions", "edges", "events", "state"]);
+    expect(reads.get(KV.actionEvents)).toBe(1);
+    expect(reads.get(actionEventPartitionScope(at, x))).toBe(1);
+  });
+
+  it("an older capped cohort cannot erase a newer waiting cohort's sharing identity (F2)", async () => {
+    const kv = mockKV(), reads = countReads(kv), held = await heldLock();
+    const entered = deferred(), resume = deferred(), list = kv.list;
+    let first = true;
+    kv.list = async <T>(scope: string): Promise<T[]> => {
+      if (scope === KV.actions && first) { first = false; entered.resolve(); await resume.promise; }
+      return list<T>(scope);
+    };
+    const calls = Array.from({ length: 65 }, (_, i) => readActionStoreSnapshot(kv as never,
+      { includeEvents: true, eventActionId: `a-${i}` }));
+    held.release(); await entered.promise;
+    const late = readActionStoreSnapshot(kv as never, { includeEvents: true, eventActionId: "a-64" });
+    resume.resolve(); await held.done;
+    await Promise.all([...calls, late]);
+    expect(reads.get(KV.actions)).toBe(2);
+    expect(reads.get(KV.actionEvents)).toBe(2);
   });
 });

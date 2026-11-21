@@ -233,33 +233,57 @@ export async function listActionEventsForActions(
   kv: LedgerKV,
   actionIds: readonly string[],
 ): Promise<ActionEvent[]> {
+  const histories = await readActionEventHistories(kv, actionIds);
+  return sortActionEvents([...histories.byAction.values()].flat());
+}
+
+/** Retain solo-reader dedupe precedence even for historical cross-action ID
+ * collisions. Full-history and scalar callers use the same loaded rows, but
+ * not the same global dedupe result. No additional KV scans are needed. */
+export async function readActionEventHistories(
+  kv: LedgerKV,
+  actionIds: readonly string[],
+  includeAll = false,
+): Promise<{ all: ActionEvent[]; byAction: Map<string, ActionEvent[]> }> {
   if (actionIds.length > 64) throw new Error("Action event read batch exceeds 64 IDs");
   const ids = new Set(actionIds);
-  if (!ids.size) return [];
+  if (!ids.size && !includeAll) return { all: [], byAction: new Map() };
   const buckets = new Set([...ids].map(actionEventBucket));
   const partitionedScopes = (
     await partitionScopes(kv, isActionEventPartitionScope)
-  ).filter((scope) => buckets.has(scope.slice(scope.lastIndexOf(":") + 1)));
-  const entries = await listEntries<ActionEvent>(kv, partitionedScopes);
-  const partitioned = dedupeById(entries).filter(
-    (event) => ids.has(event.actionId),
-  );
+  ).filter((scope) => includeAll || buckets.has(scope.slice(scope.lastIndexOf(":") + 1)));
 
   // A write-mode rollback can append legacy events even for actions born in
   // partitions. Imports and migrations also make creation rows insufficient
   // evidence that the legacy collection contains no relevant history.
-  const legacy = (await kv.list<ActionEvent>(KV.actionEvents)).filter(
-    (event) => ids.has(event.actionId),
-  );
-  return sortActionEvents(
-    dedupeById([
-      ...legacy.map((value) => ({ scope: KV.actionEvents, value })),
-      ...partitioned.map((value) => ({
-        scope: "partitioned",
-        value,
-      })),
-    ]),
-  );
+  const entries = await listEntries<ActionEvent>(kv, [KV.actionEvents, ...partitionedScopes]);
+  const legacyByAction = new Map<string, Array<PartitionedLedgerEntry<ActionEvent>>>();
+  const partitionByBucket = new Map<string, Array<PartitionedLedgerEntry<ActionEvent>>>();
+  for (const entry of entries) {
+    const key = entry.scope === KV.actionEvents ? entry.value.actionId : entry.scope.slice(entry.scope.lastIndexOf(":") + 1);
+    const index = entry.scope === KV.actionEvents ? legacyByAction : partitionByBucket;
+    const group = index.get(key) ?? [];
+    group.push(entry);
+    index.set(key, group);
+  }
+  const partitionByAction = new Map<string, ActionEvent[]>();
+  for (const bucket of buckets) {
+    // Solo semantics: dedupe the action's bucket BEFORE selecting its actionId.
+    for (const row of dedupeById(partitionByBucket.get(bucket) ?? [])) {
+      if (!ids.has(row.actionId) || actionEventBucket(row.actionId) !== bucket) continue;
+      const group = partitionByAction.get(row.actionId) ?? [];
+      group.push(row);
+      partitionByAction.set(row.actionId, group);
+    }
+  }
+  const byAction = new Map<string, ActionEvent[]>();
+  for (const id of ids) {
+    byAction.set(id, sortActionEvents(dedupeById([
+      ...(legacyByAction.get(id) ?? []),
+      ...(partitionByAction.get(id) ?? []).map(value => ({ scope: "partitioned", value })),
+    ])));
+  }
+  return { all: includeAll ? sortActionEvents(dedupeById(entries)) : [], byAction };
 }
 
 export async function getActionEvent(
