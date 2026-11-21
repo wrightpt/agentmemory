@@ -9,7 +9,7 @@ import {
   getActionEvent,
   isActionEventPartitionScope,
   listActionEvents,
-  listActionEventsForAction,
+  listActionEventsForActions,
   writeActionEvent,
   writeActionEventLocation,
 } from "../state/partitioned-ledgers.js";
@@ -77,23 +77,54 @@ export function withActionStoreLock<T>(fn: () => Promise<T>): Promise<T> {
   return withKeyedLock(ACTION_STORE_LOCK, fn);
 }
 
+interface PendingSnapshotRead {
+  callers: number;
+  eventIds: Set<string>;
+  allEvents: boolean;
+  promise: Promise<ActionStoreSnapshot>;
+}
+
+// Only reads waiting to enter the existing native consistency lock may join a
+// cohort. Remove it before the first state read. No completed or already-read
+// snapshot is reused, and later callers cannot extend the work holding the lock.
+const pendingSnapshotReads = new WeakMap<StateKV, PendingSnapshotRead>();
+const MAX_SNAPSHOT_CALLERS = 256;
+const MAX_SNAPSHOT_EVENT_IDS = 64;
+
 export async function readActionStoreSnapshot(
   kv: StateKV,
   options: { includeEvents?: boolean; eventActionId?: string } = {},
 ): Promise<ActionStoreSnapshot> {
-  return withActionStoreLock(async () => {
-    const state = await recoverActionStoreUnlocked(kv);
-    const [actions, edges, events] = await Promise.all([
-      kv.list<Action>(KV.actions),
-      kv.list<ActionEdge>(KV.actionEdges),
-      options.includeEvents
-        ? options.eventActionId
-          ? listActionEventsForAction(kv, options.eventActionId)
-          : listActionEvents(kv)
-        : Promise.resolve([] as ActionEvent[]),
-    ]);
-    return { state, actions, edges, events };
-  });
+  const eventId = options.includeEvents ? options.eventActionId : undefined;
+  let batch = pendingSnapshotReads.get(kv);
+  if (!batch || batch.callers >= MAX_SNAPSHOT_CALLERS
+      || (eventId && !batch.eventIds.has(eventId) && batch.eventIds.size >= MAX_SNAPSHOT_EVENT_IDS)) {
+    // withKeyedLock schedules this callback as a microtask, after batch is set.
+    let created: PendingSnapshotRead;
+    const promise = withActionStoreLock(async () => {
+      if (pendingSnapshotReads.get(kv) === created) pendingSnapshotReads.delete(kv);
+      const state = await recoverActionStoreUnlocked(kv);
+      const [actions, edges, events] = await Promise.all([
+        kv.list<Action>(KV.actions),
+        kv.list<ActionEdge>(KV.actionEdges),
+        created.allEvents ? listActionEvents(kv)
+          : created.eventIds.size ? listActionEventsForActions(kv, [...created.eventIds])
+            : Promise.resolve([] as ActionEvent[]),
+      ]);
+      return { state, actions, edges, events };
+    });
+    created = { callers: 0, eventIds: new Set(), allEvents: false, promise };
+    batch = created;
+    pendingSnapshotReads.set(kv, batch);
+  }
+  batch.callers++;
+  if (eventId) batch.eventIds.add(eventId);
+  else if (options.includeEvents) batch.allEvents = true;
+  const snapshot = await batch.promise;
+  // Native callers retain their exact prior shape and private mutable results.
+  // A scalar reader never receives another cohort member's event history.
+  return structuredClone({ ...snapshot, events: !options.includeEvents ? []
+    : eventId ? snapshot.events.filter(event => event.actionId === eventId) : snapshot.events });
 }
 
 export async function persistAction(

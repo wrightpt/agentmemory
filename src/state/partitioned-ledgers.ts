@@ -223,20 +223,33 @@ export async function listActionEventsForAction(
   kv: LedgerKV,
   actionId: string,
 ): Promise<ActionEvent[]> {
-  const bucket = actionEventBucket(actionId);
+  return listActionEventsForActions(kv, [actionId]);
+}
+
+/** One complete legacy scan and one scan per selected partition for a native
+ * read cohort. This is not a history index or a cache: imports and legacy-mode
+ * rollback writes still participate in every observation. */
+export async function listActionEventsForActions(
+  kv: LedgerKV,
+  actionIds: readonly string[],
+): Promise<ActionEvent[]> {
+  if (actionIds.length > 64) throw new Error("Action event read batch exceeds 64 IDs");
+  const ids = new Set(actionIds);
+  if (!ids.size) return [];
+  const buckets = new Set([...ids].map(actionEventBucket));
   const partitionedScopes = (
     await partitionScopes(kv, isActionEventPartitionScope)
-  ).filter((scope) => scope.endsWith(`:${bucket}`));
+  ).filter((scope) => buckets.has(scope.slice(scope.lastIndexOf(":") + 1)));
   const entries = await listEntries<ActionEvent>(kv, partitionedScopes);
   const partitioned = dedupeById(entries).filter(
-    (event) => event.actionId === actionId,
+    (event) => ids.has(event.actionId),
   );
 
   // A write-mode rollback can append legacy events even for actions born in
   // partitions. Imports and migrations also make creation rows insufficient
   // evidence that the legacy collection contains no relevant history.
   const legacy = (await kv.list<ActionEvent>(KV.actionEvents)).filter(
-    (event) => event.actionId === actionId,
+    (event) => ids.has(event.actionId),
   );
   return sortActionEvents(
     dedupeById([
