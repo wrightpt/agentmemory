@@ -1007,6 +1007,20 @@ export interface Lease {
   expiresAt: string;
   renewedAt?: string;
   status: "active" | "expired" | "released";
+  /** Additive native row mutation order; absent on legacy rows. */
+  observationVersion?: number;
+  observationDigest?: string;
+  observationLegacyDigest?: string;
+}
+
+export interface ActionLeaseObservation {
+  protocol: "action-lease-observation/v1";
+  projectId: string;
+  actionId: string;
+  state: "active" | "none";
+  lease: { id: string; agentId: string; acquiredAt: string; renewedAt: string | null; expiresAt: string } | null;
+  observedAt: string;
+  watermark: { sequence: number; digest: string };
 }
 
 export type InputIntentStatus =

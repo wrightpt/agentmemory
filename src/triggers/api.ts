@@ -3242,7 +3242,19 @@ export function registerApiTriggers(
       if (!actionId) {
         return { status_code: 400, body: { error: "actionId required" } };
       }
-      const result = await sdk.trigger({ function_id: "mem::action-get", payload: { actionId } });
+      const projectId = req.query_params?.["projectId"];
+      const includeLease = req.query_params?.["includeLeaseObservation"];
+      const leaseOnly = req.query_params?.["leaseOnly"];
+      if ([includeLease, leaseOnly].some(value => value !== undefined && value !== "true" && value !== "false")
+          || (leaseOnly === "true" && includeLease !== "true")
+          || (includeLease === "true" && (typeof projectId !== "string" || !projectId))) {
+        return { status_code: 400, body: { success: false, error: "lease_observation_scope_required" } };
+      }
+      const result = await sdk.trigger({ function_id: "mem::action-get", payload: { actionId,
+        ...(projectId !== undefined ? { projectId } : {}),
+        ...(includeLease !== undefined ? { includeLeaseObservation: includeLease === "true" } : {}),
+        ...(leaseOnly !== undefined ? { leaseOnly: leaseOnly === "true" } : {}),
+      } });
       return { status_code: 200, body: result };
     },
   );

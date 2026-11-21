@@ -12,6 +12,7 @@ import {
 } from "./action-store.js";
 import { propagateActionCompletion } from "./actions.js";
 import { classifyAction } from "./action-model.js";
+import { writeVersionedLease } from "./action-lease-observation.js";
 
 const DEFAULT_LEASE_TTL_MS = 10 * 60 * 1000;
 const MAX_LEASE_TTL_MS = 60 * 60 * 1000;
@@ -91,7 +92,7 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
           status: "active",
         };
 
-        await kv.set(KV.leases, lease.id, lease);
+        await writeVersionedLease(kv, lease, existingLeases);
         const before = { ...action };
         action.status = "active";
         action.lifecycle = "active";
@@ -151,7 +152,7 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
         }
 
         activeLease.status = "released";
-        await kv.set(KV.leases, activeLease.id, activeLease);
+        await writeVersionedLease(kv, activeLease, leases);
         await recordAudit(kv, "lease_release", "mem::lease-release", [activeLease.id], {
           actionId: data.actionId,
           agentId: data.agentId,
@@ -233,7 +234,7 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
         const beforeLease = { ...activeLease };
         activeLease.expiresAt = new Date(base + ttl).toISOString();
         activeLease.renewedAt = now.toISOString();
-        await kv.set(KV.leases, activeLease.id, activeLease);
+        await writeVersionedLease(kv, activeLease, leases);
         await recordAudit(kv, "lease_renew", "mem::lease-renew", [activeLease.id], {
           actionId: data.actionId,
           agentId: data.agentId,
@@ -271,7 +272,7 @@ export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
                 return false;
               }
               currentLease.status = "expired";
-              await kv.set(KV.leases, currentLease.id, currentLease);
+              await writeVersionedLease(kv, currentLease);
               await recordAudit(kv, "lease_release", "mem::lease-cleanup", [currentLease.id], {
                 action: "expire",
                 actionId: currentLease.actionId,
