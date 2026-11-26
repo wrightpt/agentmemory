@@ -62,6 +62,7 @@ export const KV = {
   workAuthority: "mem:work-authority",
   inputIntents: "mem:input-intents",
   leases: "mem:leases",
+  leaseIndex: "mem:lease-index",
   routines: "mem:routines",
   routineRuns: "mem:routine-runs",
   signals: "mem:signals",

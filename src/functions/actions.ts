@@ -14,7 +14,7 @@ import type {
   Sentinel,
 } from "../types.js";
 import { recordAudit } from "./audit.js";
-import { assertActionAuthority, fencedProjects, getWorkAuthority } from "../state/work-authority.js";
+import { actionProject, assertActionAuthority, fencedProjects, getWorkAuthority } from "../state/work-authority.js";
 import {
   isActionApprovalState,
   isActionLifecycle,
@@ -500,10 +500,17 @@ export function registerActionsFunction(sdk: ISdk, kv: StateKV): void {
       });
       const action = snapshot.actions.find((candidate) => candidate.id === data.actionId);
       if (!action) return { success: false, error: "action not found" };
-      const edges = snapshot.edges.filter(
+      let edges = snapshot.edges.filter(
         (edge) => edge.sourceActionId === data.actionId || edge.targetActionId === data.actionId,
       );
-      const children = snapshot.actions.filter((candidate) => candidate.parentId === data.actionId);
+      let children = snapshot.actions.filter((candidate) => candidate.parentId === data.actionId);
+      if (data.includeLeaseObservation) {
+        // A project-scoped read returns only that project's records. Callers that
+        // omit the scope keep the historical unscoped response.
+        const inScope = new Map(snapshot.actions.map((candidate) => [candidate.id, actionProject(candidate) === data.projectId]));
+        children = children.filter((child) => inScope.get(child.id) === true);
+        edges = edges.filter((edge) => inScope.get(edge.sourceActionId) === true && inScope.get(edge.targetActionId) === true);
+      }
       const events = snapshot.events.filter((event) => event.actionId === data.actionId).sort(
         (left, right) => left.revision - right.revision || left.timestamp.localeCompare(right.timestamp) || left.id.localeCompare(right.id),
       );

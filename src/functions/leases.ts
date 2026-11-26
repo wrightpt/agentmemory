@@ -12,12 +12,13 @@ import {
 } from "./action-store.js";
 import { propagateActionCompletion } from "./actions.js";
 import { classifyAction } from "./action-model.js";
-import { writeVersionedLease } from "./action-lease-observation.js";
+import { startLeaseIndex, writeVersionedLease } from "./action-lease-observation.js";
 
 const DEFAULT_LEASE_TTL_MS = 10 * 60 * 1000;
 const MAX_LEASE_TTL_MS = 60 * 60 * 1000;
 
 export function registerLeasesFunction(sdk: ISdk, kv: StateKV): void {
+  startLeaseIndex(kv);
   sdk.registerFunction("mem::lease-acquire", 
     async (data: { actionId: string; agentId: string; ttlMs?: number }) => {
       if (!data.actionId || !data.agentId) {

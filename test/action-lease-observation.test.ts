@@ -3,7 +3,7 @@ import { registerActionsFunction } from "../src/functions/actions.js";
 import { registerLeasesFunction } from "../src/functions/leases.js";
 import { registerDiagnosticsFunction } from "../src/functions/diagnostics.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
-import { observeActionLease, projectActionLease } from "../src/functions/action-lease-observation.js";
+import { observeActionLease, projectActionLease, rebuildLeaseIndex } from "../src/functions/action-lease-observation.js";
 import { persistAction } from "../src/functions/action-store.js";
 import { leaseRetentionReason } from "../src/functions/stale-cleanup-policy.js";
 import { withKeyedLock } from "../src/state/keyed-mutex.js";
@@ -38,6 +38,7 @@ describe("action-lease-observation/v1", () => {
     registerLeasesFunction(sdk as never, kv as never);
     registerDiagnosticsFunction(sdk as never, kv as never);
     await kv.set(KV.actions, "act_target", action());
+    await rebuildLeaseIndex(kv); // the boot rebuild started by registration
   });
   afterEach(() => vi.useRealTimers());
 
@@ -59,7 +60,7 @@ describe("action-lease-observation/v1", () => {
     const seen = await get({ leaseOnly: true });
     expect(seen.success).toBe(true); expect(seen.readMode).toBe("lease-only");
     expect(seen).not.toHaveProperty("events"); expect(seen).not.toHaveProperty("edges");
-    expect(lists).toEqual([KV.leases]); expect(writes).toEqual([]);
+    expect(lists).toEqual([]); expect(writes).toEqual([]);
     expect(seen.leaseObservation).toMatchObject({ state: "active", watermark: { sequence: 2 }, lease: { agentId: "wsh:worker" } });
   });
 
@@ -119,6 +120,7 @@ describe("action-lease-observation/v1", () => {
   it("supports valid legacy rows without writes, stamps next native renewal, and detects older-binary changes", async () => {
     await kv.set(KV.actions, "act_target", { ...action(), status: "active", lifecycle: "active", assignedTo: "wsh:worker" });
     await kv.set(KV.leases, "lse_legacy", legacy());
+    await rebuildLeaseIndex(kv); // a restart indexes rows that predate this binary
     expect((await get({ leaseOnly: true })).leaseObservation.watermark.sequence).toBe(0);
     expect(await kv.get(KV.leases, "lse_legacy")).not.toHaveProperty("observationVersion");
     await sdk.trigger("mem::lease-renew", { actionId: "act_target", agentId: "wsh:worker", ttlMs: 1000 });
@@ -134,6 +136,7 @@ describe("action-lease-observation/v1", () => {
     await sdk.trigger("mem::lease-release", { actionId: "act_target", agentId: "wsh:worker" });
     await kv.set(KV.leases, "lse_old_binary", legacy({ id: "lse_old_binary" }));
     await kv.set(KV.actions, "act_target", { ...action(), status: "active", lifecycle: "active", assignedTo: "wsh:worker" });
+    await rebuildLeaseIndex(kv); // the rolled-back binary's insert is seen after this binary restarts
     expect(await get({ leaseOnly: true })).toMatchObject({ success: false, error: "lease_observation_unversioned_change" });
     await sdk.trigger("mem::lease-renew", { actionId: "act_target", agentId: "wsh:worker", ttlMs: 1000 });
     const next = await get({ leaseOnly: true });
@@ -154,6 +157,7 @@ describe("action-lease-observation/v1", () => {
   it("legacy expiry, successor acquisition and late cleanup of old rows keep order and the current holder", async () => {
     await kv.set(KV.actions, "act_target", { ...action(), status: "active", lifecycle: "active", assignedTo: "wsh:worker" });
     await kv.set(KV.leases, "lse_legacy", legacy());
+    await rebuildLeaseIndex(kv);
     vi.setSystemTime(start + 1000);
     expect((await get({ leaseOnly: true })).leaseObservation.watermark.sequence).toBe(1);
     await acquire("wsh:worker"); // same durable holder, but a new lease after expiry
@@ -169,14 +173,25 @@ describe("action-lease-observation/v1", () => {
     await kv.set(KV.actions, "act_target", { ...action(), status: "active", lifecycle: "active", assignedTo: "wsh:worker" });
     await kv.set(KV.leases, "lse_legacy", legacy());
     await kv.set(KV.leases, "lse_other", legacy({ id: "lse_other", agentId: "wsh:other" }));
+    await rebuildLeaseIndex(kv);
     expect(await get({ leaseOnly: true })).toMatchObject({ success: false, error: "lease_observation_conflict" });
     await kv.delete(KV.leases, "lse_other");
     await kv.set(KV.actions, "act_target", { ...action(), status: "active", assignedTo: "wsh:other" });
     expect(await get({ leaseOnly: true })).toMatchObject({ success: false, error: "lease_observation_holder_conflict" });
     await kv.set(KV.leases, "bad", { id: "bad" });
+    await rebuildLeaseIndex(kv);
     expect(await get({ leaseOnly: true })).toMatchObject({ success: false, error: "lease_observation_unscoped_row" });
-    kv.list = async () => { throw Error("native read failed"); };
+    await kv.delete(KV.leases, "bad"); await rebuildLeaseIndex(kv);
+    const getRow = kv.get;
+    kv.get = async <T>(scope: string, key: string): Promise<T | null> => {
+      if (scope === KV.leases) throw Error("native read failed");
+      return getRow<T>(scope, key);
+    };
     expect(await get({ leaseOnly: true })).toMatchObject({ success: false, error: "lease_observation_unavailable" });
+    kv.get = getRow;
+    kv.list = async () => { throw Error("native read failed"); };
+    await expect(rebuildLeaseIndex(kv)).rejects.toThrow("native read failed");
+    expect(await get({ leaseOnly: true })).toMatchObject({ success: false, error: "lease_observation_index_unavailable" });
   });
 
   it("requires the same explicit scope/opt-in and refuses migrated or frozen authority without fallback", async () => {
@@ -254,6 +269,104 @@ describe("action-lease-observation/v1", () => {
       expect(() => projectActionLease(action(), [legacy({ status: "released", ...patch })], project, start)).toThrow();
     }
     await expect(observeActionLease(kv as never, project, "missing")).rejects.toThrow("lease_observation_action_missing");
+  });
+
+  it("reads one action's indexed rows: unrelated retained leases add no storage work and no collection list", async () => {
+    await acquire();
+    const measure = async () => {
+      const calls: string[] = [];
+      const list = kv.list, getRow = kv.get;
+      kv.list = async <T>(scope: string) => { calls.push(`list:${scope}`); return list<T>(scope); };
+      kv.get = async <T>(scope: string, key: string) => { calls.push(`get:${scope}`); return getRow<T>(scope, key); };
+      try { expect((await get({ leaseOnly: true })).success).toBe(true); } finally { kv.list = list; kv.get = getRow; }
+      return calls;
+    };
+    const before = await measure();
+    for (let i = 0; i < 2000; i++) {
+      await kv.set(KV.leases, `lse_other_${i}`, legacy({ id: `lse_other_${i}`, actionId: `act_other_${i % 50}`, status: "released" }));
+    }
+    await rebuildLeaseIndex(kv);
+    const after = await measure();
+    expect(after).toEqual(before);
+    expect(after.some(call => call.startsWith("list:"))).toBe(false);
+  });
+
+  it("an unrelated action read and mutation complete while an observation reads its lease rows", async () => {
+    await acquire();
+    const unrelated = { ...action(), id: "act_unrelated", title: "Unrelated" };
+    await kv.set(KV.actions, "act_unrelated", unrelated);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(yes => { release = yes; }), inside = new Promise<void>(yes => { entered = yes; });
+    const getRow = kv.get;
+    kv.get = async <T>(scope: string, key: string): Promise<T | null> => {
+      if (scope === KV.leases) { entered(); await gate; }
+      return getRow<T>(scope, key);
+    };
+    const observed = get({ leaseOnly: true });
+    await inside;
+    expect((await sdk.trigger("mem::action-get", { actionId: "act_unrelated" }) as Get).success).toBe(true);
+    await persistAction(kv as never, { ...unrelated, title: "changed meanwhile" }, { before: unrelated });
+    kv.get = getRow; release();
+    const result = await observed;
+    expect(result.success).toBe(true); expect(result.leaseObservation.state).toBe("active");
+  });
+
+  it("a restart rebuild indexes older rows, keeps rows written during it and drops deleted ones", async () => {
+    await kv.set(KV.actions, "act_target", { ...action(), status: "active", lifecycle: "active", assignedTo: "wsh:worker" });
+    await kv.set(KV.leases, "lse_legacy", legacy());
+    await kv.set(KV.leaseIndex, "act_target", { actionId: "act_target", leaseIds: ["lse_deleted"] });
+    await rebuildLeaseIndex(kv);
+    expect(await kv.get(KV.leaseIndex, "act_target")).toEqual({ actionId: "act_target", leaseIds: ["lse_legacy"] });
+    expect((await get({ leaseOnly: true })).leaseObservation).toMatchObject({ state: "active", watermark: { sequence: 0 } });
+    await kv.set(KV.actions, "act_second", { ...action(), id: "act_second" });
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(yes => { release = yes; }), inside = new Promise<void>(yes => { entered = yes; });
+    const list = kv.list;
+    kv.list = async <T>(scope: string) => {
+      const rows = await list<T>(scope);
+      if (scope === KV.leaseIndex) { entered(); await gate; }
+      return rows;
+    };
+    const rebuilt = rebuildLeaseIndex(kv);
+    await inside;
+    const acquired = await sdk.trigger("mem::lease-acquire", { actionId: "act_second", agentId: "wsh:second", ttlMs: 1000 }) as { success: boolean; lease: Lease };
+    expect(acquired.success).toBe(true);
+    kv.list = list; release(); await rebuilt;
+    expect(await kv.get(KV.leaseIndex, "act_second")).toEqual({ actionId: "act_second", leaseIds: [acquired.lease.id] });
+  });
+
+  it("a project-scoped full read returns only that project's children and edges; the unscoped read is unchanged", async () => {
+    await kv.set(KV.actions, "act_child_own", { ...action(), id: "act_child_own", parentId: "act_target" });
+    await kv.set(KV.actions, "act_child_foreign", { ...action(), id: "act_child_foreign", project: "other-project",
+      projectId: "other-project", parentId: "act_target", description: "foreign detail" });
+    await kv.set(KV.actionEdges, "edge_own", { id: "edge_own", type: "requires", sourceActionId: "act_target",
+      targetActionId: "act_child_own", createdAt: iso() });
+    await kv.set(KV.actionEdges, "edge_foreign", { id: "edge_foreign", type: "requires", sourceActionId: "act_target",
+      targetActionId: "act_child_foreign", createdAt: iso() });
+    type Full = Get & { children: Action[]; edges: Array<{ id: string }> };
+    const unscoped = await sdk.trigger("mem::action-get", { actionId: "act_target" }) as Full;
+    expect(unscoped.children.map(child => child.id).sort()).toEqual(["act_child_foreign", "act_child_own"]);
+    expect(unscoped.edges.map(edge => edge.id).sort()).toEqual(["edge_foreign", "edge_own"]);
+    const scoped = await get() as Full;
+    expect(scoped.success).toBe(true);
+    expect(scoped.children.map(child => child.id)).toEqual(["act_child_own"]);
+    expect(scoped.edges.map(edge => edge.id)).toEqual(["edge_own"]);
+    expect(JSON.stringify(scoped)).not.toContain("other-project");
+    expect(JSON.stringify(scoped)).not.toContain("foreign detail");
+  });
+
+  it("observes opaque holder IDs accepted by native lease callers, before and after release", async () => {
+    const holderId = "agent/review@example";
+    expect((await acquire(holderId)).success).toBe(true);
+    const held = await get({ leaseOnly: true });
+    expect(held.success).toBe(true);
+    expect(held.leaseObservation).toMatchObject({ state: "active", lease: { agentId: holderId } });
+    await sdk.trigger("mem::lease-release", { actionId: "act_target", agentId: holderId });
+    const released = await get({ leaseOnly: true });
+    expect(released.success).toBe(true); expect(released.leaseObservation.state).toBe("none");
+    for (const bad of ["", "x".repeat(513), "agent\u0007bell", "agent\u202eflip"]) {
+      expect(() => projectActionLease(action(), [legacy({ agentId: bad, status: "released" })], project, start)).toThrow("lease_observation_row_invalid");
+    }
   });
 
   it("REST forwards strict opt-in and cheap mode without changing legacy payload shape", async () => {
