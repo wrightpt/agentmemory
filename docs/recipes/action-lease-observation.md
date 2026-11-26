@@ -44,9 +44,10 @@ cut. Concurrent action changes return `lease_observation_action_changed`; the
 server does not combine old history/edges/children and a later committed action
 store cut. The full opt-in also requires the same collection revision across
 its two cuts. Lease-only renewals do not advance that action collection revision.
-A project-scoped full read returns only children and edges whose actions belong
-to the requested project. Reads that omit the opt-in keep their historical
-unscoped response.
+A project-scoped full read returns no record of another project's action: not
+its child record, nor a live edge or an edge event in the history that reaches
+it. Edges to gates that are not actions (checkpoints, sentinels) stay. Reads
+that omit the opt-in keep their historical unscoped response.
 
 Holder IDs are the native opaque strings accepted by acquire, MCP, REST and the
 todo CLI: at most 512 characters, without control or bidirectional-format
@@ -69,11 +70,10 @@ projections are written by this observation.
 
 Lock order is the existing `mem:action:<id>` lock followed by `mem:actions:v2`.
 This serializes the cut with native renewals and ordinary action changes without
-reversing mutation lock order. The store lock covers only collection state, the
-exact action and its authority. The action's lease rows are read after it is
-released, still under the per-action lock that every lease writer holds, so the
-cut is unchanged and unrelated action reads and mutations never wait on lease
-rows. A pending native action journal is explicitly
+reversing mutation lock order. Both locks are held for the whole read, so the
+action, its authority, its lease rows and the sampling instant form one cut;
+ordinary action updates, collection and orphan cleanup cannot land inside it.
+The work under the store lock is bounded by this action's own lease history. A pending native action journal is explicitly
 refused (`lease_observation_action_pending`), not repaired by this cheap read.
 Normal action APIs retain their existing recovery behavior.
 
@@ -109,18 +109,20 @@ clock must not be treated as forward evidence or a new grant.
 
 ## Lease index
 
-`mem:lease-index` maps an action ID to the keys of its native lease rows. It is
-derived, not a second authority. Each process rebuilds it from the native lease
+Each action has a derived index scope, `mem:lease-index:<actionId>`, holding one
+key per native lease row. It is not a second authority and holds no lease
+state. Keys are only ever added, never replaced or pruned, so a late, repeated
+or concurrent write (including a timed-out write that completes later) can add
+a key but cannot hide another one. Writers index a key before writing its row,
+so an interrupted or unknown write leaves a key whose row is absent, which
+readers skip, never a row they cannot find. Each process indexes the native
 ledger once at boot, outside request handling, because a rolled-back binary
-writes lease rows without maintaining it. The rebuild takes each action's lock
-while it merges, keeps keys this binary indexed after its scan, and drops keys
-whose rows are gone. Writers index a key before writing its row, so an
-interrupted write leaves a key that readers skip, never a row they cannot find.
+writes lease rows without maintaining the index.
 
-Observations that arrive during the boot rebuild wait for it. If it fails they
+Observations that arrive during the boot indexing wait for it. If it fails they
 refuse `lease_observation_index_unavailable` and the next observation retries.
-Writers fall back to the full ledger until the index is ready. An entry that
-names another action refuses `lease_observation_index_invalid`. A rebuild that
+Writers fall back to the full ledger until the index is ready. A key or row
+that names another action refuses `lease_observation_index_invalid`. A rebuild that
 finds an unscopable row refuses every observation with
 `lease_observation_unscoped_row` until a later rebuild no longer finds one.
 
@@ -155,9 +157,10 @@ history scans, renewal stability, natural expiry before cleanup, release/heal,
 legacy rows, old-binary changes, retained version floor, conflicting records,
 scope/fence failures, native read failure, action-cut races, per-action lock
 ordering, backward-clock detection and strict REST flag forwarding. It also
-covers index-bounded reads that ignore unrelated retained leases, unrelated
-action reads and mutations proceeding during a lease read, the restart rebuild,
-project-scoped children and edges, and opaque holder IDs. Existing
+covers index-bounded reads that ignore unrelated retained leases, action
+updates, collection and orphan heal waiting for an observation, a late index
+write, the restart indexing, project-scoped children, edges and history with
+gates kept, and opaque holder IDs. Existing
 lease, diagnostics and action suites remain the native mutation regression gate.
 Source qualification is separate from producer/consumer wire review and serving
 activation. Do not infer live lease evidence until both installed sides agree.

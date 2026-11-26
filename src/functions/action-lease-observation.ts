@@ -9,7 +9,7 @@ import type { Action, ActionLeaseObservation, Lease } from "../types.js";
 
 const MAX_VERSION = Math.floor((Number.MAX_SAFE_INTEGER - 1) / 2);
 const MAX_ACTION_LEASES = 50000;
-const READ_BATCH = 64;
+const BATCH = 64;
 const identity = (value: unknown): value is string => typeof value === "string"
   && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(value);
 // Native acquire, MCP, REST and the todo CLI accept opaque holder strings. A
@@ -36,39 +36,49 @@ function sourceFields(lease: Lease) {
 const legacyDigest = (rows: Lease[]) => digest(rows.filter(row => row.observationVersion === undefined)
   .map(sourceFields).sort((a, b) => a.id.localeCompare(b.id)));
 
-// A derived per-action index of native lease keys keeps an observation bounded
-// by its own action's history. The native ledger stays authoritative: each
-// process rebuilds the index from it once at boot, because a rolled-back binary
-// writes lease rows without maintaining it, and the current binary keeps entries
-// current under the existing per-action lock.
-type LeaseIndexEntry = { actionId: string; leaseIds: string[] };
+// A derived index keeps an observation bounded by its own action's lease history.
+// Each action has its own scope holding one key per native lease row. Keys are
+// only ever added, never replaced or pruned, so a late, repeated or concurrent
+// write can add a key but cannot hide another one. A key whose row is absent
+// (retention removed it, or its row write never happened) is skipped. The native
+// ledger stays authoritative: each process indexes it once at boot, because a
+// rolled-back binary writes lease rows without maintaining the index.
+type LeaseIndexKey = { actionId: string; leaseId: string };
 const ready = new WeakSet<object>();
 const tainted = new WeakSet<object>();
 const rebuilds = new WeakMap<object, Promise<void>>();
 const generations = new WeakMap<object, number>();
 
-function entryIds(entry: LeaseIndexEntry | null | undefined, actionId: string): string[] {
-  if (entry === null || entry === undefined) return [];
-  if (entry.actionId !== actionId || !Array.isArray(entry.leaseIds) || entry.leaseIds.length > MAX_ACTION_LEASES
-      || entry.leaseIds.some(id => !identity(id))) refuse("lease_observation_index_invalid");
-  return entry.leaseIds;
+async function indexLease(kv: StateKV, lease: Lease): Promise<void> {
+  const scope = KV.leaseIndex(lease.actionId);
+  const key = await kv.get<LeaseIndexKey>(scope, lease.id);
+  if (key?.actionId === lease.actionId && key.leaseId === lease.id) return;
+  await kv.set(scope, lease.id, { actionId: lease.actionId, leaseId: lease.id });
 }
 
-async function readRows(kv: StateKV, ids: string[]): Promise<Array<Lease | null>> {
-  const rows: Array<Lease | null> = [];
-  for (let i = 0; i < ids.length; i += READ_BATCH) {
-    rows.push(...await Promise.all(ids.slice(i, i + READ_BATCH).map(id => kv.get<Lease>(KV.leases, id))));
+async function readRows(kv: StateKV, ids: string[]): Promise<Lease[]> {
+  const rows: Lease[] = [];
+  for (let i = 0; i < ids.length; i += BATCH) {
+    for (const row of await Promise.all(ids.slice(i, i + BATCH).map(id => kv.get<Lease>(KV.leases, id)))) {
+      if (row !== null && row !== undefined) rows.push(row);
+    }
   }
   return rows;
 }
 
-/** One action's lease rows through the derived index, or null before this process
- * has rebuilt it. Retention deletes rows only for removed actions, so an absent
- * row is skipped; a row that names another action means the index is wrong. */
+/** One action's lease rows through its index scope, or null before this process
+ * has indexed the ledger. A key or row that names another action means the index
+ * is wrong and refuses rather than answering. */
 async function indexedActionLeases(kv: StateKV, actionId: string): Promise<Lease[] | null> {
   if (!ready.has(kv)) return null;
-  const ids = entryIds(await kv.get<LeaseIndexEntry>(KV.leaseIndex, actionId), actionId);
-  const rows = (await readRows(kv, ids)).filter((row): row is Lease => row !== null && row !== undefined);
+  const keys = await kv.list<LeaseIndexKey>(KV.leaseIndex(actionId));
+  if (!Array.isArray(keys) || keys.length > MAX_ACTION_LEASES) refuse("lease_observation_incomplete");
+  const ids = new Set<string>();
+  for (const key of keys) {
+    if (!key || key.actionId !== actionId || !identity(key.leaseId)) refuse("lease_observation_index_invalid");
+    ids.add(key.leaseId);
+  }
+  const rows = await readRows(kv, [...ids].sort());
   if (rows.some(row => row.actionId !== actionId)) refuse("lease_observation_index_invalid");
   return rows;
 }
@@ -77,18 +87,6 @@ function invalidate(kv: StateKV): void {
   generations.set(kv, (generations.get(kv) ?? 0) + 1);
   ready.delete(kv);
   rebuildLeaseIndex(kv).catch(error => logger.warn("lease index rebuild failed", { error: String(error) }));
-}
-
-async function indexLease(kv: StateKV, lease: Lease): Promise<void> {
-  let ids: string[] = [];
-  try {
-    ids = entryIds(await kv.get<LeaseIndexEntry>(KV.leaseIndex, lease.actionId), lease.actionId);
-  } catch {
-    // A damaged entry is rebuilt from the ledger; keep this row reachable meanwhile.
-    invalidate(kv);
-  }
-  if (ids.includes(lease.id)) return;
-  await kv.set(KV.leaseIndex, lease.actionId, { actionId: lease.actionId, leaseIds: [...ids, lease.id].sort() });
 }
 
 /** Call only while holding the existing mem:action:<id> mutation lock. A version
@@ -108,8 +106,8 @@ export async function writeVersionedLease(kv: StateKV, lease: Lease, rows?: Leas
   lease.observationLegacyDigest = legacyDigest(leases.filter(row => row.actionId === lease.actionId && row.id !== lease.id));
   lease.observationDigest = digest(sourceFields(lease));
   const scoped = identity(lease.actionId) && identity(lease.id);
-  // Index before the row: an interrupted write leaves an id whose row is absent,
-  // which readers skip, never a row that readers cannot find.
+  // Index before the row: an interrupted or unknown write leaves a key whose row
+  // is absent, which readers skip, never a row that readers cannot find.
   if (scoped) await indexLease(kv, lease);
   await kv.set(KV.leases, lease.id, lease);
   if (!scoped) {
@@ -121,43 +119,21 @@ export async function writeVersionedLease(kv: StateKV, lease: Lease, rows?: Leas
 
 async function rebuildOnce(kv: StateKV): Promise<boolean> {
   const rows = await kv.list<Lease>(KV.leases);
-  const scanned = new Map<string, Set<string>>();
   let unscoped = false;
+  const scoped: Lease[] = [];
   for (const row of rows) {
-    if (!row || !identity(row.actionId) || !identity(row.id)) { unscoped = true; continue; }
-    let ids = scanned.get(row.actionId);
-    if (!ids) scanned.set(row.actionId, ids = new Set<string>());
-    ids.add(row.id);
+    if (!row || !identity(row.actionId) || !identity(row.id)) unscoped = true;
+    else scoped.push(row);
   }
-  const actions = new Set(scanned.keys());
-  for (const entry of await kv.list<LeaseIndexEntry>(KV.leaseIndex)) {
-    if (entry && identity(entry.actionId)) actions.add(entry.actionId);
-  }
-  for (const actionId of [...actions].sort()) {
-    await withKeyedLock(`mem:action:${actionId}`, async () => {
-      const entry = await kv.get<LeaseIndexEntry>(KV.leaseIndex, actionId);
-      const seen = new Set(scanned.get(actionId) ?? []);
-      let prior: string[] = [];
-      try { prior = entryIds(entry, actionId); } catch { prior = []; }
-      // Ids this binary indexed after the scan still have rows; deleted rows do not.
-      for (const id of prior) {
-        if (seen.has(id)) continue;
-        const row = await kv.get<Lease>(KV.leases, id);
-        if (row && row.actionId === actionId) seen.add(id);
-      }
-      const ids = [...seen].sort();
-      const unchanged = entry?.actionId === actionId && Array.isArray(entry.leaseIds)
-        && entry.leaseIds.length === ids.length && entry.leaseIds.every((id, index) => id === ids[index]);
-      if (unchanged) return;
-      if (ids.length) await kv.set(KV.leaseIndex, actionId, { actionId, leaseIds: ids });
-      else await kv.delete(KV.leaseIndex, actionId);
-    });
+  // Adds only. Writers index their own rows meanwhile, so no lock is needed.
+  for (let i = 0; i < scoped.length; i += BATCH) {
+    await Promise.all(scoped.slice(i, i + BATCH).map(row => indexLease(kv, row)));
   }
   return unscoped;
 }
 
-/** Rebuild this process's derived lease index from the native ledger. A pass that
- * overlaps an invalidation repeats; readiness is granted only to a clean pass. */
+/** Index the native ledger for this process. A pass that overlaps an
+ * invalidation repeats; readiness is granted only to a clean pass. */
 export function rebuildLeaseIndex(kv: StateKV): Promise<void> {
   const inflight = rebuilds.get(kv);
   if (inflight) return inflight;
@@ -176,7 +152,7 @@ export function rebuildLeaseIndex(kv: StateKV): Promise<void> {
   return run;
 }
 
-/** Boot rebuild, outside request handling. Observations that arrive first wait
+/** Boot indexing, outside request handling. Observations that arrive first wait
  * for it; writers use the full ledger until it is ready. */
 export function startLeaseIndex(kv: StateKV): void {
   rebuildLeaseIndex(kv).catch(error => logger.warn("lease index rebuild failed; observations retry it", { error: String(error) }));
@@ -257,29 +233,26 @@ export function projectActionLease(action: Action, rows: Lease[], projectId: str
 }
 
 /** Cheap read-only cut. Preserve mutation lock order: per-action then the
- * action-store lock, which is held only for collection state, the exact action
- * and its authority. Lease rows change only under the per-action lock, held for
- * the whole read, so rows read after leaving the store lock belong to the same
- * cut. Pending recovery is refused, not repaired by this read. Normal action
- * APIs retain their existing recovery behavior. */
+ * action-store lock, both held for the whole read. Ordinary action updates take
+ * the store lock, so the action, its authority, its lease rows and the sampling
+ * instant form one cut, and the work under the lock is bounded by this action's
+ * own lease history. Pending recovery is refused, not repaired by this read.
+ * Normal action APIs retain their existing recovery behavior. */
 export async function observeActionLease(kv: StateKV, projectId: string, actionId: string) {
   if (!identity(projectId) || !identity(actionId)) refuse("lease_observation_scope_required");
   await leaseIndexReady(kv);
-  return withKeyedLock(`mem:action:${actionId}`, async () => {
-    const cut = await withActionStoreLock(async () => {
-      const state = await peekActionCollectionState(kv);
-      if (state.pending) refuse("lease_observation_action_pending");
-      const action = await kv.get<Action>(KV.actions, actionId);
-      if (!action) refuse("lease_observation_action_missing");
-      if (actionProject(action!) !== projectId) refuse("lease_observation_scope_mismatch");
-      const authority = await getWorkAuthority(kv, projectId);
-      if (authority !== null) refuse("lease_observation_authority_unavailable");
-      return { action: action!, revision: state.revision };
-    });
+  return withKeyedLock(`mem:action:${actionId}`, () => withActionStoreLock(async () => {
+    const state = await peekActionCollectionState(kv);
+    if (state.pending) refuse("lease_observation_action_pending");
+    const action = await kv.get<Action>(KV.actions, actionId);
+    if (!action) refuse("lease_observation_action_missing");
+    if (actionProject(action!) !== projectId) refuse("lease_observation_scope_mismatch");
+    const authority = await getWorkAuthority(kv, projectId);
+    if (authority !== null) refuse("lease_observation_authority_unavailable");
     const rows = await indexedActionLeases(kv, actionId);
     if (rows === null) refuse("lease_observation_index_unavailable");
     if (tainted.has(kv)) refuse("lease_observation_unscoped_row");
-    const leaseObservation = projectActionLease(cut.action, rows!, projectId, Date.now());
-    return structuredClone({ action: cut.action, revision: cut.revision, workAuthority: null, leaseObservation });
-  });
+    const leaseObservation = projectActionLease(action!, rows!, projectId, Date.now());
+    return structuredClone({ action: action!, revision: state.revision, workAuthority: null, leaseObservation });
+  }));
 }

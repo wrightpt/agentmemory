@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerActionsFunction } from "../src/functions/actions.js";
 import { registerLeasesFunction } from "../src/functions/leases.js";
 import { registerDiagnosticsFunction } from "../src/functions/diagnostics.js";
+import { registerCheckpointsFunction } from "../src/functions/checkpoints.js";
 import { registerApiTriggers } from "../src/triggers/api.js";
 import { observeActionLease, projectActionLease, rebuildLeaseIndex } from "../src/functions/action-lease-observation.js";
 import { persistAction } from "../src/functions/action-store.js";
@@ -23,6 +24,8 @@ function legacy(extra: Partial<Lease> = {}): Lease {
   return { id: "lse_legacy", actionId: "act_target", agentId: "wsh:worker", acquiredAt: iso(-1000),
     expiresAt: iso(1000), status: "active", ...extra };
 }
+// Lets every unblocked promise chain run to completion without advancing fake timers.
+const settle = async () => { for (let i = 0; i < 500; i++) await Promise.resolve(); };
 type Get = { success: boolean; error?: string; action: Action; leaseObservation: ActionLeaseObservation; revision: number; events?: unknown[]; readMode?: string };
 
 describe("action-lease-observation/v1", () => {
@@ -60,7 +63,7 @@ describe("action-lease-observation/v1", () => {
     const seen = await get({ leaseOnly: true });
     expect(seen.success).toBe(true); expect(seen.readMode).toBe("lease-only");
     expect(seen).not.toHaveProperty("events"); expect(seen).not.toHaveProperty("edges");
-    expect(lists).toEqual([]); expect(writes).toEqual([]);
+    expect(lists).toEqual([KV.leaseIndex("act_target")]); expect(writes).toEqual([]);
     expect(seen.leaseObservation).toMatchObject({ state: "active", watermark: { sequence: 2 }, lease: { agentId: "wsh:worker" } });
   });
 
@@ -288,13 +291,12 @@ describe("action-lease-observation/v1", () => {
     await rebuildLeaseIndex(kv);
     const after = await measure();
     expect(after).toEqual(before);
-    expect(after.some(call => call.startsWith("list:"))).toBe(false);
+    expect(after.filter(call => call.startsWith("list:"))).toEqual([`list:${KV.leaseIndex("act_target")}`]);
   });
 
-  it("an unrelated action read and mutation complete while an observation reads its lease rows", async () => {
-    await acquire();
-    const unrelated = { ...action(), id: "act_unrelated", title: "Unrelated" };
-    await kv.set(KV.actions, "act_unrelated", unrelated);
+  it("an action update waits for an observation, so action, lease rows and sampling instant are one cut", async () => {
+    await acquire("wsh:worker", 1000);
+    const before = (await kv.get<Action>(KV.actions, "act_target"))!;
     let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(yes => { release = yes; }), inside = new Promise<void>(yes => { entered = yes; });
     const getRow = kv.get;
@@ -302,29 +304,85 @@ describe("action-lease-observation/v1", () => {
       if (scope === KV.leases) { entered(); await gate; }
       return getRow<T>(scope, key);
     };
-    const observed = get({ leaseOnly: true });
+    const order: string[] = [];
+    const observed = get({ leaseOnly: true }).then(value => { order.push("observed"); return value; });
     await inside;
-    expect((await sdk.trigger("mem::action-get", { actionId: "act_unrelated" }) as Get).success).toBe(true);
-    await persistAction(kv as never, { ...unrelated, title: "changed meanwhile" }, { before: unrelated });
+    vi.setSystemTime(start + 500);
+    const updated = sdk.trigger("mem::action-update", { actionId: "act_target", title: "renamed" })
+      .then(value => { order.push("updated"); return value as { success: boolean }; });
+    await settle();
+    expect(order).toEqual([]); // the update waits for the observation's store lock
+    vi.setSystemTime(start + 1001);
     kv.get = getRow; release();
     const result = await observed;
-    expect(result.success).toBe(true); expect(result.leaseObservation.state).toBe("active");
+    expect((await updated).success).toBe(true);
+    expect(order).toEqual(["observed", "updated"]);
+    expect(result.action.revision).toBe(before.revision);
+    expect(result.action.title).toBe(before.title);
+    expect(result.leaseObservation).toMatchObject({ state: "none", observedAt: iso(1001), watermark: { sequence: 3 } });
   });
 
-  it("a restart rebuild indexes older rows, keeps rows written during it and drops deleted ones", async () => {
+  it("an action update, collection and orphan heal cannot remove the observed action or lease mid-read", async () => {
+    await acquire("wsh:worker", 60000);
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(yes => { release = yes; }), inside = new Promise<void>(yes => { entered = yes; });
+    const getRow = kv.get; let once = false;
+    kv.get = async <T>(scope: string, key: string): Promise<T | null> => {
+      if (!once && scope === KV.leases) { once = true; entered(); await gate; }
+      return getRow<T>(scope, key);
+    };
+    const observed = get();
+    await inside;
+    vi.setSystemTime(start + 10);
+    const update = sdk.trigger("mem::action-update", { actionId: "act_target", lifecycle: "done" });
+    const collect = update.then(() => { vi.setSystemTime(start + 11); return sdk.trigger("mem::action-gc", { maxAgeDays: 0, dryRun: false }); });
+    await settle();
+    expect(await kv.get(KV.actions, "act_target")).not.toBeNull();
+    const heal = await sdk.trigger("mem::heal", { categories: ["leases"], dryRun: false });
+    expect(heal).toBeTruthy();
+    expect(await kv.list(KV.leases)).toHaveLength(1); // the action still exists, so its lease is no orphan
+    kv.get = getRow; release();
+    const seen = await observed;
+    await Promise.allSettled([update, collect]);
+    expect(seen.success).toBe(true);
+    expect(seen.leaseObservation).toMatchObject({ state: "active", lease: { agentId: "wsh:worker" } });
+  });
+
+  it("an index write that times out and lands late can add a key but cannot hide a newer lease", async () => {
+    const set = kv.set;
+    let late: (() => Promise<unknown>) | undefined;
+    kv.set = async <T>(scope: string, key: string, value: T): Promise<T> => {
+      if (!late && scope === KV.leaseIndex("act_target")) {
+        late = () => set(scope, key, value);
+        throw Error("state::set timed out");
+      }
+      return set(scope, key, value);
+    };
+    await expect(acquire("wsh:first")).rejects.toThrow("timed out");
+    const second = await acquire("wsh:second");
+    expect(second.success).toBe(true);
+    await late!();
+    kv.set = set;
+    const seen = await get({ leaseOnly: true });
+    expect(seen.success).toBe(true);
+    expect(seen.leaseObservation).toMatchObject({ state: "active", lease: { agentId: "wsh:second" } });
+  });
+
+  it("a restart rebuild indexes older rows and rows written during it; a key whose row is gone is skipped", async () => {
     await kv.set(KV.actions, "act_target", { ...action(), status: "active", lifecycle: "active", assignedTo: "wsh:worker" });
     await kv.set(KV.leases, "lse_legacy", legacy());
-    await kv.set(KV.leaseIndex, "act_target", { actionId: "act_target", leaseIds: ["lse_deleted"] });
+    await kv.set(KV.leaseIndex("act_target"), "lse_deleted", { actionId: "act_target", leaseId: "lse_deleted" });
     await rebuildLeaseIndex(kv);
-    expect(await kv.get(KV.leaseIndex, "act_target")).toEqual({ actionId: "act_target", leaseIds: ["lse_legacy"] });
+    const keys = await kv.list<{ leaseId: string }>(KV.leaseIndex("act_target"));
+    expect(keys.map(key => key.leaseId).sort()).toEqual(["lse_deleted", "lse_legacy"]);
     expect((await get({ leaseOnly: true })).leaseObservation).toMatchObject({ state: "active", watermark: { sequence: 0 } });
     await kv.set(KV.actions, "act_second", { ...action(), id: "act_second" });
     let release!: () => void, entered!: () => void;
     const gate = new Promise<void>(yes => { release = yes; }), inside = new Promise<void>(yes => { entered = yes; });
-    const list = kv.list;
+    const list = kv.list; let gated = false;
     kv.list = async <T>(scope: string) => {
       const rows = await list<T>(scope);
-      if (scope === KV.leaseIndex) { entered(); await gate; }
+      if (scope === KV.leases && !gated) { gated = true; entered(); await gate; }
       return rows;
     };
     const rebuilt = rebuildLeaseIndex(kv);
@@ -332,27 +390,36 @@ describe("action-lease-observation/v1", () => {
     const acquired = await sdk.trigger("mem::lease-acquire", { actionId: "act_second", agentId: "wsh:second", ttlMs: 1000 }) as { success: boolean; lease: Lease };
     expect(acquired.success).toBe(true);
     kv.list = list; release(); await rebuilt;
-    expect(await kv.get(KV.leaseIndex, "act_second")).toEqual({ actionId: "act_second", leaseIds: [acquired.lease.id] });
+    const second = await kv.list<{ leaseId: string }>(KV.leaseIndex("act_second"));
+    expect(second.map(key => key.leaseId)).toEqual([acquired.lease.id]);
   });
 
-  it("a project-scoped full read returns only that project's children and edges; the unscoped read is unchanged", async () => {
-    await kv.set(KV.actions, "act_child_own", { ...action(), id: "act_child_own", parentId: "act_target" });
-    await kv.set(KV.actions, "act_child_foreign", { ...action(), id: "act_child_foreign", project: "other-project",
-      projectId: "other-project", parentId: "act_target", description: "foreign detail" });
-    await kv.set(KV.actionEdges, "edge_own", { id: "edge_own", type: "requires", sourceActionId: "act_target",
-      targetActionId: "act_child_own", createdAt: iso() });
-    await kv.set(KV.actionEdges, "edge_foreign", { id: "edge_foreign", type: "requires", sourceActionId: "act_target",
-      targetActionId: "act_child_foreign", createdAt: iso() });
-    type Full = Get & { children: Action[]; edges: Array<{ id: string }> };
+  it("a project-scoped full read omits every record that reaches another project's action and keeps gates", async () => {
+    const foreign = await sdk.trigger("mem::action-create", { title: "Foreign child", description: "foreign detail",
+      project: "other-project", projectId: "other-project", parentId: "act_target" }) as { success: boolean; action: Action };
+    expect(foreign.success).toBe(true);
+    const own = await sdk.trigger("mem::action-create", { title: "Own child", project, projectId: project, parentId: "act_target" }) as { success: boolean; action: Action };
+    expect(own.success).toBe(true);
+    const linked = await sdk.trigger("mem::action-edge-create", { sourceActionId: "act_target", targetActionId: foreign.action.id,
+      type: "conflicts_with", metadata: { marker: "private-marker" } }) as { success: boolean };
+    expect(linked.success).toBe(true);
+    expect((await sdk.trigger("mem::action-edge-create", { sourceActionId: "act_target", targetActionId: own.action.id,
+      type: "conflicts_with" }) as { success: boolean }).success).toBe(true);
+    registerCheckpointsFunction(sdk as never, kv as never);
+    const gate = await sdk.trigger("mem::checkpoint-create", { name: "approve", type: "approval", linkedActionIds: ["act_target"] }) as { success: boolean; checkpoint: { id: string } };
+    expect(gate.success).toBe(true);
+    type Full = Get & { children: Action[]; edges: Array<{ targetActionId: string }>; events: Array<{ entityType: string; after?: { targetActionId?: string } }> };
     const unscoped = await sdk.trigger("mem::action-get", { actionId: "act_target" }) as Full;
-    expect(unscoped.children.map(child => child.id).sort()).toEqual(["act_child_foreign", "act_child_own"]);
-    expect(unscoped.edges.map(edge => edge.id).sort()).toEqual(["edge_foreign", "edge_own"]);
+    expect(unscoped.children.map(child => child.id).sort()).toEqual([foreign.action.id, own.action.id].sort());
+    expect(unscoped.edges.some(edge => edge.targetActionId === foreign.action.id)).toBe(true);
+    expect(unscoped.events.some(event => event.after?.targetActionId === foreign.action.id)).toBe(true);
     const scoped = await get() as Full;
     expect(scoped.success).toBe(true);
-    expect(scoped.children.map(child => child.id)).toEqual(["act_child_own"]);
-    expect(scoped.edges.map(edge => edge.id)).toEqual(["edge_own"]);
-    expect(JSON.stringify(scoped)).not.toContain("other-project");
-    expect(JSON.stringify(scoped)).not.toContain("foreign detail");
+    expect(scoped.children.map(child => child.id)).toEqual([own.action.id]);
+    expect(scoped.edges.map(edge => edge.targetActionId).sort()).toEqual([gate.checkpoint.id, own.action.id].sort());
+    expect(scoped.events.some(event => event.after?.targetActionId === gate.checkpoint.id)).toBe(true);
+    const text = JSON.stringify(scoped);
+    for (const leaked of [foreign.action.id, "other-project", "foreign detail", "private-marker"]) expect(text).not.toContain(leaked);
   });
 
   it("observes opaque holder IDs accepted by native lease callers, before and after release", async () => {
